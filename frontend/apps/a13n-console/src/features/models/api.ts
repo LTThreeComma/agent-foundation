@@ -1,5 +1,11 @@
 import type { Client } from "../../service-client";
-import { data, representation, type Schema } from "../../shared/api";
+import {
+  allPages,
+  data,
+  ifMatch,
+  representation,
+  type Schema,
+} from "../../shared/api";
 export type ModelScope = { kind: "workspace" | "organization"; id: string };
 /** The Workspace media understanding defaults, read by their settings section and by the Models list. */
 export function mediaDefaultsQuery(client: Client, workspaceId: string) {
@@ -7,235 +13,144 @@ export function mediaDefaultsQuery(client: Client, workspaceId: string) {
     queryKey: ["media-understanding-defaults", workspaceId],
     queryFn: ({ signal }: { signal: AbortSignal }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/media-understanding-defaults", {
-          params: { path: { workspace: workspaceId } },
+        .GET("/api/v1/workspaces/{workspace_id}/media-understanding-defaults", {
+          params: { path: { workspace_id: workspaceId } },
           signal,
         })
         .then(representation),
   };
 }
-/** Scope selects the owning endpoint once; inherited resources retain their Organization owner. */
-export function modelApi(client: Client, scope: ModelScope) {
-  const org = scope.kind === "organization",
-    organization_id = scope.id,
-    workspace_id = scope.id;
+/**
+ * Models and their providers live in the organization collection: a workspace
+ * lists its own and the shared ones and creates its own; the organization
+ * creates shared ones.
+ */
+export function modelApi(
+  client: Client,
+  organizationId: string,
+  scope: ModelScope,
+) {
+  const organization_id = organizationId,
+    workspace_id = scope.kind === "workspace" ? scope.id : null;
+  const models = (
+    signal: AbortSignal,
+    cursor: string | undefined,
+    limit = 30,
+  ) =>
+    client.http
+      .GET("/api/v1/organizations/{organization_id}/models", {
+        params: {
+          path: { organization_id },
+          query: { workspace_id, cursor, limit },
+        },
+        signal,
+      })
+      .then(data);
   return {
-    models: (
+    /**
+     * The collection has no search or filters, so a filtered view reads it
+     * whole and matches in the browser.
+     */
+    models: async (
       signal: AbortSignal,
       cursor?: string,
       query?: string,
       provider_id?: string,
       enabled?: boolean,
       owner_scope?: "organization" | "workspace",
-    ) =>
-      org
-        ? client.http
-            .GET("/api/v1/organizations/{organization}/models", {
-              params: {
-                path: { organization: organization_id },
-                query: { cursor, limit: 30, query, provider_id, enabled },
-              },
-              signal,
-            })
-            .then(data)
-        : client.http
-            .GET("/api/v1/workspaces/{workspace}/models", {
-              params: {
-                path: { workspace: workspace_id },
-                query: {
-                  cursor,
-                  limit: 30,
-                  query,
-                  provider_id,
-                  enabled,
-                  scope: owner_scope,
-                },
-              },
-              signal,
-            })
-            .then(data),
+    ) => {
+      if (!query && !provider_id && enabled === undefined && !owner_scope)
+        return models(signal, cursor);
+      const term = query?.toLocaleLowerCase();
+      const items = await allPages((next) => models(signal, next, 100));
+      return {
+        items: items.filter(
+          (model) =>
+            (!term ||
+              `${model.name} ${model.key} ${model.config.model_name}`
+                .toLocaleLowerCase()
+                .includes(term)) &&
+            (!provider_id || model.provider_id === provider_id) &&
+            (enabled === undefined || model.enabled === enabled) &&
+            (!owner_scope ||
+              (owner_scope === "workspace") === (model.workspace_id !== null)),
+        ),
+        next_cursor: null,
+      };
+    },
     providers: (signal: AbortSignal, cursor?: string) =>
-      org
-        ? client.http
-            .GET("/api/v1/organizations/{organization}/model-providers", {
-              params: {
-                path: { organization: organization_id },
-                query: { cursor, limit: 100 },
-              },
-              signal,
-            })
-            .then(data)
-        : client.http
-            .GET("/api/v1/workspaces/{workspace}/model-providers", {
-              params: {
-                path: { workspace: workspace_id },
-                query: { cursor, limit: 100 },
-              },
-              signal,
-            })
-            .then(data),
+      client.http
+        .GET("/api/v1/organizations/{organization_id}/model-providers", {
+          params: {
+            path: { organization_id },
+            query: { workspace_id, cursor, limit: 100 },
+          },
+          signal,
+        })
+        .then(data),
     provider: (provider_id: string, signal: AbortSignal) =>
-      org
-        ? client.http
-            .GET(
-              "/api/v1/organizations/{organization}/model-providers/{provider_id}",
-              {
-                params: {
-                  path: { organization: organization_id, provider_id },
-                },
-                signal,
-              },
-            )
-            .then(representation)
-        : client.http
-            .GET(
-              "/api/v1/workspaces/{workspace}/model-providers/{provider_id}",
-              {
-                params: { path: { workspace: workspace_id, provider_id } },
-                signal,
-              },
-            )
-            .then(representation),
-    createProvider: (body: Schema["CreateModelProviderRequest"]) =>
-      org
-        ? client.http
-            .POST("/api/v1/organizations/{organization}/model-providers", {
-              params: { path: { organization: organization_id } },
-              body,
-            })
-            .then(data)
-        : client.http
-            .POST("/api/v1/workspaces/{workspace}/model-providers", {
-              params: { path: { workspace: workspace_id } },
-              body,
-            })
-            .then(data),
+      client.http
+        .GET(
+          "/api/v1/organizations/{organization_id}/model-providers/{provider_id}",
+          { params: { path: { organization_id, provider_id } }, signal },
+        )
+        .then(representation),
+    createProvider: (body: Omit<Schema["ProviderCreate"], "workspace_id">) =>
+      client.http
+        .POST("/api/v1/organizations/{organization_id}/model-providers", {
+          params: { path: { organization_id } },
+          body: { ...body, workspace_id },
+        })
+        .then(data),
     updateProvider: (
       provider_id: string,
       etag: string,
-      body: Schema["UpdateModelProviderRequest"],
+      body: Schema["ProviderUpdate"],
     ) =>
-      org
-        ? client.http
-            .PATCH(
-              "/api/v1/organizations/{organization}/model-providers/{provider_id}",
-              {
-                params: {
-                  path: { organization: organization_id, provider_id },
-                  header: { "If-Match": etag },
-                },
-                body,
-              },
-            )
-            .then(data)
-        : client.http
-            .PATCH(
-              "/api/v1/workspaces/{workspace}/model-providers/{provider_id}",
-              {
-                params: {
-                  path: { workspace: workspace_id, provider_id },
-                  header: { "If-Match": etag },
-                },
-                body,
-              },
-            )
-            .then(data),
+      client.http
+        .PATCH(
+          "/api/v1/organizations/{organization_id}/model-providers/{provider_id}",
+          {
+            params: { path: { organization_id, provider_id } },
+            headers: ifMatch(etag),
+            body,
+          },
+        )
+        .then(data),
     testProvider: (provider_id: string) =>
-      org
-        ? client.http
-            .POST(
-              "/api/v1/organizations/{organization}/model-providers/{provider_id}/test",
-              {
-                params: {
-                  path: { organization: organization_id, provider_id },
-                },
-              },
-            )
-            .then(data)
-        : client.http
-            .POST(
-              "/api/v1/workspaces/{workspace}/model-providers/{provider_id}/test",
-              { params: { path: { workspace: workspace_id, provider_id } } },
-            )
-            .then(data),
+      client.http
+        .POST(
+          "/api/v1/organizations/{organization_id}/model-providers/{provider_id}/test",
+          { params: { path: { organization_id, provider_id } } },
+        )
+        .then(data),
     catalog: (signal: AbortSignal) =>
-      org
-        ? client.http
-            .GET("/api/v1/organizations/{organization}/model-catalog", {
-              params: { path: { organization: organization_id } },
-              signal,
-            })
-            .then(data)
-        : client.http
-            .GET("/api/v1/workspaces/{workspace}/model-catalog", {
-              params: { path: { workspace: workspace_id } },
-              signal,
-            })
-            .then(data),
+      client.http.GET("/api/v1/model-catalog", { signal }).then(data),
     model: (model_id: string, signal: AbortSignal) =>
-      org
-        ? client.http
-            .GET("/api/v1/organizations/{organization}/models/{model_id}", {
-              params: { path: { organization: organization_id, model_id } },
-              signal,
-            })
-            .then(representation)
-        : client.http
-            .GET("/api/v1/workspaces/{workspace}/models/{model_id}", {
-              params: { path: { workspace: workspace_id, model_id } },
-              signal,
-            })
-            .then(representation),
-    createModel: (body: Schema["CreateModelRequest"]) =>
-      org
-        ? client.http
-            .POST("/api/v1/organizations/{organization}/models", {
-              params: { path: { organization: organization_id } },
-              body,
-            })
-            .then(data)
-        : client.http
-            .POST("/api/v1/workspaces/{workspace}/models", {
-              params: { path: { workspace: workspace_id } },
-              body,
-            })
-            .then(data),
+      client.http
+        .GET("/api/v1/organizations/{organization_id}/models/{model_id}", {
+          params: { path: { organization_id, model_id } },
+          signal,
+        })
+        .then(representation),
+    createModel: (body: Omit<Schema["ModelCreate"], "workspace_id">) =>
+      client.http
+        .POST("/api/v1/organizations/{organization_id}/models", {
+          params: { path: { organization_id } },
+          body: { ...body, workspace_id },
+        })
+        .then(data),
     updateModel: (
       model_id: string,
       etag: string,
-      body: Schema["UpdateModelRequest"],
+      body: Schema["ModelUpdate"],
     ) =>
-      org
-        ? client.http
-            .PATCH("/api/v1/organizations/{organization}/models/{model_id}", {
-              params: {
-                path: { organization: organization_id, model_id },
-                header: { "If-Match": etag },
-              },
-              body,
-            })
-            .then(data)
-        : client.http
-            .PATCH("/api/v1/workspaces/{workspace}/models/{model_id}", {
-              params: {
-                path: { workspace: workspace_id, model_id },
-                header: { "If-Match": etag },
-              },
-              body,
-            })
-            .then(data),
-    testModel: (model_id: string) =>
-      org
-        ? client.http
-            .POST(
-              "/api/v1/organizations/{organization}/models/{model_id}/test",
-              { params: { path: { organization: organization_id, model_id } } },
-            )
-            .then(data)
-        : client.http
-            .POST("/api/v1/workspaces/{workspace}/models/{model_id}/test", {
-              params: { path: { workspace: workspace_id, model_id } },
-            })
-            .then(data),
+      client.http
+        .PATCH("/api/v1/organizations/{organization_id}/models/{model_id}", {
+          params: { path: { organization_id, model_id } },
+          headers: ifMatch(etag),
+          body,
+        })
+        .then(data),
   };
 }

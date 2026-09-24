@@ -1,198 +1,259 @@
-"""Checkout lifecycle locking and application process-group supervision."""
+"""One lifecycle owner per checkout, and the application processes it supervises. Stdlib only."""
 
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import signal
+import socket
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from types import FrameType
 
-BACKGROUND_STATE = "applications.pid"
+APPLICATION_COMMANDS = frozenset({"dev", "dev-foreground", "service-dev"})
+# Service drains in-flight runs for up to its shutdown timeout before exiting.
+STOP_SECONDS = 40
+START_SECONDS = 120
+
+
+@dataclass(frozen=True, slots=True)
+class Application:
+    name: str
+    command: tuple[str, ...]
+    port: int
+    environment: dict[str, str]
+
+
+def _lock_file(root: Path) -> Path:
+    return root / "var/dev/lifecycle.lock"
+
+
+def owner(root: Path) -> dict[str, object] | None:
+    """The command holding the checkout's lifecycle lock, if any."""
+    try:
+        fd = os.open(_lock_file(root), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        if _try_lock(fd, fcntl.LOCK_SH):
+            return None
+        record = json.loads(os.pread(fd, 4096, 0) or b"null")
+    except ValueError:
+        return None
+    finally:
+        os.close(fd)
+    return record if isinstance(record, dict) else None
+
+
+def _busy(root: Path) -> str:
+    record = owner(root)
+    if record is None:
+        return "Local development is busy; retry shortly"
+    if record.get("command") in APPLICATION_COMMANDS:
+        return (
+            f"Applications are running ({record['command']}, pid {record['pid']}); stop them with make dev-stop first"
+        )
+    return f"Local development is busy with {record.get('command')} (pid {record['pid']}); retry when it finishes"
+
+
+def _try_lock(fd: int, mode: int = fcntl.LOCK_EX) -> bool:
+    """Take the lock unless another open file holds it; closing `fd` releases it."""
+    try:
+        fcntl.flock(fd, mode | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def claim(fd: int, command: str) -> None:
+    """Record the current process as the owner of a held (or inherited) lifecycle lock."""
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, json.dumps({"command": command, "pid": os.getpid()}).encode(), 0)
 
 
 @contextmanager
-def lifecycle_lock(root: Path, *, inheritable: bool = False) -> Iterator[int]:
-    """Exclude every start, reset, and down operation for one checkout."""
-    directory = root / "var/dev"
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "lifecycle.lock"
+def owning(root: Path, command: str) -> Iterator[int]:
+    """Hold the checkout's lifecycle lock: one setup, reset, down or application run at a time."""
+    path = _lock_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ValueError("Local development is already starting, running, resetting, or stopping") from None
-        os.set_inheritable(fd, inheritable)
+        if not _try_lock(fd):
+            raise ValueError(_busy(root))
+        claim(fd, command)
         yield fd
     finally:
         os.close(fd)
 
 
-@contextmanager
-def inherited_lifecycle_lock(fd: int) -> Iterator[None]:
-    """Own a lock descriptor deliberately inherited across bootstrap exec."""
-    try:
-        os.fstat(fd)
-    except OSError:
-        raise ValueError("Invalid inherited local-development lifecycle lock") from None
-    try:
-        yield
-    finally:
-        os.close(fd)
-
-
-@contextmanager
-def background_applications(root: Path) -> Iterator[None]:
-    """Record one detached application supervisor while holding its ownership lock."""
-    directory = root / "var/dev"
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / BACKGROUND_STATE
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ValueError("Detached development applications are already running") from None
-        os.set_inheritable(fd, False)
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()}\n".encode())
-        os.fsync(fd)
-        try:
-            yield
-        finally:
-            os.ftruncate(fd, 0)
-    finally:
-        os.close(fd)
-
-
-def stop_background_applications(root: Path, *, timeout: float = 15) -> bool:
-    """Stop the detached supervisor identified by its held ownership lock."""
-    path = root / "var/dev" / BACKGROUND_STATE
-    try:
-        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
-    except FileNotFoundError:
+def stop_applications(root: Path) -> bool:
+    """Stop the checkout's running applications; False when none run."""
+    path = _lock_file(root)
+    if not path.exists():
         return False
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            pass
-        else:
+        if _try_lock(fd):
             return False
-        pid_text = os.pread(fd, 32, 0).decode().strip()
-        if not pid_text.isdecimal() or int(pid_text) <= 1:
-            raise RuntimeError("Detached development application state is invalid")
-        pid = int(pid_text)
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return False
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                time.sleep(0.05)
-                continue
-            return True
-        raise RuntimeError("Timed out stopping detached development applications")
+        record = owner(root)
+        if record is None or record.get("command") not in APPLICATION_COMMANDS:
+            raise ValueError(_busy(root))
+        pid = record["pid"]
+        assert isinstance(pid, int)
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + STOP_SECONDS + 5
+        while not _try_lock(fd):
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"Applications (pid {pid}) did not stop; see {root / 'var/dev/logs'}")
+            time.sleep(0.1)
+        return True
     finally:
         os.close(fd)
 
 
-@dataclass(frozen=True, slots=True)
-class ProcessSpec:
-    name: str
-    command: tuple[str, ...]
-    environment: dict[str, str] | None = None
+def listening(port: int) -> bool:
+    with socket.socket() as client:
+        client.settimeout(0.2)
+        return client.connect_ex(("127.0.0.1", port)) == 0
 
 
-class ProcessSupervisor:
-    """Start foreground children atomically and drain every owned process group."""
+class Applications:
+    """Application processes, each leading its own process group so a stop reaches everything it spawned."""
 
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.processes: list[tuple[ProcessSpec, subprocess.Popen]] = []
-        self.signal: int | None = None
-        self.force_stop = False
+    def __init__(self, root: Path, applications: tuple[Application, ...], logs: Path | None) -> None:
+        self.root, self.applications, self.logs = root, applications, logs
+        self.processes: list[tuple[Application, subprocess.Popen[bytes]]] = []
 
-    def _handle_signal(self, signum: int, _frame: FrameType | None) -> None:
-        if self.signal is not None:
-            self.force_stop = True
-        self.signal = signum
-
-    @contextmanager
-    def _signal_handlers(self) -> Iterator[None]:
-        previous = {signum: signal.signal(signum, self._handle_signal) for signum in (signal.SIGINT, signal.SIGTERM)}
-        try:
-            yield
-        finally:
-            for signum, handler in previous.items():
-                signal.signal(signum, handler)
-
-    def run(self, specs: tuple[ProcessSpec, ...]) -> int | None:
-        with self._signal_handlers():
+    def start(self) -> None:
+        if self.logs:
+            self.logs.mkdir(parents=True, exist_ok=True)
+        for application in self.applications:
+            output = open(self.logs / f"{application.name}.log", "ab") if self.logs else None
             try:
-                for spec in specs:
-                    process = subprocess.Popen(
-                        spec.command,
-                        cwd=self.root,
-                        env=spec.environment,
-                        start_new_session=True,
-                    )
-                    self.processes.append((spec, process))
-                    print(f"Started {spec.name} (pid {process.pid})", flush=True)
-                    if self.signal is not None:
-                        break
-                while self.signal is None:
-                    for spec, process in self.processes:
-                        if (status := process.poll()) is not None:
-                            raise RuntimeError(
-                                f"{spec.name} exited (status {status}); stopping development applications"
-                            )
-                    time.sleep(0.1)
-                return self.signal
+                process = subprocess.Popen(
+                    application.command,
+                    cwd=self.root,
+                    env=application.environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.STDOUT if output else None,
+                    start_new_session=True,
+                )
             finally:
-                self.stop()
+                if output:
+                    output.close()
+            self.processes.append((application, process))
 
-    def stop(self) -> None:
-        for _spec, process in self.processes:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        while True:
-            for _spec, process in self.processes:
-                process.poll()
-            groups = [process.pid for _spec, process in self.processes if _process_group_exists(process.pid)]
-            if not groups:
-                break
-            if self.force_stop:
-                for group in groups:
-                    try:
-                        os.killpg(group, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+    def exited(self) -> str | None:
+        return next((app.name for app, process in self.processes if process.poll() is not None), None)
+
+    def wait_ready(self, timeout: float = START_SECONDS) -> None:
+        deadline = time.monotonic() + timeout
+        while not all(listening(app.port) for app in self.applications):
+            if (name := self.exited()) is not None:
+                raise RuntimeError(f"{name} exited during startup; see {self.logs or 'its output'}")
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"Applications did not start listening within {timeout:.0f}s")
+            time.sleep(0.2)
+
+    def stop(self, force: Callable[[], bool] = lambda: False) -> None:
+        for _, process in self.processes:
+            _signal_group(process.pid, signal.SIGTERM)
+        deadline = time.monotonic() + STOP_SECONDS
+        while live := [process for _, process in self.processes if _group_exists(process)]:
+            if force() or time.monotonic() > deadline:
+                for process in live:
+                    _signal_group(process.pid, signal.SIGKILL)
             time.sleep(0.05)
-        for _spec, process in self.processes:
+        for _, process in self.processes:
             process.wait()
 
 
-def supervise(root: Path, specs: tuple[ProcessSpec, ...]) -> int | None:
-    return ProcessSupervisor(root).run(specs)
-
-
-def _process_group_exists(group: int) -> bool:
+def _signal_group(group: int, signum: int) -> None:
     try:
-        os.killpg(group, 0)
-        return True
+        os.killpg(group, signum)
     except (ProcessLookupError, PermissionError):
-        # A retired macOS process group can report EPERM during exit.
-        # A group we cannot signal is no longer an owned cleanup target.
+        pass
+
+
+def _group_exists(process: subprocess.Popen[bytes]) -> bool:
+    process.poll()  # reap an exited leader so only live members keep its group
+    try:
+        os.killpg(process.pid, 0)
+    except (ProcessLookupError, PermissionError):
+        # macOS can report EPERM for a group that is exiting.
         return False
+    return True
+
+
+@contextmanager
+def running(root: Path, applications: tuple[Application, ...], logs: Path) -> Iterator[None]:
+    """Applications serving for the duration of the block, such as seeding."""
+    group = Applications(root, applications, logs)
+    try:
+        group.start()
+        group.wait_ready()
+        yield
+    finally:
+        group.stop()
+
+
+def supervise(
+    root: Path,
+    applications: tuple[Application, ...],
+    *,
+    logs: Path | None = None,
+    on_ready: Callable[[], None] | None = None,
+) -> int:
+    """Run applications until a signal or until one exits, then stop them all; a second signal forces it."""
+    signals: list[int] = []
+    handlers = {
+        signum: signal.signal(signum, lambda number, _: signals.append(number))
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    group = Applications(root, applications, logs)
+    try:
+        group.start()
+        ready = False
+        while not signals:
+            if (name := group.exited()) is not None:
+                print(f"{name} exited; stopping the other applications", flush=True)
+                return 1
+            if not ready and all(listening(app.port) for app in applications):
+                ready = True
+                if on_ready:
+                    on_ready()
+            time.sleep(0.2)
+        return 0
+    finally:
+        group.stop(force=lambda: len(signals) > 1)
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+
+
+def start_detached(root: Path, command: tuple[str, ...], lock: int, ports: tuple[int, ...], log: Path) -> None:
+    """Start a supervisor in its own OS session, handing it the lifecycle lock; return once all ports listen."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "ab") as output:
+        process = subprocess.Popen(
+            command,
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            pass_fds=(lock,),
+        )
+    deadline = time.monotonic() + START_SECONDS
+    while not all(listening(port) for port in ports):
+        if process.poll() is not None:
+            raise RuntimeError(f"Applications exited during startup; see {log.parent}")
+        if time.monotonic() > deadline:
+            process.terminate()
+            process.wait(STOP_SECONDS + 5)
+            raise RuntimeError(f"Applications did not start listening within {START_SECONDS}s; see {log.parent}")
+        time.sleep(0.2)

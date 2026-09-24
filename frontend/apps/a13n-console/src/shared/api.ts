@@ -1,4 +1,9 @@
-import { ApiError, data, type components } from "../service-client";
+import {
+  ApiError,
+  data,
+  type Client,
+  type components,
+} from "../service-client";
 export { data };
 export type Schema = components["schemas"];
 export function representation<T>(result: { data?: T; response: Response }) {
@@ -10,19 +15,41 @@ export function representation<T>(result: { data?: T; response: Response }) {
 export function isUnauthorized(error: unknown) {
   return error instanceof ApiError && error.status === 401;
 }
-export function commandHeaders(
-  workspaceId: string | undefined,
-  key: string,
-  etag?: string,
-) {
-  return {
-    ...(workspaceId ? workspaceHeaders(workspaceId) : {}),
-    "Idempotency-Key": key,
-    ...(etag ? { "If-Match": etag } : {}),
-  };
+/**
+ * The Service's strong ETag of a row as the reader saw it, for rows read from a
+ * collection, whose response carries no per-item ETag.
+ */
+export function rowTag(row: { id: string; version: number }) {
+  return `"${row.id}:${row.version}"`;
 }
-export function workspaceHeaders(workspaceId: string) {
-  return { "X-A13N-Workspace-ID": workspaceId };
+export function ifMatch(etag: string | undefined) {
+  return etag ? { "If-Match": etag } : {};
+}
+/** Execution commands (new thread, message, fork, resume, upload) replay by request key. */
+export function commandHeaders(key: string) {
+  return { "Idempotency-Key": key };
+}
+/** Stage one file for a resource that takes its `upload_id`; the key replays a lost acknowledgement. */
+export async function uploadFile(
+  client: Client,
+  workspaceId: string,
+  file: File,
+  key: string,
+): Promise<Schema["Upload"]> {
+  return data(
+    await client.http.POST("/api/v1/workspaces/{workspace_id}/uploads", {
+      params: {
+        path: { workspace_id: workspaceId },
+        header: commandHeaders(key),
+      },
+      body: { file },
+      bodySerializer: () => {
+        const form = new FormData();
+        form.append("file", file);
+        return form;
+      },
+    }),
+  );
 }
 /** Picker collections traverse the canonical cursor; table views page explicitly. */
 export async function allPages<T>(

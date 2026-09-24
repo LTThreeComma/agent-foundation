@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ast
 import os
-import shlex
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -70,52 +68,32 @@ def test_makefile_selects_all_container_commands() -> None:
     assert all(any(path.full_match(pattern) for pattern in patterns) for patterns in filters.values())
 
 
-def test_service_native_smoke_builds_required_binary_and_keeps_real_journeys() -> None:
+def test_service_foundation_ci_selects_only_current_tests() -> None:
     workflow = yaml.safe_load((WORKFLOWS / "ci-a13n-service.yml").read_text())
     jobs = workflow["jobs"]
-    assert "native" in {entry["name"] for entry in jobs["validation"]["strategy"]["matrix"]["include"]}
-    for event in ("pull_request", "push"):
-        for path in (
-            "crates/a13n-envd/src/transfer.rs",
-            "Cargo.lock",
-            "packages/a13n-envd-client/a13n_envd_client/requester.py",
-        ):
-            assert any(Path(path).full_match(pattern) for pattern in workflow[True][event]["paths"])
+    assert {entry["name"] for entry in jobs["validation"]["strategy"]["matrix"]["include"]} == {"checks", "tests"}
     steps = jobs["validation"]["steps"]
-    build = next(step for step in steps if step["name"] == "Build required native daemon")
-    smoke = next(step for step in steps if step["name"] == "Test Service with real envd and Redis")
-    assert steps.index(build) < steps.index(smoke)
-    assert build["if"] == smoke["if"] == "matrix.name == 'native'"
-    assert "cargo build --locked --package a13n-envd" in build["run"]
-    assert "test -x target/debug/a13n-envd" in build["run"]
-    assert smoke["env"]["A13N_ENVD_TEST_BINARY"].endswith("/target/debug/a13n-envd")
-    nodes = [arg for arg in shlex.split(smoke["run"]) if arg.startswith("packages/")]
-    assert any("restart_and_revoke" in node for node in nodes)
-    assert any("mount_same_device" in node for node in nodes)
-    assert any("release_native_capacity" in node for node in nodes)
-    for selection in nodes:
-        path, _, node = selection.partition("::")
-        assert node in {
-            item.name
-            for item in ast.parse((ROOT / path).read_text()).body
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }, selection
+    test = next(step for step in steps if step["name"] == "Test a13n Service")
+    assert "packages/a13n-service/tests" in test["run"]
+    assert "legacy" not in test["run"]
+    assert any(step.get("run") == "make service-boundaries" for step in steps)
+    assert any(step.get("run") == "make dev-state-check" for step in steps)
     assert jobs["python"]["needs"] == "validation"
 
 
 @pytest.mark.parametrize(
     "cases,accepted", [("", False), ("<testcase/>", True), ("<testcase><skipped/></testcase>", False)]
 )
-def test_native_smoke_rejects_empty_or_skipped_execution(tmp_path: Path, cases: str, accepted: bool) -> None:
+def test_service_tests_reject_empty_or_skipped_execution(tmp_path: Path, cases: str, accepted: bool) -> None:
     workflow = yaml.safe_load((WORKFLOWS / "ci-a13n-service.yml").read_text())
     step = next(
         step
         for step in workflow["jobs"]["validation"]["steps"]
-        if step["name"] == "Require native smoke execution without skips"
+        if step["name"] == "Require Service execution without skips"
     )
     reports = tmp_path / "test-results"
     reports.mkdir()
-    (reports / "service-native.xml").write_text(f"<testsuites><testsuite>{cases}</testsuite></testsuites>")
+    (reports / "service.xml").write_text(f"<testsuites><testsuite>{cases}</testsuite></testsuites>")
     result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=tmp_path, capture_output=True, check=False)
     assert (result.returncode == 0) == accepted
 

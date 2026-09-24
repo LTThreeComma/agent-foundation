@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Schema } from "../../../shared/api";
+import { fixtureRun, fixtureThread } from "./fixture";
 import { RunFeedback } from "./pending-request";
 
 const { post, accepted } = vi.hoisted(() => ({
@@ -27,39 +28,36 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+const run = fixtureRun({ status: "waiting" });
+const thread = fixtureThread();
+const successor = fixtureRun({ id: "run_3", status: "accepted" });
+/** The resumed Run the Service answers a resume with. */
+function resumes() {
+  post.mockResolvedValue({ data: successor, response: new Response() });
+}
+function approval(
+  tool_call_id: string,
+  presentation: Schema["PendingItem"]["presentation"] = null,
+): Schema["PendingItem"] {
+  return {
+    tool_call_id,
+    kind: "approval",
+    tool_name: `${tool_call_id} action`,
+    arguments: { path: "/workspace/report" },
+    presentation,
+  };
+}
+
 it("requires an explicit decision for every approval before sending the complete response set", async () => {
   const user = userEvent.setup();
-  post.mockResolvedValue({
-    data: { session_id: "session", thread_id: "thread", run_id: "next" },
-    response: new Response(),
-  });
+  resumes();
   render(
     <QueryClientProvider client={new QueryClient()}>
       <RunFeedback
         accepted={accepted}
-        run={
-          {
-            id: "run",
-            sealed_state_digest_sha256: "digest",
-          } as Schema["RunResource"]
-        }
-        thread={{ version: 7 } as Schema["ThreadResource"]}
-        actions={[
-          {
-            call_id: "first",
-            kind: "approval",
-            tool_name: "First action",
-            provider_type: null,
-            presentation: null,
-          },
-          {
-            call_id: "second",
-            kind: "approval",
-            tool_name: "Second action",
-            provider_type: null,
-            presentation: null,
-          },
-        ]}
+        run={run}
+        thread={thread}
+        actions={[approval("first"), approval("second")]}
       />
     </QueryClientProvider>,
   );
@@ -74,51 +72,32 @@ it("requires an explicit decision for every approval before sending the complete
   expect(submit.disabled).toBe(false);
   await user.click(submit);
   await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
-  await waitFor(() =>
-    expect(accepted).toHaveBeenCalledWith({
-      session_id: "session",
-      thread_id: "thread",
-      run_id: "next",
-    }),
+  await waitFor(() => expect(accepted).toHaveBeenCalledWith(successor));
+  expect(post.mock.calls[0]![0]).toBe(
+    "/api/v1/workspaces/{workspace_id}/runs/{run_id}/resume",
   );
   expect(post.mock.calls[0]![1].body).toEqual({
-    expected_thread_version: 7,
-    sealed_state_digest_sha256: "digest",
-    resolutions: [
-      { action: "approve", call_id: "first" },
-      { action: "reject", call_id: "second" },
+    answers: [
+      { action: "approve", tool_call_id: "first" },
+      { action: "reject", tool_call_id: "second" },
     ],
   });
 });
 
-it("submits a bounded denial reason with the existing feedback request", async () => {
+it("submits a bounded denial reason with the rest of the answers", async () => {
   const user = userEvent.setup();
-  post.mockResolvedValue({
-    data: { session_id: "session", thread_id: "thread", run_id: "next" },
-    response: new Response(),
-  });
+  resumes();
   render(
     <QueryClientProvider client={new QueryClient()}>
       <RunFeedback
-        run={
-          {
-            id: "run",
-            sealed_state_digest_sha256: "digest",
-          } as Schema["RunResource"]
-        }
-        thread={{ version: 7 } as Schema["ThreadResource"]}
+        run={run}
+        thread={thread}
         actions={[
-          {
-            call_id: "first",
-            kind: "approval",
-            tool_name: "First action",
-            provider_type: null,
-            presentation: {
-              target: "path: /workspace/report",
-              risk: "high",
-              reason: "Tool reviewer requires approval.",
-            },
-          },
+          approval("first", {
+            target: "path: /workspace/report",
+            risk: "high",
+            reason: "Tool reviewer requires approval.",
+          }),
         ]}
         accepted={accepted}
       />
@@ -132,8 +111,12 @@ it("submits a bounded denial reason with the existing feedback request", async (
   await user.type(reason, "Sensitive destination");
   await user.click(screen.getByRole("button", { name: "Submit responses" }));
   await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
-  expect(post.mock.calls[0]![1].body.resolutions).toEqual([
-    { action: "reject", call_id: "first", reason: "Sensitive destination" },
+  expect(post.mock.calls[0]![1].body.answers).toEqual([
+    {
+      action: "reject",
+      tool_call_id: "first",
+      reason: "Sensitive destination",
+    },
   ]);
 });
 
@@ -141,24 +124,13 @@ it("falls back to JSON for malformed approval presentation", () => {
   render(
     <QueryClientProvider client={new QueryClient()}>
       <RunFeedback
-        run={
-          {
-            id: "run",
-            sealed_state_digest_sha256: "digest",
-          } as Schema["RunResource"]
-        }
-        thread={{ version: 7 } as Schema["ThreadResource"]}
+        run={run}
+        thread={thread}
         actions={[
-          {
-            call_id: "first",
-            kind: "approval",
-            tool_name: "First action",
-            provider_type: null,
-            presentation: {
-              target: "path: /workspace",
-              reason: { unexpected: true },
-            },
-          },
+          approval("first", {
+            target: "path: /workspace",
+            reason: { unexpected: true },
+          }),
         ]}
         accepted={accepted}
       />
@@ -168,37 +140,46 @@ it("falls back to JSON for malformed approval presentation", () => {
   expect(screen.queryByText("Review reason")).toBeNull();
 });
 
-function renderQuestions(
-  presentation: Schema["JsonValue"] = questionPresentation,
-) {
+function question(
+  questions: typeof questionPresentation = questionPresentation,
+): Schema["PendingItem"] {
+  return {
+    tool_call_id: "question",
+    kind: "user_input",
+    tool_name: "ask_user_question",
+    arguments: questions,
+    presentation: null,
+  };
+}
+/** A wait of questions alone is answered by the message that starts the next Run. */
+function renderQuestions(questions = questionPresentation) {
   post.mockResolvedValue({
-    data: { run_id: "next" },
+    data: { thread, entry: { id: "inb_2" }, run: successor },
     response: new Response(),
   });
   render(
     <QueryClientProvider client={new QueryClient()}>
       <RunFeedback
         accepted={accepted}
-        run={
-          {
-            id: "run",
-            sealed_state_digest_sha256: "digest",
-          } as Schema["RunResource"]
-        }
-        thread={{ version: 7 } as Schema["ThreadResource"]}
-        actions={[
-          {
-            call_id: "question",
-            kind: "user_input",
-            tool_name: "ask_user_question",
-            provider_type: null,
-            presentation,
-          },
-        ]}
+        run={run}
+        thread={thread}
+        actions={[question(questions)]}
       />
     </QueryClientProvider>,
   );
   return userEvent.setup();
+}
+function answered() {
+  expect(post.mock.calls[0]![0]).toBe(
+    "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/inbox",
+  );
+  const body = post.mock.calls[0]![1].body;
+  expect(body).toMatchObject({
+    kind: "message",
+    delivery: "next_run",
+    agent_id: run.agent_id,
+  });
+  return body.payload.content;
 }
 const questionPresentation = {
   questions: [
@@ -222,7 +203,7 @@ const questionPresentation = {
   ],
 };
 
-it("renders questions and submits single and multiple selections in the exact answer envelope", async () => {
+it("answers questions with single and multiple selections in the exact answer envelope", async () => {
   const user = renderQuestions();
   expect(screen.getByText("Which business?")).toBeTruthy();
   expect(screen.getByText("Orders and returns")).toBeTruthy();
@@ -236,11 +217,10 @@ it("renders questions and submits single and multiple selections in the exact an
   await user.click(screen.getByRole("checkbox", { name: /Tickets/ }));
   await user.click(submit);
   await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
-  expect(post.mock.calls[0]![1].body.resolutions).toEqual([
+  expect(answered()).toEqual([
     {
-      action: "respond",
-      call_id: "question",
-      response: {
+      type: "json",
+      value: {
         answers: {
           "Which business?": "Retail",
           "Which tools?": ["Search", "Tickets"],
@@ -248,6 +228,7 @@ it("renders questions and submits single and multiple selections in the exact an
       },
     },
   ]);
+  await waitFor(() => expect(accepted).toHaveBeenCalledWith(successor));
 });
 
 it("allows free text instead of an option and does not submit an empty answer", async () => {
@@ -267,46 +248,29 @@ it("allows free text instead of an option and does not submit an empty answer", 
   );
   await user.click(submit);
   await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
-  expect(post.mock.calls[0]![1].body.resolutions[0].response).toEqual({
-    answers: { "Which business?": "Travel support" },
-  });
+  expect(answered()).toEqual([
+    {
+      type: "json",
+      value: { answers: { "Which business?": "Travel support" } },
+    },
+  ]);
 });
 
-it("submits questions and approval decisions together without dropping either", async () => {
+it("resumes a wait that mixes questions and approvals, leaving its questions unanswered", async () => {
   const user = userEvent.setup();
-  post.mockResolvedValue({
-    data: { run_id: "next" },
-    response: new Response(),
-  });
+  resumes();
   render(
     <QueryClientProvider client={new QueryClient()}>
       <RunFeedback
         accepted={accepted}
-        run={
-          {
-            id: "run",
-            sealed_state_digest_sha256: "digest",
-          } as Schema["RunResource"]
-        }
-        thread={{ version: 7 } as Schema["ThreadResource"]}
+        run={run}
+        thread={thread}
         actions={[
-          {
-            call_id: "question",
-            kind: "user_input",
-            tool_name: "ask_user_question",
-            provider_type: null,
-            presentation: { questions: [questionPresentation.questions[0]!] },
-          },
-          {
-            call_id: "approval",
-            kind: "approval",
-            tool_name: "Search",
-            provider_type: null,
-            presentation: {
-              risk: "low",
-              reason: "Tool policy requires approval.",
-            },
-          },
+          question({ questions: [questionPresentation.questions[0]!] }),
+          approval("approval", {
+            risk: "low",
+            reason: "Tool policy requires approval.",
+          }),
         ]}
       />
     </QueryClientProvider>,
@@ -314,18 +278,19 @@ it("submits questions and approval decisions together without dropping either", 
   const submit = screen.getByRole("button", {
     name: "Submit responses",
   }) as HTMLButtonElement;
-  await user.click(screen.getByRole("radio", { name: /Retail/ }));
+  // Only a message answers a question, and a mixed wait takes none.
+  expect(screen.queryByRole("radio", { name: /Retail/ })).toBeNull();
+  await user.click(screen.getByRole("combobox", { name: "Response" }));
+  expect(screen.queryByRole("option", { name: "Respond" })).toBeNull();
+  await user.click(
+    await screen.findByRole("option", { name: "Continue without a response" }),
+  );
   expect(submit.disabled).toBe(true);
   await user.click(screen.getByRole("button", { name: "Approve once" }));
   expect(submit.disabled).toBe(false);
   await user.click(submit);
   await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
-  expect(post.mock.calls[0]![1].body.resolutions).toEqual([
-    {
-      action: "respond",
-      call_id: "question",
-      response: { answers: { "Which business?": "Retail" } },
-    },
-    { action: "approve", call_id: "approval" },
-  ]);
+  expect(post.mock.calls[0]![1].body).toEqual({
+    answers: [{ action: "approve", tool_call_id: "approval" }],
+  });
 });

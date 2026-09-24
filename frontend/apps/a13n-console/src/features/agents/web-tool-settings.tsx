@@ -78,7 +78,7 @@ export function WebToolSettings({
           onValueChange={(id) => onChange({ ...config, provider_id: id })}
           options={options}
         />
-        {can("web_provider.manage") && (
+        {can("write") && (
           <a
             href={providersPath("web", "workspace", workspace.key)}
             className={styles.webProviderLink}

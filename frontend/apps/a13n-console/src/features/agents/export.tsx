@@ -37,7 +37,7 @@ export function AgentFilePreview({ file }: { file: AgentFile }) {
           <dl className={styles.previewFacts}>
             <div>
               <dt>{t("Model")}</dt>
-              <dd>{file.config.model.model_key}</dd>
+              <dd>{file.config.model.model_id}</dd>
             </div>
             <div>
               <dt>{t("Capabilities")}</dt>

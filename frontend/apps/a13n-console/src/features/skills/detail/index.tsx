@@ -4,11 +4,12 @@ import { useTranslation } from "react-i18next";
 import { Link, useParams, useSearchParams } from "react-router";
 import { useClient } from "../../../auth/context";
 import { useWorkspace } from "../../../layout/workspace";
-import { data, representation, workspaceHeaders } from "../../../shared/api";
+import { representation } from "../../../shared/api";
 import { ErrorNotice, Loading, Timestamp } from "../../../shared/feedback";
 import { IconTile } from "../../../shared/identity";
 import { DetailHeader, DetailPage, useTabParam } from "../../../shared/page";
 import { ImportSkill } from "../import-dialog";
+import { revisionQuery, revisionsQuery } from "../revisions";
 import { SkillIcon, skillSource } from "../source";
 import styles from "../skills.module.css";
 import { SkillMenu } from "./actions";
@@ -27,9 +28,8 @@ export function SkillDetail() {
     queryKey: ["skills", workspace.id, "key", skillKey],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/skills/{skill_key}", {
-          params: { path: { workspace: workspace.id, skill_key: skillKey } },
-          headers: workspaceHeaders(workspace.id),
+        .GET("/api/v1/workspaces/{workspace_id}/skills/{skill_id}", {
+          params: { path: { workspace_id: workspace.id, skill_id: skillKey } },
           signal,
         })
         .then(representation),
@@ -39,21 +39,18 @@ export function SkillDetail() {
   // One fetch serves the header summary and the file browser, so opening a
   // retained version never asks for the same manifest twice.
   const revision = useQuery({
+    ...revisionQuery(client, {
+      id: revisionId,
+      skill_id: skill?.id ?? "",
+      workspace_id: workspace.id,
+    }),
     enabled: !!skill && !!revisionId,
-    queryKey: ["skills", workspace.id, skill?.id, "revision", revisionId],
-    queryFn: async ({ signal }) => {
-      const found = data(
-        await client.http.GET("/api/v1/skill-revisions/{skill_revision_id}", {
-          params: { path: { skill_revision_id: revisionId } },
-          headers: workspaceHeaders(workspace.id),
-          signal,
-        }),
-      );
-      if (found.skill_id !== skill!.id)
-        throw new Error(t("This version does not belong to this skill."));
-      return found;
-    },
   });
+  // The first page of the Versions tab leads with the latest version.
+  const latest = useQuery({
+    ...revisionsQuery(client, workspace.id, skill?.id ?? ""),
+    enabled: !!skill,
+  }).data?.items[0]?.number;
   if (query.isPending) return <Loading variant="detail" page />;
   if (!query.data || !skill)
     return (
@@ -66,7 +63,11 @@ export function SkillDetail() {
       backLabel={t("Skills")}
       tabs={[
         { value: "files", label: t("Files") },
-        { value: "versions", label: t("Versions"), count: `v${skill.version}` },
+        {
+          value: "versions",
+          label: t("Versions"),
+          count: latest === undefined ? undefined : `v${latest}`,
+        },
         { value: "references", label: t("Used by") },
       ]}
       tab={tab}
@@ -79,15 +80,22 @@ export function SkillDetail() {
             </IconTile>
           }
           name={skill.name}
+          status={
+            skill.archived_at ? (
+              <StatusPill variant="neutral">{t("Archived")}</StatusPill>
+            ) : undefined
+          }
           resourceKey={skill.key}
-          description={revision.data?.manifest.description}
+          description={revision.data?.config.description}
           actions={
             <>
-              {can("skill.revision.publish") && <ImportSkill skill={skill} />}
+              {can("write") && !skill.archived_at && (
+                <ImportSkill skill={skill} />
+              )}
               <SkillMenu
                 resource={query.data}
                 revisionId={revisionId}
-                version={revision.data?.version ?? skill.version}
+                version={revision.data?.number}
               />
             </>
           }
@@ -109,10 +117,10 @@ export function SkillDetail() {
                 <StatusPill variant="warning">
                   {t("Retained version")}
                 </StatusPill>
-                <span>v{revision.data.version}</span>
+                <span>v{revision.data.number}</span>
                 <Timestamp value={revision.data.created_at} relative />
                 <span>
-                  {skillSource(revision.data.imported_from.kind) === "github"
+                  {skillSource(revision.data.config.source.kind) === "github"
                     ? "GitHub"
                     : t("ZIP")}
                 </span>

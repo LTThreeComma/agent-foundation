@@ -15,11 +15,16 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTEXT = "kind-a13n-local"
-NAMESPACE = "a13n-dev"
-ORIGIN = "http://127.0.0.1:8080"
-SECRET_FILES = {"a13n-service-secrets": "service.env", "a13n-postgres-secrets": "postgres.env"}
-MASTER_KEY = "A13N_SERVICE_SECRET_MASTER_KEY_BASE64"
+CLUSTER = "a13n-local"
+CONTEXT = f"kind-{CLUSTER}"
+NAMESPACE = "a13n-service"
+CONSOLE_URL = "http://127.0.0.1:8080"
+CONTROL = "deployment/a13n-a13n-control"
+DATABASE_HOST = "a13n-a13n-postgres"
+SERVICE_SECRET, POSTGRES_SECRET = "a13n-service-secrets", "a13n-postgres-secrets"
+SECRET_FILES = {SERVICE_SECRET: "service.env", POSTGRES_SECRET: "postgres.env"}
+ADMIN_FILE = "admin.env"
+ALREADY_BOOTSTRAPPED = 3  # `a13n-service bootstrap` exit status when an organization already exists
 
 
 def run(*args: str, capture: bool = False, input_text: str | None = None) -> str:
@@ -46,8 +51,14 @@ def read_env(path: Path) -> dict[str, str]:
     return values
 
 
+def write_private(path: Path, values: dict[str, str]) -> None:
+    """Create a mode-600 env file once; an existing file is never replaced."""
+    with open(path, "x", opener=lambda p, flags: os.open(p, flags, 0o600)) as stream:
+        stream.write("".join(f"{k}={v}\n" for k, v in values.items()))
+
+
 def credentials(
-    local: dict[str, dict[str, str]], remote: dict[str, dict[str, str]], *, retained: bool, email: str
+    local: dict[str, dict[str, str]], remote: dict[str, dict[str, str]], *, retained: bool
 ) -> dict[str, dict[str, str]]:
     selected = dict(remote)
     for name, values in local.items():
@@ -57,19 +68,16 @@ def credentials(
     if not selected:
         if retained:
             raise ValueError("Existing PVCs have no credentials; restore the original env files or Secrets")
-        if "@" not in email or any(c.isspace() for c in email):
-            raise ValueError("K8S_ADMIN_EMAIL must be an email address")
         password = secrets.token_hex(32)
         selected = {
-            "a13n-service-secrets": {
-                "A13N_SERVICE_DATABASE_URL": (
-                    f"postgresql+psycopg://a13n_service:{password}@a13n-a13n-postgres:5432/a13n_service"
+            SERVICE_SECRET: {
+                "A13N_DATABASE__URL": (
+                    f"postgresql+psycopg://a13n_service:{password}@{DATABASE_HOST}:5432/a13n_service"
                 ),
-                "A13N_SERVICE_IAM_INITIAL_ADMIN_EMAIL": email,
-                MASTER_KEY: base64.b64encode(secrets.token_bytes(32)).decode(),
-                "A13N_SERVICE_SECRET_ENCRYPTION_KEY_ID": "primary-v1",
+                "A13N_ENCRYPTION__ACTIVE_KEY_ID": "primary",
+                "A13N_ENCRYPTION__KEYS": json.dumps({"primary": base64.b64encode(secrets.token_bytes(32)).decode()}),
             },
-            "a13n-postgres-secrets": {
+            POSTGRES_SECRET: {
                 "POSTGRES_USER": "a13n_service",
                 "POSTGRES_DB": "a13n_service",
                 "POSTGRES_PASSWORD": password,
@@ -77,32 +85,47 @@ def credentials(
         }
     if set(selected) != set(SECRET_FILES):
         raise ValueError("Incomplete credentials; restore the missing service.env or postgres.env before starting")
-    service, postgres = (selected[name] for name in SECRET_FILES)
+    service, postgres = selected[SERVICE_SECRET], selected[POSTGRES_SECRET]
     try:
-        key = base64.b64decode(service[MASTER_KEY], validate=True)
-        database = urlsplit(service["A13N_SERVICE_DATABASE_URL"])
+        keys = json.loads(service["A13N_ENCRYPTION__KEYS"])
+        valid_keys = (
+            isinstance(keys, dict)
+            and service["A13N_ENCRYPTION__ACTIVE_KEY_ID"] in keys
+            and all(len(base64.b64decode(key, validate=True)) == 32 for key in keys.values())
+        )
+        database = urlsplit(service["A13N_DATABASE__URL"])
         valid_database = (
             database.scheme == "postgresql+psycopg"
-            and database.hostname == "a13n-a13n-postgres"
+            and database.hostname == DATABASE_HOST
             and database.port == 5432
             and unquote(database.username or "") == postgres["POSTGRES_USER"]
             and unquote(database.password or "") == postgres["POSTGRES_PASSWORD"]
             and bool(postgres["POSTGRES_PASSWORD"])
             and database.path == "/" + postgres["POSTGRES_DB"]
         )
-        valid_identity = bool(service["A13N_SERVICE_IAM_INITIAL_ADMIN_EMAIL"]) and bool(
-            service["A13N_SERVICE_SECRET_ENCRYPTION_KEY_ID"]
-        )
-    except (KeyError, ValueError, binascii.Error) as error:
-        raise ValueError(
-            "Credentials are missing required fields or have an invalid master key/database URL"
-        ) from error
-    if len(key) != 32 or not valid_database or not valid_identity:
-        raise ValueError("Credentials require a 32-byte master key, admin email, and matching local database settings")
+    except (KeyError, TypeError, ValueError, binascii.Error) as error:
+        raise ValueError("Credentials are missing required fields or have an invalid key ring/database URL") from error
+    if not valid_keys or not valid_database:
+        raise ValueError("Credentials require 32-byte encryption keys and matching local database settings")
     return selected
 
 
-def prepare_secrets(state: Path) -> None:
+def administrator(state: Path, email: str, *, retained: bool) -> dict[str, str] | None:
+    """The administrator to bootstrap, created once for fresh data; None when existing data has no local record."""
+    path = state / ADMIN_FILE
+    if path.exists():
+        return read_env(path)
+    if retained:
+        return None
+    if "@" not in email or any(c.isspace() for c in email):
+        raise ValueError("K8S_ADMIN_EMAIL must be an email address")
+    values = {"EMAIL": email, "PASSWORD": secrets.token_urlsafe(24)}
+    write_private(path, values)
+    return values
+
+
+def prepare(state: Path) -> dict[str, str] | None:
+    """Persist credentials and the administrator record before the first cluster write, so reruns reuse them."""
     local = {name: read_env(state / filename) for name, filename in SECRET_FILES.items() if (state / filename).exists()}
     remote = {}
     for name in SECRET_FILES:
@@ -110,37 +133,42 @@ def prepare_secrets(state: Path) -> None:
         if raw.strip():
             remote[name] = {k: base64.b64decode(v).decode() for k, v in json.loads(raw)["data"].items()}
     retained = bool(json.loads(kubectl("get", "pvc", "-o", "json", capture=True))["items"])
-    selected = credentials(
-        local, remote, retained=retained, email=os.environ.get("K8S_ADMIN_EMAIL", "admin@example.com")
-    )
+    selected = credentials(local, remote, retained=retained)
     for name, values in selected.items():
         path = state / SECRET_FILES[name]
         if not path.exists():
-            with open(path, "x", opener=lambda p, flags: os.open(p, flags, 0o600)) as stream:
-                stream.write("".join(f"{k}={v}\n" for k, v in values.items()))
+            write_private(path, values)
         path.chmod(0o600)
-    # Persist both files before the first cluster write so either Secret can be retried.
+    admin = administrator(state, os.environ.get("K8S_ADMIN_EMAIL", "admin@example.com"), retained=retained)
     for name, values in selected.items():
         if name not in remote:
             manifest = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": name}, "stringData": values}
             kubectl("create", "-f", "-", capture=True, input_text=json.dumps(manifest))
     print(f"Credentials preserved in {state} (env files mode 600).", flush=True)
+    return admin
 
 
-def bootstrap_link(logs: str) -> str | None:
-    prefix = "Administrator initialization link (single use): "
-    link = None
-    for line in logs.splitlines():
-        try:
-            message = json.loads(line).get("message", "")
-        except (ValueError, AttributeError):
-            continue
-        if message.startswith(prefix):
-            candidate = message[len(prefix) :].strip()
-            parsed = urlsplit(candidate)
-            if candidate.startswith(ORIGIN + "/invitations/") and parsed.fragment.startswith("token="):
-                link = candidate
-    return link
+def bootstrap(admin: dict[str, str]) -> bool:
+    """Create the administrator; False when the Service was already initialized."""
+    password = admin["PASSWORD"]
+    result = subprocess.run(
+        [
+            *("kubectl", "--context", CONTEXT, "-n", NAMESPACE, "exec", "-i", CONTROL, "--"),
+            *("a13n-service", "--config", "/app/service.toml", "bootstrap", "--email", admin["EMAIL"]),
+            "--password-stdin",
+        ],
+        cwd=ROOT,
+        text=True,
+        # Standard input keeps the password out of process arguments.
+        input=f"{password}\n",
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == ALREADY_BOOTSTRAPPED:
+        return False
+    raise RuntimeError(f"Administrator bootstrap failed (exit {result.returncode}); inspect {CONTROL} logs")
 
 
 def start(state: Path) -> None:
@@ -148,21 +176,20 @@ def start(state: Path) -> None:
         if not shutil.which(tool):
             raise RuntimeError(f"Install {tool} before running make k8s-up")
     run("docker", "info", capture=True)
-    clusters = run("kind", "get", "clusters", capture=True).splitlines()
-    if "a13n-local" not in clusters:
-        print("Creating kind cluster a13n-local...", flush=True)
+    if CLUSTER not in run("kind", "get", "clusters", capture=True).splitlines():
+        print(f"Creating kind cluster {CLUSTER}...", flush=True)
         run(
             "kind",
             "create",
             "cluster",
             "--name",
-            "a13n-local",
+            CLUSTER,
             "--config",
             "deploy/kubernetes/kind-local.yaml",
             "--wait",
             "5m",
         )
-    nodes = run("kind", "get", "nodes", "--name", "a13n-local", capture=True).splitlines()
+    nodes = run("kind", "get", "nodes", "--name", CLUSTER, capture=True).splitlines()
     mappings = [
         json.loads(run("docker", "inspect", node, capture=True))[0]["HostConfig"]["PortBindings"] for node in nodes
     ]
@@ -170,14 +197,14 @@ def start(state: Path) -> None:
         raise ValueError("Existing kind cluster lacks 127.0.0.1:8080 -> 30080 mapping; no cluster was deleted")
     if not kubectl("get", "namespace", NAMESPACE, "--ignore-not-found", "-o", "name", capture=True).strip():
         kubectl("create", "namespace", NAMESPACE)
-    prepare_secrets(state)
+    admin = prepare(state)
     tag = "local-" + secrets.token_hex(6)
     images = [f"{name}:{tag}" for name in ("a13n-service", "a13n-console")]
     for name, image in zip(("a13n-service", "a13n-console"), images, strict=True):
         print(f"Building {image}...", flush=True)
         run("docker", "build", "--progress=plain", "-f", f"deploy/containers/{name}/Dockerfile", "-t", image, ".")
-    run("kind", "load", "docker-image", *images, "--name", "a13n-local")
-    print("Deploying; Helm waits for readiness (up to 40 minutes)...", flush=True)
+    run("kind", "load", "docker-image", *images, "--name", CLUSTER)
+    print("Deploying; Helm waits for migration and readiness (up to 20 minutes)...", flush=True)
     try:
         run(
             "helm",
@@ -197,53 +224,40 @@ def start(state: Path) -> None:
             f"console.image.tag={tag}",
             "--wait",
             "--timeout",
-            "40m",
+            "20m",
         )
     except RuntimeError:
-        kubectl("get", "pods,pvc")
-        print("Inspect Service logs and namespace events for startup failures; credentials and PVCs are retained.")
+        kubectl("get", "pods,jobs,pvc")
+        print("Inspect migration Job and Service logs and namespace events; credentials and PVCs are retained.")
         raise
     kubectl("get", "pods,pvc")
-    print(f"Console: {ORIGIN}/login", flush=True)
-    logs = kubectl("logs", "deployment/a13n-a13n", capture=True)
-    link = bootstrap_link(logs)
-    if link:
-        print(f"Administrator initialization (single use; keep private):\n{link}")
-    else:
+    print(f"Console: {CONSOLE_URL}", flush=True)
+    if admin is None:
         print(
-            "No new initialization link in this Pod. Sign in with your existing account.\n"
-            "If initialization is still pending and its link was lost, run make k8s-admin-link."
+            "Sign in with your existing administrator. An uninitialized installation can create one with:\n"
+            f"kubectl --context {CONTEXT} -n {NAMESPACE} exec -it {CONTROL} -- "
+            "a13n-service --config /app/service.toml bootstrap --email you@example.com"
         )
+        return
+    created = bootstrap(admin)
+    print(
+        f"{'Created administrator' if created else 'Sign in as'} {admin['EMAIL']}; "
+        f"the initial password is in {state / ADMIN_FILE} (mode 600)."
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("up", "admin-link"))
-    args = parser.parse_args()
-    state = Path(os.environ.get("K8S_STATE_DIR", "~/.config/a13n-local")).expanduser().resolve()
+    parser.add_argument("action", choices=("up",))
+    parser.parse_args()
+    state = Path(os.environ.get("K8S_STATE_DIR", "~/.config/a13n-service-kind")).expanduser().resolve()
     if state == ROOT or ROOT in state.parents:
         parser.error("K8S_STATE_DIR must be outside the checkout")
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (state / "operation.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if args.action == "up":
-                start(state)
-            else:
-                print(
-                    "Replacing a pending administrator invitation; completed initialization cannot be reopened.",
-                    flush=True,
-                )
-                kubectl(
-                    "exec",
-                    "deployment/a13n-a13n",
-                    "--",
-                    "a13n-service",
-                    "--config",
-                    "/app/service.toml",
-                    "iam",
-                    "reissue-bootstrap",
-                )
+            start(state)
         except (OSError, ValueError, RuntimeError) as error:
             parser.exit(1, f"{error}\n")
 

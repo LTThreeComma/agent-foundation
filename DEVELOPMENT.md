@@ -26,12 +26,11 @@ Across Console, Harness UI, and shared UI, default to **logic tests plus core UI
 
 ## Service Shape
 
-`a13n-service` ships one package and container image with three independently deployable roles and their all-in-one composition:
+`a13n-service` ships one package and container image with two independently deployable roles and their all-in-one composition:
 
-- `all`: control, worker, and connectivity capabilities in one process;
-- `control`: APIs, scheduling, and control-plane maintenance;
-- `worker`: Run workers, in-process a13n MCP tool groups, native-action and Connector runtime adapters, and remote MCP clients;
-- `connectivity`: provider event ingress, polling, and durable inbound admission only.
+- `all`: control and worker capabilities in one process;
+- `control`: APIs, maintenance and delivery;
+- `worker`: claims and executes runs through the Harness.
 
 A role is a process ownership and scaling boundary, not a separate product, schema, organization, or authorization boundary. Every background loop must have one explicit owning role, and overlap during rolling deployment must be safe through durable leases, fencing, or idempotency.
 
@@ -43,7 +42,7 @@ Organize business code by feature and add layers only for a real capability; do 
 - Application services own use-case orchestration and short transaction boundaries. They do not import FastAPI or encode HTTP status.
 - Repositories own SQLAlchemy queries, may flush, and never commit. ORM objects stay inside the persistence boundary and are not API responses or Harness contracts.
 - Durable asynchronous lifecycles use idempotent reconcilers and fenced workers. Model, tool, queue, and stream waits happen outside database transactions.
-- Process-role wiring selects routers, reconcilers, and workers; `control`, `worker`, and `connectivity` do not duplicate feature or domain models. Connectivity loads trusted inbound Ingress adapters; the executing Worker loads trusted native-action and Connector runtime adapters for in-process MCP tool groups. Control loads ConnectorProvider clients for management operations; `all` composes these role contributions without duplicating shared resources.
+- Process-role wiring selects routers and bounded background work; roles share the same domain models. [Runtime composition](spec/a13n-service/09-runtime.md) owns their business contributions.
 
 ### Naming
 
@@ -51,7 +50,7 @@ Use the package and module hierarchy as a namespace instead of repeating it in e
 
 - Name feature packages after precise domain nouns, such as `agents`, `assets`, `models`, `secrets`, and `skills`. Do not append generic ownership words such as `_management`, `_manager`, `_service`, or `_system` to a feature namespace.
 - Name a type for what it represents. Do not prefix it with the repository, distribution, service, or containing feature name merely to provide context. Retain a qualifier such as `Workspace`, `Run`, or `Environment` only when it distinguishes real concepts at the same boundary.
-- Use domain suffixes consistently: `Record` is an ORM persistence type, `Request` is inbound command data, `Revision` is immutable lineage content, `Snapshot` is a frozen capture, `Selection` is a choice, `Lock` is an exact frozen dependency, and `Receipt` is bounded operation evidence. Do not add a suffix only to make a name longer or more architectural.
+- Use domain suffixes consistently: `Row` is a Service ORM persistence type, `Request` is inbound command data, `Revision` is immutable lineage content, `Snapshot` is a frozen capture, `Selection` is a choice, `Lock` is an exact frozen dependency, and `Receipt` is bounded operation evidence. Do not add a suffix only to make a name longer or more architectural.
 - Application `Service`, `Resolver`, `Factory`, `Reconciler`, and `Preparer` types must describe one cohesive role that is not already clear from a function. Avoid generic `Manager`, `Helper`, `Common`, and `Utils` abstractions.
 - Python refactors do not rename stable wire fields, error codes, event names, table names, indexes, or migration history merely to mirror an internal identifier.
 
@@ -63,7 +62,7 @@ Product-facing HTTP APIs use the `/api` namespace. Keep OpenAPI schemas and inte
 
 Operational liveness and readiness probes use explicit paths such as `/healthz` and `/readyz` outside `/api`. They expose only bounded process and dependency state and are not product resources. Unknown product API paths return API errors rather than an HTML application response.
 
-a13n Service exposes APIs and operational probes without hosting browser assets. Worker- and connectivity-only roles do not expose product APIs. Browser clients follow the shared ingress Origin, cookie, and CSRF contract; local tooling does not justify permissive CORS.
+a13n Service exposes APIs and operational probes without hosting browser assets. Worker-only roles do not expose product APIs. Browser clients follow the shared ingress Origin, cookie, and CSRF contract; local tooling does not justify permissive CORS.
 
 ## Generated Code and Static Analysis
 
@@ -79,7 +78,7 @@ Create process-wide engines and clients during FastAPI lifespan, store them in e
 
 ## Database Sessions and Transactions
 
-All service code obtains the canonical engine and session factory from `open_storage()` and uses `short_session()` and `transaction()` from `a13n_service.storage`. Do not construct local engines or session makers.
+All service code obtains the canonical engine and session factory from `a13n_service.infra.db.Storage` and uses its canonical `short_session()` and `transaction()` scopes. Do not construct local engines or session makers.
 
 An `AsyncSession` is a mutable unit of work. Never share it across concurrent tasks or store it in a singleton. Keep each transaction around one small database operation, and do not hold a session, connection, transaction, or lock while waiting for:
 
@@ -101,8 +100,8 @@ Complete authentication, authorization, and initial reads in a short session tha
 
 Minimize database work across the complete application operation using the short-read, external-preparation, short-commit flow above. Simple database-only operations can stay in one transaction. Preserve the owning specification's observation and concurrency boundaries.
 
-- **Observe authority once.** Follow the [IAM contract](spec/a13n-service/33-identity-and-access-management.md#authorization-contract): read each Principal/Workspace and credential on first use, then reuse detached facts while still checking each action, target, and credential boundary. Do not use IAM row locks. Later revocation affects the next operation; requests, polls, and independent background items do not share an operation snapshot. Attempt authorization refresh remains separate.
-- **Select configuration once.** For [Run acceptance](spec/a13n-service/18-agent-control-input-and-continuation.md), validate and freeze the complete selection, including descendants, using ordinary reads. Do not reread defaults or rebuild prepared state because of later edits. No shared database timestamp is required. Management serialization and runtime eligibility checks retain their own contracts.
+- **Observe authority once.** Follow the [IAM contract](spec/a13n-service/03-tenancy.md#authorization): read each Principal/Workspace and credential on first use, then reuse detached facts while still checking each action, target, and credential boundary. Take IAM row locks only where the IAM contract requires them: administrative changes serialize on the organization and recheck the actor's grants inside the changing transaction. Later revocation affects the next operation; requests, polls, and independent background items do not share an operation snapshot. Attempt authorization refresh remains separate.
+- **Select configuration once.** For [Run acceptance](spec/a13n-service/05-runs.md), validate and freeze the complete selection, including descendants, using ordinary reads. Do not reread defaults or rebuild prepared state because of later edits. No shared database timestamp is required. Management serialization and runtime eligibility checks retain their own contracts.
 - **Keep commit-time arbitration.** Recheck required state, versions, source integrity, capacity, leases, generations, and idempotency. Keep command replay preflight read-only; arbitrate evidence with the business mutation and roll back tentative writes before replaying a concurrent winner.
 - **Pass known facts forward.** Reuse existing IDs, selections, and returned values. Prefer existing parameters or small cohesive types; avoid giant Context objects and long forwarding chains. Reuse does not replace authoritative scope or relation checks.
 - **Batch repeated work.** Deduplicate inputs and use bounded set reads and writes. Batch recurring renewals when justified, preserving per-item authority, deadlines, cancellation, conflicts, and accounting.
@@ -113,7 +112,7 @@ Minimize database work across the complete application operation using the short
 
 Each a13n Service build artifact supplies one final metadata registry and ordered migration graph through its fixed distribution descriptor. Domains own model and revision meaning; the distribution explicitly assembles their contributions; a13n Service owns one resolved registry, one graph, and at most one head for that artifact. Package scanning, import side effects, organization state, and runtime edition selection never change migration contents.
 
-The OSS artifact resolves its registry from `a13n_service.database.metadata` and its service revision location. A private EE or Cloud artifact adds reviewed model and revision contributions through its own fixed descriptor before invoking the same generator and runner contract. Generation, current-head verification, migration application, and readiness must consume the same resolved composition.
+The OSS artifact resolves its registry from `a13n_service.distribution.OSS` and its service revision location. A private EE or Cloud artifact adds reviewed model and revision contributions through its own fixed descriptor before invoking the same generator and runner contract. Generation, current-head verification, migration application, and readiness must consume the same resolved composition.
 
 Use the repository workflow rather than creating files manually:
 
@@ -127,16 +126,16 @@ Autogenerate is only a draft. Review names, constraints, server defaults, nullab
 
 ### Auto migration and locking
 
-The shared image enables auto migration by default for `all` and `control`, with PostgreSQL advisory locking serializing concurrent rollout replicas. Deployments that use a dedicated singleton migration job disable replica auto migration. The `worker` and `connectivity` roles never migrate; a non-owner performs `db current --check-heads` and fails closed when schema is incompatible.
+The shared image enables auto migration by default for `all` and `control`, with PostgreSQL advisory locking serializing concurrent rollout replicas. Deployments that use a dedicated singleton migration job disable replica auto migration. The `worker` role never migrates; a non-owner checks the composed schema head and fails closed when schema is incompatible.
 
 PostgreSQL migrations use a dedicated synchronous `NullPool` connection and a service-scoped session advisory lock. The same connection holds the lock across revision inspection, transactional DDL, reviewed autocommit blocks, and stamping. Advisory-lock waiting temporarily uses `lock_timeout=0` and its own bounded `statement_timeout`; after acquisition, the normal short DDL lock timeout is restored. This keeps replica serialization independent from table-lock safety.
 
-| Setting                                                   | Default | Reason                                              |
-| --------------------------------------------------------- | ------- | --------------------------------------------------- |
-| `A13N_SERVICE_MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS`    | `900`   | Never wait forever for another migration runner     |
-| `A13N_SERVICE_MIGRATION_LOCK_TIMEOUT_SECONDS`             | `3`     | Fail quickly when application traffic blocks DDL    |
-| `A13N_SERVICE_MIGRATION_STATEMENT_TIMEOUT_SECONDS`        | `900`   | Bound each migration statement                      |
-| `A13N_SERVICE_MIGRATION_IDLE_TRANSACTION_TIMEOUT_SECONDS` | `30`    | Prevent abandoned transactions from retaining locks |
+| Setting                                             | Default | Reason                                              |
+| --------------------------------------------------- | ------- | --------------------------------------------------- |
+| `A13N_DATABASE__MIGRATION_ADVISORY_LOCK_TIMEOUT`    | `900`   | Never wait forever for another migration runner     |
+| `A13N_DATABASE__MIGRATION_LOCK_TIMEOUT`             | `3`     | Fail quickly when application traffic blocks DDL    |
+| `A13N_DATABASE__MIGRATION_STATEMENT_TIMEOUT`        | `900`   | Bound each migration statement                      |
+| `A13N_DATABASE__MIGRATION_IDLE_TRANSACTION_TIMEOUT` | `30`    | Prevent abandoned transactions from retaining locks |
 
 These values apply only to migration connections. Override them only for a reviewed migration plan. A timeout stops startup; do not retry in a tight loop or stamp past failed work. The advisory lock serializes runners only—it does not pause traffic or make incompatible DDL safe.
 

@@ -45,7 +45,7 @@ For context lifecycle features, callers supply Harness-managed policy through th
 
 ## Long-Term Memory
 
-Memory is opt-in. `MemoryCapability` works with any implementation of the typed `MemoryBackend` contract. Mem0 OSS and Platform are built-in adapters. For OSS, open a native transport in your Host and pass it to the Capability. The [Service memory guide](../a13n-service/memory.md) covers hosted authorization and deployment. The OSS adapter calls public native endpoints on an existing deployment; no source patch or special server image is required. Its list operation is bounded, not paginated.
+Memory is opt-in. `MemoryCapability` works with any implementation of the typed `MemoryBackend` contract. Mem0 OSS and Platform are built-in adapters. For OSS, open a native transport in your Host and pass it to the Capability. The Service does not offer memory; embedded Hosts retain these capabilities. The OSS adapter calls public native endpoints on an existing deployment; no source patch or special server image is required. Its list operation is bounded, not paginated.
 
 ```python
 from a13n_harness.capabilities import MemoryCapability, MemoryScope
@@ -117,7 +117,7 @@ async with definition.open({"base_url": mem0_url}, {"api_key": mem0_api_key}) as
     # Or call backend operations directly with trusted MemorySubject values.
 ```
 
-Installed extensions contribute `ProviderManifest.memory` alongside Model and Web through the same `a13n_harness.providers.plugins` entry point. A host calls `load_provider_plugins(("acme",))` and explicitly builds a catalog from the selected definitions. Installation does not enable a package. Duplicate types fail; unselected entry points remain unloaded. Hosted applications select an authorized [Memory Provider resource](../a13n-service/memory.md) instead of embedding credentials in an Agent.
+Installed extensions contribute `ProviderManifest.memory` alongside Model and Web through the same `a13n_harness.providers.plugins` entry point. A host calls `load_provider_plugins(("acme",))` and explicitly builds a catalog from the selected definitions. Installation does not enable a package. Duplicate types fail; unselected entry points remain unloaded. The embedding Host owns credential selection and authorization. The Service has no memory resources.
 
 The implemented built-ins are `mem0_oss`, `mem0_platform`, and the document-only `filesystem`. OSS uses HTTP directly and needs no Platform SDK. Install `a13n-harness[mem0]` for Platform. Its native SDK loads only when used; local construction defers the SDK's synchronous validation ping. Neither Mem0 backend automatically retries uncertain writes. Each definition declares `supports_records`, `supports_documents`, `supports_revisions`, and `supports_changes`; a definition without record support has no `open_backend`, declares `FilesystemMemoryConfiguration`, and opens only through the Host's own file binding.
 
@@ -127,7 +127,7 @@ The public names are `MemoryCapability`, `MemoryEntry`, and `MemoryScope`, with 
 
 `FilesystemMemoryStore` in `a13n_harness.providers.memory.filesystem.store` stores Markdown revisions with validated JSON frontmatter through a borrowed Environment `FileOperator`. It never opens a Worker-local path or executes shell commands. The Host supplies a root-confined, incarnation-pinned file operator, the exact storage identity, trusted subject and principal, and callbacks that check current read/write and source authority. The `filesystem` definition is selectable from the same Memory catalog; its empty credential schema is `forbidden` authentication and does not grant Environment access. Open it with `open_filesystem_store(configuration, binding=FilesystemMemoryBinding(...))`; `definition.open()` rejects this document-only backend.
 
-Service and Console expose this backend through document entries. Embedded Hosts can use the same store directly. A raw filesystem operator alone is not a complete hosted memory binding: the Host also supplies current authority, stable target identity, and conditional publication.
+Embedded Hosts can use this store through document entries. A raw filesystem operator alone is not a complete hosted memory binding: the Host also supplies current authority, stable target identity, and conditional publication.
 
 Writes require a Host-supplied `MemoryFileCoordinator`. Its transaction coordinates cooperating writes and erasure across processes, keeps the exact storage binding, settles issued I/O before releasing ownership, and publishes complete bytes conditionally and durably. An in-process lock, a lease without storage fencing, or ordinary `FileOperator.write_text()` alone does not implement that contract. `EnvironmentMemoryFileCoordinator` in `a13n_harness.providers.memory.filesystem.commit` stages one operation and publishes through the optional Environment `commit` capability. POSIX Direct Local and current EIP/envd adapters implement that capability; unsupported adapters fail explicitly. Set the coordinator root to `store.subject_root`. Native OS locking serializes cooperating commits across processes, and all observed content digests are checked before ordered publication. This is not an all-or-nothing multi-file transaction and does not serialize shell or ordinary file edits. Without one, document reads remain available, writes fail before mutation, and model write tools are omitted.
 
@@ -175,7 +175,7 @@ The Host opens `mem0_backend` and prepares `filesystem_store` with the bindings 
 
 Entries contribute peer guidance and distinct untrusted context blocks under a shared 64 KiB memory budget. Oversized document navigation is explicitly deferred to that entry's index tool. Required document-index failure stops before model work; optional failure leaves an explicit unavailable projection. Native entries retain their bounded once-per-run recall. Host-owned typed record calls select an entry explicitly, for example `await memory.add(ctx, text, entry="preferences", scope=MemoryScope.USER)` on the current run Capability.
 
-Entry names route tools; they do not change storage namespaces. There is no implicit synchronization, dual writing, cross-entry transaction, or fallback. The existing single-backend constructor remains supported for existing embedded Hosts and retained Service integrations.
+Entry names route tools; they do not change storage namespaces. There is no implicit synchronization, dual writing, cross-entry transaction, or fallback. The existing single-backend constructor remains supported for existing embedded Hosts and other Host integrations.
 
 ## Working State
 

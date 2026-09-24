@@ -123,7 +123,7 @@ The default timeout is 600 seconds with a five-second connect timeout; both argu
 | `retry_after_max_wait_seconds` | 300.0              |
 | `status_codes`                 | 429, 502, 503, 504 |
 
-The helper also retries supported timeout/connect/read errors. Attempt count must be positive; waits are finite and nonnegative; status codes must be valid HTTP integers. `DEFAULT_MODEL_HTTP_RETRY_CONFIG` and `DEFAULT_MODEL_HTTP_RETRY_STATUS_CODES` expose these defaults. Do not assume this Model transport has the same policy as the [Service SDK transport](../a13n-service/sdks.md).
+The helper also retries supported timeout/connect/read errors. Attempt count must be positive; waits are finite and nonnegative; status codes must be valid HTTP integers. `DEFAULT_MODEL_HTTP_RETRY_CONFIG` and `DEFAULT_MODEL_HTTP_RETRY_STATUS_CODES` expose these defaults. These are Model transport policies; each independent Service SDK owns its own transport and retry contract.
 
 ## Do not combine retry budgets accidentally
 

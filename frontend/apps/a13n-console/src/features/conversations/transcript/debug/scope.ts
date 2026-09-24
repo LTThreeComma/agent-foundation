@@ -2,7 +2,7 @@ import type { Schema } from "../../../../shared/api";
 
 /** What every timeline row of one Run needs to know about that Run. */
 export interface RunScope {
-  run: Schema["RunResource"];
+  run: Schema["RunView"];
   /** Start of the Run's measured span and its length, for the time bars. */
   start: number;
   span: number;

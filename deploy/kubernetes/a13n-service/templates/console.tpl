@@ -1,10 +1,4 @@
 {{- if .Values.console.enabled }}
-{{- $control := include "a13n.name" . -}}
-{{- $connectivity := $control -}}
-{{- if eq .Values.profile "distributed" -}}
-{{- $connectivity = printf "%s-connectivity" $control -}}
-{{- $control = printf "%s-control" $control -}}
-{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -64,10 +58,8 @@ spec:
             capabilities:
               drop: [ALL]
           env:
-            - name: A13N_CONTROL_UPSTREAM
-              value: {{ printf "http://%s:8000" $control | quote }}
-            - name: A13N_CONNECTIVITY_UPSTREAM
-              value: {{ printf "http://%s:8000" $connectivity | quote }}
+            - name: A13N_SERVICE_UPSTREAM
+              value: {{ printf "http://%s-control:8000" (include "a13n.name" .) | quote }}
           ports:
             - name: http
               containerPort: 8080

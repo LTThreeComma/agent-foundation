@@ -40,7 +40,7 @@ For packaging and release changes, read [repository boundaries](spec/repository-
 Retain these constraints and read [DEVELOPMENT.md](DEVELOPMENT.md) for the full service engineering contract:
 
 - Keep service I/O async and use canonical storage helpers. Never hold a database session or transaction across agent execution, external I/O, waits, background work, or streams. Streaming routes must not receive yielded database sessions, including through authentication dependencies.
-- Generate migrations with the owning Make target against a disposable database, then review rollout safety; never write revisions from scratch. Worker and connectivity roles never migrate. The `all` and `control` roles auto-migrate under bounded PostgreSQL advisory locking; a dedicated migration job disables replica auto migration.
+- Generate migrations with the owning Make target against a disposable database, then review rollout safety; never write revisions from scratch. The worker role never migrates. The `all` and `control` roles auto-migrate under bounded PostgreSQL advisory locking; a dedicated migration job disables replica auto migration.
 - Build one non-root service image with runtime role selection. Libraries use namespaced `a13n-logging` loggers; executables configure logging once.
 - Keep model-visible and user-trace identifiers concise and kind-prefixed. Preserve entropy where unpredictability is part of a security or protocol contract.
 

@@ -9,9 +9,7 @@ export function MCPConnectionIcon({
   size?: number;
 }) {
   const servers = useMCPServers();
-  const preset = servers.data?.find(
-    (server) => server.endpoint_url === endpoint,
-  );
+  const preset = servers.data?.find((server) => server.url === endpoint);
   return (
     <BrandIcon
       identity={preset?.key}

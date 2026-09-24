@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
 import { useClient } from "../../../auth/context";
 import { useWorkspace } from "../../../layout/workspace";
-import { data, workspaceHeaders, type Schema } from "../../../shared/api";
+import { data, ifMatch, type Schema } from "../../../shared/api";
 import {
   CollectionFooter,
   ListRow,
@@ -14,6 +14,7 @@ import {
 import { Confirm } from "../../../shared/dialogs";
 import { ErrorNotice, Loading, Timestamp } from "../../../shared/feedback";
 import { DownloadRevision } from "../archive";
+import { revisionsQuery } from "../revisions";
 import { SourceIcon, skillSource } from "../source";
 
 /**
@@ -32,26 +33,9 @@ export function Revisions({
     { workspace, can } = useWorkspace(),
     cache = useQueryClient(),
     page = useCursor();
-  const query = useQuery({
-    queryKey: [
-      "skills",
-      skill.workspace_id,
-      skill.id,
-      "revisions",
-      page.cursor,
-    ],
-    queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/skills/{skill_id}/revisions", {
-          params: {
-            path: { skill_id: skill.id },
-            query: { cursor: page.cursor },
-          },
-          headers: workspaceHeaders(skill.workspace_id),
-          signal,
-        })
-        .then(data),
-  });
+  const query = useQuery(
+    revisionsQuery(client, skill.workspace_id, skill.id, page.cursor),
+  );
   if (query.isPending) return <Loading variant="list" rows={4} />;
   if (!query.data)
     return (
@@ -63,10 +47,10 @@ export function Revisions({
         {query.data.items.map((revision) => (
           <ListRow
             key={revision.id}
-            icon={<SourceIcon kind={revision.imported_from.kind} size={15} />}
+            icon={<SourceIcon kind={revision.config.source.kind} size={15} />}
             name={
               <>
-                <Link to={`?revision=${revision.id}`}>v{revision.version}</Link>
+                <Link to={`?revision=${revision.id}`}>v{revision.number}</Link>
                 {revision.id === skill.default_revision_id && (
                   <span className="text-xs text-muted-foreground">
                     {" "}
@@ -79,21 +63,22 @@ export function Revisions({
               <>
                 <Timestamp value={revision.created_at} relative />
                 {" · "}
-                {skillSource(revision.imported_from.kind) === "github"
+                {skillSource(revision.config.source.kind) === "github"
                   ? "GitHub"
                   : t("ZIP")}
                 {" · "}
                 {t("{{count}} files", {
-                  count: revision.manifest.files.length,
+                  count: revision.config.files.length,
                 })}
               </>
             }
             actions={
               <>
-                {can("skill.revision.publish") &&
+                {can("write") &&
+                  !skill.archived_at &&
                   revision.id !== skill.default_revision_id && (
                     <Confirm
-                      subject={`${skill.name} · v${revision.version}`}
+                      subject={`${skill.name} · v${revision.number}`}
                       triggerVariant="ghost"
                       title={t("Set as default")}
                       description={t(
@@ -109,16 +94,16 @@ export function Revisions({
                           );
                         await client.http
                           .POST(
-                            "/api/v1/skills/{skill_id}/revisions/{skill_revision_id}/default",
+                            "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/revisions/{revision_id}/set-default",
                             {
                               params: {
                                 path: {
+                                  workspace_id: skill.workspace_id,
                                   skill_id: skill.id,
-                                  skill_revision_id: revision.id,
+                                  revision_id: revision.id,
                                 },
-                                header: { "If-Match": etag },
                               },
-                              headers: workspaceHeaders(workspace.id),
+                              headers: ifMatch(etag),
                             },
                           )
                           .then(data);
@@ -130,7 +115,7 @@ export function Revisions({
                   )}
                 <DownloadRevision
                   revision={revision}
-                  filename={`${skill.key}-v${revision.version}.zip`}
+                  filename={`${skill.key}-v${revision.number}.zip`}
                 />
               </>
             }

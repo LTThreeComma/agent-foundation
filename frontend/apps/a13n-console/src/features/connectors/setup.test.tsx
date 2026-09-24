@@ -8,10 +8,13 @@ import { ConnectionSetup } from "./setup";
 const mocks = vi.hoisted(() => ({
   POST: vi.fn(),
   GET: vi.fn(),
+  PATCH: vi.fn(),
   start: vi.fn(),
 }));
 vi.mock("../../auth/context", () => ({
-  useClient: () => ({ http: { POST: mocks.POST, GET: mocks.GET } }),
+  useClient: () => ({
+    http: { POST: mocks.POST, GET: mocks.GET, PATCH: mocks.PATCH },
+  }),
 }));
 vi.mock("../connections/authorization-context", () => ({
   startBrowserAuthorization: mocks.start,
@@ -32,28 +35,35 @@ afterEach(() => {
   cleanup();
   vi.resetAllMocks();
 });
+const setup = { auth_config_id: "ac_test", toolkit_version: "20260903_01" };
 const connection: Schema["Connection"] = {
   id: "conn_test",
   organization_id: "org_test",
   workspace_id: "ws_test",
-  source: {
-    kind: "connector",
-    provider_id: "cnr_test",
-    connector_key: "github",
-  },
+  type: "composio",
   name: "GitHub",
+  config: { app: "github", actions: ["GITHUB_GET_REPO"], setup },
+  auth: "account",
+  connector_provider_id: "cprov_test",
   status: "pending",
-  version: 1,
-  authorization_generation: 1,
+  failure: null,
   credential_configured: false,
-  created_by: { principal_type: "user", principal_id: "usr_test" },
+  client_secret_configured: false,
+  authorization_pending: false,
+  last_test: null,
+  enabled: true,
+  version: 1,
+  created_by_id: "usr_test",
+  updated_by_id: "usr_test",
   created_at: "2026-09-12T00:00:00Z",
   updated_at: "2026-09-12T00:00:00Z",
 };
-const connector = {
+const connector: Schema["ConnectorApp"] = {
   key: "github",
-  connector_provider_id: "cnr_test",
   name: "GitHub",
+  description: null,
+  logo_url: null,
+  unavailable_reason: null,
   authentication_methods: ["OAUTH2"],
   setup_schema: {
     type: "object",
@@ -63,12 +73,45 @@ const connector = {
     },
     required: ["auth_config_id", "toolkit_version"],
   },
-} as Schema["Connector"];
-function mount(resource?: Schema["Connection"]) {
+};
+const provider: Schema["Provider"] = {
+  id: "cprov_test",
+  organization_id: "org_test",
+  workspace_id: null,
+  type: "composio",
+  name: "Composio",
+  config: {},
+  credential_configured: true,
+  header_names: [],
+  enabled: true,
+  version: 1,
+  created_by_id: "usr_test",
+  updated_by_id: "usr_test",
+  created_at: "2026-09-12T00:00:00Z",
+  updated_at: "2026-09-12T00:00:00Z",
+};
+const action = (name: string): Schema["ToolInfo"] => ({
+  name,
+  description: null,
+  input_schema: {},
+});
+function mount(
+  resource?: Schema["Connection"],
+  {
+    app = connector,
+    actions = [action("GITHUB_GET_REPO")],
+  }: { app?: Schema["ConnectorApp"]; actions?: Schema["ToolInfo"][] } = {},
+) {
   mocks.GET.mockImplementation(async (path: string) => ({
-    data: path.includes("/connectors/{connector_key}")
-      ? connector
-      : (resource ?? connection),
+    data: path.endsWith("/apps/{app}/actions")
+      ? { items: actions, next_cursor: null }
+      : path.endsWith("/apps/{app}")
+        ? app
+        : (resource ?? connection),
+    response: new Response(),
+  }));
+  mocks.PATCH.mockImplementation(async () => ({
+    data: { ...(resource ?? connection), version: 9 },
     response: new Response(),
   }));
   render(
@@ -79,11 +122,15 @@ function mount(resource?: Schema["Connection"]) {
         })
       }
     >
-      <ConnectionSetup connection={resource} connector={connector} />
+      {resource ? (
+        <ConnectionSetup connection={resource} />
+      ) : (
+        <ConnectionSetup connector={connector} provider={provider} />
+      )}
     </QueryClientProvider>,
   );
 }
-it("submits fixed setup options through the common browser authorization", async () => {
+it("saves fixed setup options with the configuration before the common browser authorization", async () => {
   mount(connection);
   expect(screen.queryByRole("textbox", { name: "toolkit_version" })).toBeNull();
   await userEvent.click(
@@ -92,10 +139,17 @@ it("submits fixed setup options through the common browser authorization", async
   await waitFor(() =>
     expect(mocks.start).toHaveBeenCalledWith(
       expect.anything(),
-      connection,
+      { ...connection, version: 9 },
       "/workspace/design",
-      { auth_config_id: "ac_test", toolkit_version: "20260903_01" },
     ),
+  );
+  expect(mocks.PATCH).toHaveBeenCalledWith(
+    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
+    {
+      params: { path: { workspace_id: "ws_test", connection_id: "conn_test" } },
+      headers: { "If-Match": '"conn_test:1"' },
+      body: { config: connection.config },
+    },
   );
 });
 it("reauthorizes a ready account under its stable connection ID", async () => {
@@ -107,14 +161,13 @@ it("reauthorizes a ready account under its stable connection ID", async () => {
   await waitFor(() =>
     expect(mocks.start).toHaveBeenCalledWith(
       expect.anything(),
-      ready,
-      expect.anything(),
+      { ...ready, version: 9 },
       expect.anything(),
     ),
   );
   expect(mocks.POST).not.toHaveBeenCalled();
 });
-it("retains a created connection when authorization fails and starts again with its current version", async () => {
+it("creates the connection with every app action that fits, then retains it when authorization fails", async () => {
   mocks.POST.mockResolvedValue({ data: connection, response: new Response() });
   mocks.start
     .mockRejectedValueOnce(new Error("Response lost"))
@@ -127,10 +180,58 @@ it("retains a created connection when authorization fails and starts again with 
   );
   await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(2));
   expect(mocks.POST).toHaveBeenCalledExactlyOnceWith(
-    "/api/v1/workspaces/{workspace}/connections",
-    expect.objectContaining({
-      body: { name: "GitHub", source: connection.source },
-    }),
+    "/api/v1/workspaces/{workspace_id}/connections",
+    {
+      params: { path: { workspace_id: "ws_test" } },
+      body: {
+        type: "composio",
+        name: "GitHub",
+        config: connection.config,
+        auth: "account",
+        connector_provider_id: "cprov_test",
+      },
+    },
   );
-  expect(mocks.start.mock.calls[1][1].id).toBe(connection.id);
+  expect(mocks.start.mock.calls[0][1]).toBe(connection);
+  expect(mocks.start.mock.calls[1][1]).toEqual({ ...connection, version: 9 });
+});
+it("asks for a choice when the app offers more tools than a connection may", async () => {
+  mocks.POST.mockResolvedValue({ data: connection, response: new Response() });
+  mocks.start.mockReturnValue(new Promise(() => {}));
+  const actions = Array.from({ length: 130 }, (_, index) =>
+    action(`GITHUB_ACTION_${index}`),
+  );
+  mount(undefined, { actions });
+  await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+  await screen.findByText("Select at least one tool.");
+  expect(mocks.POST).not.toHaveBeenCalled();
+  await userEvent.click(
+    screen.getByRole("checkbox", { name: "GITHUB_ACTION_1" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+  await waitFor(() => expect(mocks.start).toHaveBeenCalledOnce());
+  expect(mocks.POST.mock.calls[0][1].body.config.actions).toEqual([
+    "GITHUB_ACTION_1",
+  ]);
+});
+it("keeps the saved tools of an existing connection", async () => {
+  mount(connection, {
+    actions: [action("GITHUB_GET_REPO"), action("GITHUB_LIST_ISSUES")],
+  });
+  const saved = await screen.findByRole("checkbox", {
+    name: "GITHUB_GET_REPO",
+  });
+  expect(saved.getAttribute("aria-checked")).toBe("true");
+  expect(
+    screen
+      .getByRole("checkbox", { name: "GITHUB_LIST_ISSUES" })
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+});
+it("treats an app without authentication methods as unavailable", async () => {
+  mount(undefined, { app: { ...connector, authentication_methods: [] } });
+  await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+  await screen.findByText("This connector is unavailable from its provider.");
+  expect(mocks.POST).not.toHaveBeenCalled();
+  expect(mocks.start).not.toHaveBeenCalled();
 });

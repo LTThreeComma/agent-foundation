@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 from a13n_envd_client import EIPSessionStateError
+from a13n_envd_client.eip import v1 as eip
+from a13n_envd_client.errors import EIPMethodError
 from a13n_harness.providers.catalog import ProviderCatalog
 from a13n_harness.providers.environment.builtins import select_builtin_environment_providers
 from a13n_harness.providers.environment.errors import EnvironmentProviderError
@@ -427,6 +429,26 @@ async def test_http_failed_preparation_never_replays_connection_attempt(monkeypa
     await environment.close()
     assert calls == ["connect"]
     assert not environment.recover_on_unavailable
+
+
+@pytest.mark.parametrize(
+    ("expected", "code"), [("env-native", "provider_device_mismatch"), (None, "provider_connection_failed")]
+)
+async def test_http_names_a_refusal_for_another_device_a_device_mismatch(monkeypatch, expected, code):
+    from a13n_harness.providers.environment.remote_envd import http as http_module
+
+    async def incompatible(*args, **kwargs):
+        data = eip.EIPErrorData(error_type="protocol_incompatible", retry_hint="never", dispatch_stage="pre_dispatch")
+        raise EIPMethodError(eip.EIPError(code=-32003, message="Device identity or protocol does not match", data=data))
+
+    monkeypatch.setattr(http_module.EIPDeviceConnection, "initialize", incompatible)
+    async with HttpEnvdProviderRuntime(
+        HttpEnvdConnectionConfiguration(endpoint="https://envd.example"),
+        HttpEnvdCredential(token=SecretStr("test-token")),
+    ) as runtime:
+        with pytest.raises(EnvironmentProviderError) as raised:
+            await runtime.describe(expected_device_id=expected)
+    assert raised.value.code == code
 
 
 async def test_websocket_concurrent_shutdown_does_not_recancel_cleanup(monkeypatch):

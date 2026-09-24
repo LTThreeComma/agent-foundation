@@ -2,37 +2,13 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "required": [
-    "profile",
-    "replicaCount",
+    "image",
     "existingSecret",
-    "image"
+    "publicUrl",
+    "roles",
+    "objects"
   ],
-  "properties": {
-    "profile": {
-      "enum": [
-        "local",
-        "distributed"
-      ]
-    },
-    "replicaCount": {
-      "type": "integer",
-      "minimum": 1
-    },
-    "existingSecret": {
-      "type": "string",
-      "minLength": 1
-    },
-    "publicOrigin": {
-      "type": "string",
-      "minLength": 1
-    },
-    "environmentName": {
-      "type": "string",
-      "minLength": 1
-    },
-    "extraConfig": {
-      "type": "string"
-    },
+  "definitions": {
     "image": {
       "type": "object",
       "required": [
@@ -59,62 +35,85 @@
       },
       "additionalProperties": false
     },
+    "role": {
+      "type": "object",
+      "required": [
+        "replicaCount"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resources": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "properties": {
+    "image": {
+      "$ref": "#/definitions/image"
+    },
+    "existingSecret": {
+      "type": "string",
+      "minLength": 1
+    },
+    "publicUrl": {
+      "type": "string",
+      "pattern": "^https?://"
+    },
+    "trustedProxies": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "extraConfig": {
+      "type": "string"
+    },
     "roles": {
       "type": "object",
       "required": [
         "control",
-        "worker",
-        "connectivity"
+        "worker"
       ],
       "additionalProperties": false,
       "properties": {
         "control": {
-          "type": "object",
-          "required": [
-            "replicaCount"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "replicaCount": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "resources": {
-              "type": "object"
-            }
-          }
+          "$ref": "#/definitions/role"
         },
         "worker": {
-          "type": "object",
-          "required": [
-            "replicaCount"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "replicaCount": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "resources": {
-              "type": "object"
-            }
-          }
+          "$ref": "#/definitions/role"
+        }
+      }
+    },
+    "objects": {
+      "type": "object",
+      "required": [
+        "backend"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "enum": [
+            "local",
+            "s3"
+          ]
         },
-        "connectivity": {
-          "type": "object",
-          "required": [
-            "replicaCount"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "replicaCount": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "resources": {
-              "type": "object"
-            }
-          }
+        "bucket": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "endpointUrl": {
+          "type": "string"
         }
       }
     },
@@ -135,30 +134,7 @@
           "minimum": 1
         },
         "image": {
-          "type": "object",
-          "required": [
-            "repository",
-            "tag",
-            "pullPolicy"
-          ],
-          "properties": {
-            "repository": {
-              "type": "string",
-              "minLength": 1
-            },
-            "tag": {
-              "type": "string",
-              "minLength": 1
-            },
-            "pullPolicy": {
-              "enum": [
-                "Always",
-                "IfNotPresent",
-                "Never"
-              ]
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/definitions/image"
         },
         "service": {
           "type": "object",

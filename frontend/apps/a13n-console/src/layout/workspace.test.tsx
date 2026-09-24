@@ -11,7 +11,9 @@ vi.mock("../auth/context", () => ({
     isPending: false,
     error: null,
     data: {
-      organizations: [{ id: "org_test", key: "acme", name: "Acme" }],
+      organizations: [
+        { id: "org_test", key: "acme", name: "Acme", permissions: [] },
+      ],
       user: { value: { id: "usr_test" } },
     },
   }),
@@ -31,22 +33,30 @@ function CurrentWorkspace() {
 }
 function mount(
   path: string,
-  { permissionsError }: { permissionsError?: Error } = {},
+  { workspacesError }: { workspacesError?: Error } = {},
 ) {
   mocks.GET.mockImplementation(async (route: string) => {
-    if (route.endsWith("/workspaces"))
+    if (route.endsWith("/workspaces")) {
+      if (workspacesError) throw workspacesError;
       return {
         data: {
           items: [
-            { id: "ws_first", key: "research", name: "Research" },
-            { id: "ws_second", key: "design", name: "Design" },
+            {
+              id: "ws_first",
+              key: "research",
+              name: "Research",
+              permissions: ["read"],
+            },
+            {
+              id: "ws_second",
+              key: "design",
+              name: "Design",
+              permissions: ["read"],
+            },
           ],
           next_cursor: null,
         },
       };
-    if (route.endsWith("/permissions")) {
-      if (permissionsError) throw permissionsError;
-      return { data: { actions: ["agent.read"], organization_admin: false } };
     }
     throw new Error(`Unexpected route: ${route}`);
   });
@@ -119,9 +129,9 @@ it("preserves the selected workspace when provider management opens in another t
   ).toBeTruthy();
 });
 
-it("offers retry, workspace switching, and personal settings when permissions fail", async () => {
+it("offers retry and personal settings when workspaces fail", async () => {
   mount("/workspace/design/agents", {
-    permissionsError: new Error("Permissions unavailable"),
+    workspacesError: new Error("Workspaces unavailable"),
   });
 
   expect(
@@ -132,20 +142,12 @@ it("offers retry, workspace switching, and personal settings when permissions fa
       .getByRole("link", { name: "Personal settings" })
       .getAttribute("href"),
   ).toBe("/settings/profile");
-  expect(
-    screen
-      .getByRole("link", { name: "Switch workspace: Research" })
-      .getAttribute("href"),
-  ).toBe("/workspace/research/agents");
-  expect(
-    screen.queryByRole("link", { name: "Switch workspace: Design" }),
-  ).toBeNull();
 
-  const permissionCalls = () =>
+  const workspaceCalls = () =>
     mocks.GET.mock.calls.filter(([route]) =>
-      String(route).endsWith("/permissions"),
+      String(route).endsWith("/workspaces"),
     ).length;
-  const beforeRetry = permissionCalls();
+  const beforeRetry = workspaceCalls();
   await userEvent.click(screen.getByRole("button", { name: "Try again" }));
-  await waitFor(() => expect(permissionCalls()).toBeGreaterThan(beforeRetry));
+  await waitFor(() => expect(workspaceCalls()).toBeGreaterThan(beforeRetry));
 });

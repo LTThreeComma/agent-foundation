@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
+import { useAccess } from "../../layout/workspace";
 import { type Schema } from "../../shared/api";
 import {
   ResourceModalTitle,
@@ -53,8 +54,9 @@ function EditModel({
 } & ResourceEditorControl) {
   const client = useClient(),
     { t } = useTranslation(),
+    { organization } = useAccess(),
     [generation, setGeneration] = useState(0),
-    api = modelApi(client, scope);
+    api = modelApi(client, organization.id, scope);
   const { open, setOpen, modalProps } = useResourceEditorState({
     controlledOpen,
     onClose,

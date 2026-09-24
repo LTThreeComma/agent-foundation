@@ -166,6 +166,8 @@ class ToolExecutionBoundaryCapability(AbstractCapability[AgentContext]):
     async def before_node_run(
         self, ctx: RunContext[AgentContext], *, node: AgentNode[AgentContext]
     ) -> AgentNode[AgentContext]:
+        if ctx.run_id != ctx.deps._model_recovery.attempt_id:
+            return node
         resume = ctx.deps.deferred_resume
         if isinstance(node, CallToolsNode) and resume is not None:
             await record_approval_denials(resume.requests, resume.results, context=ctx.deps)
@@ -823,18 +825,30 @@ def _validate_resume_surface(
     resume = ctx.deps.deferred_resume
     # Native deferred dispatch precedes the first model step. Later steps have
     # consumed this batch and may prepare a different dynamic tool surface.
-    if resume is None or ctx.run_step != 0:
+    recovery = ctx.deps._tool_recovery
+    requests = resume.requests if resume is not None else recovery.retained_requests if recovery is not None else None
+    if requests is None or ctx.run_step != 0 or ctx.run_id != ctx.deps._model_recovery.attempt_id:
         return
-    for call in resume.requests.calls:
+    results = resume.results if resume is not None else recovery.results if recovery is not None else None
+    for call in requests.calls:
         name = call.tool_name
         tool = tools.get(name)
-        function_id = resume.requests.metadata.get(call.tool_call_id, {}).get("a13n.harness.deferred-function-id")
-        matches = tool is not None and (
-            (tool.tool_def.kind == "external" and function_id is None)
-            or (
-                function_id is not None
-                and tool.tool_def.kind in {"function", "unapproved"}
-                and tool_identity(tool.tool_def).tool_id == function_id
+        function_id = requests.metadata.get(call.tool_call_id, {}).get("a13n.harness.deferred-function-id")
+        negative_closure = (
+            tool is None
+            and function_id is None
+            and results is not None
+            and isinstance(results.calls.get(call.tool_call_id), ToolFailed)
+        )
+        matches = negative_closure or (
+            tool is not None
+            and (
+                (tool.tool_def.kind == "external" and function_id is None)
+                or (
+                    function_id is not None
+                    and tool.tool_def.kind in {"function", "unapproved"}
+                    and tool_identity(tool.tool_def).tool_id == function_id
+                )
             )
         )
         if not matches:
@@ -844,8 +858,8 @@ def _validate_resume_surface(
                 details={"tool_name": name},
             )
 
-    for request in resume.requests.approvals:
-        expected_tool_id = managed_approval_tool_id(resume.requests, request.tool_call_id)
+    for request in requests.approvals:
+        expected_tool_id = managed_approval_tool_id(requests, request.tool_call_id)
         if expected_tool_id is None:
             continue
         tool = tools.get(request.tool_name)

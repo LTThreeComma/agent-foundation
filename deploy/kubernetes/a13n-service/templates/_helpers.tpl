@@ -8,27 +8,71 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{- define "a13n.validate" -}}
-{{- if not (has .Values.profile (list "local" "distributed")) -}}
-{{- fail "profile must be local or distributed" -}}
-{{- end -}}
-{{- if lt (int .Values.replicaCount) 1 -}}
-{{- fail "replicaCount must be positive" -}}
-{{- end -}}
-{{- if and (eq .Values.profile "local") (ne (int .Values.replicaCount) 1) -}}
-{{- fail "local storage requires exactly one replica" -}}
-{{- end -}}
-{{- if eq .Values.profile "distributed" -}}
-{{- if .Values.redis.enabled -}}
-{{- fail "bundled Redis is for local development only" -}}
-{{- end -}}
-{{- if .Values.postgresql.enabled -}}
-{{- fail "bundled PostgreSQL is for local development only" -}}
-{{- end -}}
-{{- $_ := required "distributed profile requires objects.bucket" .Values.objects.bucket -}}
-{{- $_ := required "distributed profile requires persistence.existingClaim (RWX)" .Values.persistence.existingClaim -}}
-{{- if not (hasPrefix "https://" .Values.publicOrigin) -}}
-{{- fail "distributed publicOrigin must use HTTPS" -}}
+{{- if and (eq .Values.objects.backend "s3") (not .Values.objects.bucket) -}}
+{{- fail "objects.bucket is required for the s3 backend" -}}
 {{- end -}}
 {{- end -}}
-{{- $_ := required "existingSecret is required" .Values.existingSecret -}}
+
+{{/* Pod fields shared by both Service roles and the migration Job. */}}
+{{- define "a13n.podSpec" -}}
+serviceAccountName: {{ include "a13n.name" . }}
+# Service link variables such as A13N_A13N_CONTROL_PORT would be rejected as unknown Service settings.
+enableServiceLinks: false
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+
+{{/* Container fields shared by every Service process: image, hardening, credentials and configuration. */}}
+{{- define "a13n.container" -}}
+image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+imagePullPolicy: {{ .Values.image.pullPolicy }}
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+envFrom:
+  - secretRef:
+      name: {{ .Values.existingSecret }}
+volumeMounts:
+  - name: config
+    mountPath: /app/service.toml
+    subPath: service.toml
+    readOnly: true
+  {{- if eq .Values.objects.backend "local" }}
+  - name: objects
+    mountPath: /app/var/objects
+  {{- end }}
+{{- end -}}
+
+{{- define "a13n.volumes" -}}
+- name: config
+  configMap:
+    name: {{ include "a13n.name" . }}-config
+{{- if eq .Values.objects.backend "local" }}
+- name: objects
+  persistentVolumeClaim:
+    claimName: {{ default (printf "%s-objects" (include "a13n.name" .)) .Values.persistence.existingClaim }}
+{{- end }}
 {{- end -}}

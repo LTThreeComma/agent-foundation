@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from anyio import Semaphore, create_task_group
-
 from a13n_harness.providers.connector.configuration import ApiKeyCredentials
 from a13n_harness.providers.connector.contracts import JsonObject
 
@@ -17,7 +15,6 @@ from ..contracts import (
     ConnectionBinding,
     ConnectionInspection,
     ConnectorProviderError,
-    ConnectorTool,
     ConnectorToolOutcome,
     ConnectorToolPage,
     DiscoveredConnector,
@@ -35,9 +32,8 @@ from ..validation import (
     required_string,
     same_origin_url,
 )
-from .catalog import TOOLKIT_VERSION, ComposioCatalog
-from .configuration import COMPOSIO_ENDPOINT
-from .output_schema import corrected_output_schema
+from .catalog import TOOLKIT_VERSION, ComposioCatalog, ComposioToolCatalog
+from .configuration import COMPOSIO_CONNECT_ENDPOINT, COMPOSIO_ENDPOINT
 
 
 class ComposioProvider:
@@ -53,8 +49,8 @@ class ComposioProvider:
     def connect(self, binding: ConnectionBinding) -> ComposioConnection:
         return ComposioConnection(self._http, self._api_key, binding)
 
-    def tool_catalog(self, connector_key: str) -> ComposioToolCatalog:
-        return ComposioToolCatalog(self._http, self._api_key, connector_key)
+    def tool_catalog(self, connector_key: str, *, provider_version: str | None = None) -> ComposioToolCatalog:
+        return ComposioToolCatalog(self._http, self._api_key, connector_key, provider_version=provider_version)
 
     async def inspect_setup(self, *, setup_ref: str, context: SetupContext) -> ConnectionInspection:
         return await self.connect(
@@ -118,6 +114,7 @@ class ComposioProvider:
                 external_ref=required_string(response, "connected_account_id"),
                 expires_at=_link_expiry(response),
                 redirect_url=_authorization_url(response.get("redirect_url")),
+                expected_metadata={"auth_config_id": auth_config.id, "auth_scheme": auth_config.scheme},
                 completion_method=SetupCompletionMethod.oauth_verifier
                 if auth_config.scheme == "OAUTH2"
                 else SetupCompletionMethod.browser_confirmation,
@@ -158,7 +155,10 @@ class ComposioProvider:
         except ValueError as error:
             raise ConnectorProviderError("invalid_provider_response", outcome_unknown=True) from error
         return SetupStarted(
-            setup_ref=identifier, external_ref=identifier, completion_method=SetupCompletionMethod.polling
+            setup_ref=identifier,
+            external_ref=identifier,
+            completion_method=SetupCompletionMethod.polling,
+            expected_metadata={"auth_config_id": auth_config.id, "auth_scheme": auth_config.scheme},
         )
 
     async def complete_setup(
@@ -188,7 +188,19 @@ class ComposioProvider:
                 raise ConnectorProviderError("connection_substitution")
         except ValueError as error:
             raise ConnectorProviderError("invalid_provider_response", outcome_unknown=True) from error
-        return await self.inspect_setup(setup_ref=expected_external_ref, context=context)
+        try:
+            return await self.inspect_setup(setup_ref=expected_external_ref, context=context)
+        except ConnectorProviderError as error:
+            # Redemption succeeded; a failed follow-up read cannot prove rejection.
+            if error.code in {
+                "provider_unavailable",
+                "rate_limited",
+                "provider_rejected",
+                "response_too_large",
+                "invalid_provider_response",
+            }:
+                raise ConnectorProviderError(error.code, outcome_unknown=True) from error
+            raise
 
 
 def _link_expiry(response: JsonObject) -> datetime:
@@ -202,108 +214,7 @@ def _authorization_url(value: object) -> str:
     # Connect Links are hosted separately from the REST API. Never accept a wildcard origin.
     if not isinstance(value, str):
         raise ValueError("Invalid authorization URL")
-    return same_origin_url(value, endpoint="https://connect.composio.dev")
-
-
-class ComposioToolCatalog:
-    """Read a toolkit's definitions without an external account binding."""
-
-    def __init__(
-        self,
-        http: ConnectorHttpClient,
-        api_key: str,
-        connector_key: str,
-    ) -> None:
-        self._http = http
-        self._api_key = api_key
-        self._connector_key = connector_key
-        self._catalog_version: str | None = None
-
-    async def discover_tools(self, *, cursor: str | None) -> ConnectorToolPage:
-        if self._catalog_version is None:
-            toolkit = required_object(
-                await self._http.request(
-                    "GET",
-                    endpoint=COMPOSIO_ENDPOINT,
-                    path=f"/api/v3.1/toolkits/{path_segment(self._connector_key)}",
-                    api_key=self._api_key,
-                )
-            )
-            if required_string(toolkit, "slug", max_length=128) != self._connector_key:
-                raise ConnectorProviderError("provider_mismatch")
-            version = required_string(required_object(toolkit.get("meta")), "version", max_length=128)
-            if TOOLKIT_VERSION.fullmatch(version) is None:
-                raise ConnectorProviderError("incompatible_toolkit_version")
-            self._catalog_version = version
-        version = self._catalog_version
-        params = {
-            "toolkit_slug": self._connector_key,
-            f"toolkit_versions[{self._connector_key}]": version,
-            "limit": "100",
-        }
-        if cursor is not None:
-            params["cursor"] = cursor
-        value = required_object(
-            await self._http.request(
-                "GET",
-                endpoint=COMPOSIO_ENDPOINT,
-                path="/api/v3.1/tools",
-                api_key=self._api_key,
-                params=params,
-            )
-        )
-        items = value.get("items")
-        if not isinstance(items, list) or len(items) > 100:
-            raise ConnectorProviderError("invalid_provider_response")
-        entries = [required_object(item) for item in items]
-        keys = [required_string(item, "slug", max_length=128) for item in entries]
-        if len(keys) != len(set(keys)):
-            raise ConnectorProviderError("invalid_provider_response")
-        tools: dict[str, ConnectorTool] = {}
-        limit = Semaphore(32)
-
-        async def load(key: str, entry: JsonObject) -> None:
-            # Current directory pages already carry complete, versioned schemas.
-            # Sparse directory entries still need the individual detail endpoint.
-            if {"toolkit", "version", "input_parameters", "output_parameters"} <= entry.keys():
-                tools[key] = parse_detail(key, entry)
-            else:
-                async with limit:
-                    tools[key] = await detail_for(key)
-
-        async def detail_for(key: str) -> ConnectorTool:
-            detail = required_object(
-                await self._http.request(
-                    "GET",
-                    endpoint=COMPOSIO_ENDPOINT,
-                    path=f"/api/v3.1/tools/{path_segment(key)}",
-                    api_key=self._api_key,
-                    params={"version": version},
-                )
-            )
-            return parse_detail(key, detail)
-
-        def parse_detail(key: str, detail: JsonObject) -> ConnectorTool:
-            if (
-                required_string(detail, "slug", max_length=128) != key
-                or required_string(required_object(detail.get("toolkit")), "slug", max_length=128)
-                != self._connector_key
-                or required_string(detail, "version", max_length=128) != version
-            ):
-                raise ConnectorProviderError("incompatible_tool_version")
-            return _tool(detail)
-
-        try:
-            async with create_task_group() as group:
-                for key, entry in zip(keys, entries, strict=True):
-                    group.start_soon(load, key, entry)
-        except* (ConnectorProviderError, ValueError) as failures:
-            raise failures.exceptions[0] from None
-        return ConnectorToolPage(
-            items=tuple(tools[key] for key in keys),
-            next_cursor=optional_string(value.get("next_cursor")),
-            provider_version=version,
-        )
+    return same_origin_url(value, endpoint=COMPOSIO_CONNECT_ENDPOINT)
 
 
 class ComposioConnection:
@@ -421,7 +332,14 @@ def _inspection(
     disabled = value.get("is_disabled", False)
     if not isinstance(disabled, bool):
         raise ValueError("Invalid account enabled state")
-    if disabled:
+    auth_config = required_object(value.get("auth_config", {}))
+    auth_disabled = auth_config.get("is_disabled", False)
+    if not isinstance(auth_disabled, bool):
+        raise ValueError("Invalid authentication configuration state")
+    scheme = optional_string(auth_config.get("auth_scheme"), max_length=64)
+    if value.get("authScheme") is not None and scheme is not None and value["authScheme"] != scheme:
+        raise ConnectorProviderError("provider_mismatch")
+    if disabled or auth_disabled:
         status, reason = AdapterConnectionStatus.disabled, None
     return ConnectionInspection(
         external_ref=external_ref,
@@ -430,6 +348,8 @@ def _inspection(
         status=status,
         status_reason=reason,
         safe_metadata={
+            "auth_config_id": optional_string(auth_config.get("id"), max_length=256),
+            "auth_scheme": scheme,
             "display_name": optional_string(value.get("alias"), max_length=256),
             "created_at": optional_string(value.get("created_at"), max_length=64),
             "updated_at": optional_string(value.get("updated_at"), max_length=64),
@@ -448,20 +368,3 @@ def _status(value: str) -> tuple[AdapterConnectionStatus, AdapterStatusReason | 
     if value in {"EXPIRED", "REVOKED"}:
         return AdapterConnectionStatus.action_required, AdapterStatusReason.reauthorization_required
     return AdapterConnectionStatus.action_required, AdapterStatusReason.incompatible
-
-
-def _tool(value: JsonObject) -> ConnectorTool:
-    key = required_string(value, "slug", max_length=128)
-    version = required_string(value, "version", max_length=128)
-    return ConnectorTool(
-        provider_version=version,
-        key=key,
-        description=optional_string(value.get("description"), max_length=16_384) or "",
-        input_schema=required_object(value.get("input_parameters")),
-        output_schema=(
-            corrected_output_schema(required_object(value["output_parameters"]), tool_key=key, version=version)
-            if value.get("output_parameters") is not None
-            else None
-        ),
-        annotations={},
-    )

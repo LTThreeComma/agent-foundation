@@ -45,32 +45,31 @@ beforeEach(() => {
       requests.push(url.pathname);
       if (url.pathname.endsWith("/threads"))
         return Response.json({ items: [], next_cursor: null });
+      if (url.pathname.endsWith("/threads/thr_1"))
+        return Response.json(fixtureThread());
       if (url.pathname.endsWith("/attempts"))
         return Response.json({
           items: [
             {
               id: "att_1",
-              attempt_number: 1,
+              run_id: "run_2",
+              number: 1,
               status: "succeeded",
               started_at: "2026-09-20T10:00:00.000Z",
               finished_at: "2026-09-20T10:00:12.000Z",
+              created_at: "2026-09-20T10:00:00.000Z",
               start_reason: "initial",
               yield_reason: null,
               failure: null,
+              harness_run_id: "harness_1",
+              worker_build: "build",
+              replaces_attempt_id: null,
             },
           ],
-          next_cursor: null,
         });
       if (url.pathname.endsWith("/lineage"))
-        return Response.json({ head_run_id: "run_2", items: [] });
-      if (url.pathname.endsWith("/events"))
-        return Response.json({
-          items: [],
-          next_resource_seq: 0,
-          high_watermark_resource_seq: 0,
-          retained_resource_seq_floor: 0,
-        });
-      if (url.pathname.includes("/environment-mounts"))
+        return Response.json({ items: [fixtureRun()], next_cursor: null });
+      if (url.pathname.endsWith("/environments"))
         return Response.json({ items: [], next_cursor: null });
       if (url.pathname.includes("/runs/")) return Response.json(fixtureRun());
       throw new Error(`Unexpected request: ${url.pathname}`);
@@ -154,7 +153,7 @@ it("says so when the execution history is incomplete", () => {
   ).toBeTruthy();
 });
 
-it("offers Retry on a failed run and names the failure", () => {
+it("names the failure of a failed run and leaves continuing to the dock", () => {
   const run = fixtureRun({
     status: "failed",
     failure: { code: "model_rate_limited", message: "Upstream said no." },
@@ -163,7 +162,7 @@ it("offers Retry on a failed run and names the failure", () => {
   expect(
     screen.getByText("Run failed · model_rate_limited · Upstream said no."),
   ).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Retry run" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Retry run" })).toBeNull();
 });
 
 it("opens the run details in place, on demand", async () => {
@@ -176,14 +175,13 @@ it("opens the run details in place, on demand", async () => {
     within(attempts.closest("li")!).getByText("state.succeeded"),
   ).toBeTruthy();
   expect(screen.getByText("Overview")).toBeTruthy();
-  expect(screen.getByText("Lifecycle events")).toBeTruthy();
+  expect(await screen.findByText("Continued run")).toBeTruthy();
 });
 
 it("pauses an unresolved call while the run waits for a person", () => {
   const run = fixtureRun({
     status: "waiting",
-    completed_at: null,
-    waiting_at: "2026-09-20T10:00:05.000Z",
+    sealed_at: "2026-09-20T10:00:05.000Z",
     wait_reason: "approval",
   });
   const execution = fixtureExecution();
@@ -201,8 +199,7 @@ it("pauses an unresolved call while the run waits for a person", () => {
 it("names the application when only it can return the result", () => {
   const run = fixtureRun({
     status: "waiting",
-    completed_at: null,
-    waiting_at: "2026-09-20T10:00:05.000Z",
+    sealed_at: "2026-09-20T10:00:05.000Z",
     wait_reason: "client_tool",
   });
   show({ run, timeline: fixtureTimeline({ run }) });
@@ -224,21 +221,21 @@ it("leaves a model request without reported tokens unstated, never zeroed", () =
 
 it("reads an asynchronous child's result as the child's own reply", () => {
   const run = fixtureRun({
-    input_kind: "async_subagent_result",
+    trigger: "child_result",
     input: {
-      schema_version: "1",
-      subagent_name: "Researcher",
-      terminal_status: "completed",
-      result_payload: "INC-118 matches this fold.",
+      child_run_id: "run_child",
+      subagent: "Researcher",
+      status: "completed",
+      output: "INC-118 matches this fold.",
+      failure: null,
     },
-    input_text: null,
   });
   show({ run, timeline: fixtureTimeline({ run }) });
   expect(screen.getByText("Subagent result · Researcher")).toBeTruthy();
   expect(screen.getByText("INC-118 matches this fold.")).toBeTruthy();
   // The child's terminal status is the quiet second line of the request.
   expect(screen.getAllByText("state.completed").length).toBe(2);
-  expect(screen.queryByText(/result_payload/)).toBeNull();
+  expect(screen.queryByText(/child_run_id/)).toBeNull();
 });
 
 it("reads a child thread's run as the task its parent delegated", () => {
@@ -254,11 +251,10 @@ it("reads a child thread's run as the task its parent delegated", () => {
         },
       ],
     },
-    input_text: null,
   });
   show({
     run,
-    thread: fixtureThread({ role: "child" }),
+    thread: fixtureThread({ origin: "child" }),
     timeline: fixtureTimeline({ run }),
   });
   expect(screen.getByText("Delegated task")).toBeTruthy();
@@ -297,7 +293,8 @@ it("shows a later attempt and its recovery gap, and nothing for the first", () =
       delaySeconds: null,
     },
   ];
-  show({ timeline: fixtureTimeline({ execution }) });
+  const run = fixtureRun({ attempts: 2 });
+  show({ run, timeline: fixtureTimeline({ run, execution }) });
   expect(
     screen.getByText(
       "Recovery · worker_replaced: events before this point may be missing",

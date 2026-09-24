@@ -1,86 +1,97 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, ChoiceField, FormField, Input, ReadOnlyField } from "a13n-ui";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
-import { data, type Schema } from "../../shared/api";
+import { data, ifMatch, rowTag, type Schema } from "../../shared/api";
 import { CopyButton } from "../../shared/identity";
 import { ErrorNotice } from "../../shared/feedback";
 import { FormActions } from "../../shared/forms";
 import styles from "../../shared/shared.module.css";
+import { connectionPath } from "../connections/api";
 
-type ClientInput = Schema["MCPOAuthClientInput"];
-type AuthMethod = ClientInput["token_endpoint_auth_method"];
-type GrantType = ClientInput["grant_type"];
+type AuthMethod = Schema["ClientAuthentication"];
+type GrantType = Schema["OAuthGrant"];
 
+const grants = ["authorization_code", "client_credentials"] as const;
 const authLabels = {
   none: "Public client (no secret)",
   client_secret_basic: "Client secret in Basic header",
   client_secret_post: "Client secret in request body",
 } as const;
+/** A machine account always authenticates its client with a secret. */
+const methodsFor = (grant: GrantType) =>
+  (["none", "client_secret_basic", "client_secret_post"] as const).filter(
+    (method) => grant === "authorization_code" || method !== "none",
+  );
 
 export function MCPOAuthClientEditor({
   connection,
-  configuration,
-  discovery,
+  config,
   onSaved,
   onCancel,
 }: {
   connection: Schema["Connection"];
-  configuration: Schema["MCPOAuthClientConfiguration"] | null;
-  discovery: Schema["MCPOAuthDiscovery"];
+  config: Schema["McpConfig"];
   onSaved: (connection: Schema["Connection"], grant: GrantType) => void;
   onCancel?: () => void;
 }) {
   const client = useClient(),
     cache = useQueryClient(),
     { t } = useTranslation(),
-    supportedGrants = discovery.grant_types_supported,
-    supportedMethods = discovery.token_endpoint_auth_methods_supported,
-    initialGrant =
-      configuration?.grant_type ?? supportedGrants[0] ?? "authorization_code";
+    saved = config.oauth,
+    initialGrant = saved?.grant_type ?? "authorization_code";
   const [grant, setGrant] = useState<GrantType>(initialGrant),
-    [clientId, setClientId] = useState(configuration?.client_id ?? ""),
-    [secret, setSecret] = useState("");
-  const methods = supportedMethods.filter(
-    (method) => grant === "authorization_code" || method !== "none",
-  );
-  const [method, setMethod] = useState<AuthMethod>(
-    configuration?.token_endpoint_auth_method ??
-      (initialGrant === "client_credentials"
-        ? (methods.find((value) => value !== "none") ?? "client_secret_basic")
-        : (methods[0] ?? "none")),
-  );
+    [clientId, setClientId] = useState(saved?.client_id ?? ""),
+    [secret, setSecret] = useState(""),
+    [method, setMethod] = useState<AuthMethod>(
+      saved?.token_endpoint_auth_method ?? methodsFor(initialGrant)[0],
+    );
+  const methods = methodsFor(grant);
+  // The Service keeps a stored secret while the server and client ID stay the same.
+  const keepsSecret =
+    connection.client_secret_configured && clientId === saved?.client_id;
+  const redirect = useQuery({
+    queryKey: ["connections", "redirect-uri"],
+    enabled: grant === "authorization_code",
+    staleTime: Infinity,
+    queryFn: ({ signal }) =>
+      client.http
+        .GET("/api/v1/connections/redirect-uri", { signal })
+        .then(data),
+  });
   const save = useMutation({
     gcTime: 0,
     mutationFn: (remove: boolean) =>
       client.http
-        .PUT("/api/v1/connections/{connection_id}/mcp/oauth-client", {
-          params: { path: { connection_id: connection.id } },
-          body: {
-            expected_version: connection.version,
-            client: remove
-              ? null
-              : {
-                  issuer_url: discovery.issuer_url!,
-                  client_id: clientId,
-                  token_endpoint_auth_method: method,
-                  grant_type: grant,
-                  redirect_uri:
-                    grant === "authorization_code"
-                      ? discovery.redirect_uri
-                      : null,
-                  client_secret: method === "none" ? null : secret,
-                },
+        .PATCH(
+          "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
+          {
+            params: { path: connectionPath(connection) },
+            headers: ifMatch(rowTag(connection)),
+            body: {
+              config: {
+                ...config,
+                // Without a client ID the Service registers a client itself.
+                oauth: remove
+                  ? { scopes: saved?.scopes ?? [] }
+                  : {
+                      ...saved,
+                      client_id: clientId,
+                      token_endpoint_auth_method: method,
+                      grant_type: grant,
+                    },
+              },
+              ...(!remove && method !== "none" && secret
+                ? { client_secret: secret }
+                : {}),
+            },
           },
-        })
+        )
         .then(data),
     onSuccess: (updated, remove) => {
       setSecret("");
       void cache.invalidateQueries({ queryKey: ["connections"] });
-      void cache.invalidateQueries({
-        queryKey: ["mcp-oauth-setup", connection.id],
-      });
       onSaved(updated, remove ? "authorization_code" : grant);
     },
   });
@@ -88,11 +99,8 @@ export function MCPOAuthClientEditor({
     if (value !== "authorization_code" && value !== "client_credentials")
       return;
     setGrant(value);
-    const compatible = supportedMethods.filter(
-      (candidate) => value === "authorization_code" || candidate !== "none",
-    );
-    if (!compatible.includes(method))
-      setMethod(compatible[0] ?? "client_secret_basic");
+    const compatible = methodsFor(value);
+    if (!compatible.includes(method)) setMethod(compatible[0]);
     setSecret("");
   };
   return (
@@ -114,26 +122,21 @@ export function MCPOAuthClientEditor({
           )}
         </p>
       </div>
-      {supportedGrants.length > 1 && (
-        <ChoiceField
-          label={t("OAuth grant")}
-          placeholder={t("Select OAuth grant")}
-          value={grant}
-          options={supportedGrants.map((value) => ({
-            value,
-            label: t(
-              value === "authorization_code"
-                ? "User authorization"
-                : "Machine account",
-            ),
-          }))}
-          onValueChange={chooseGrant}
-        />
-      )}
-      <ReadOnlyField label={t("Authorization server")}>
-        <span className="break-all">{discovery.issuer_url}</span>
-      </ReadOnlyField>
-      {grant === "authorization_code" && discovery.redirect_uri && (
+      <ChoiceField
+        label={t("OAuth grant")}
+        placeholder={t("Select OAuth grant")}
+        value={grant}
+        options={grants.map((value) => ({
+          value,
+          label: t(
+            value === "authorization_code"
+              ? "User authorization"
+              : "Machine account",
+          ),
+        }))}
+        onValueChange={chooseGrant}
+      />
+      {grant === "authorization_code" && redirect.data && (
         <ReadOnlyField
           label={t("Callback URL")}
           description={t(
@@ -141,20 +144,26 @@ export function MCPOAuthClientEditor({
           )}
         >
           <span className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 break-all">{discovery.redirect_uri}</span>
+            <span className="min-w-0 break-all">
+              {redirect.data.redirect_uri}
+            </span>
             <CopyButton
-              value={discovery.redirect_uri}
+              value={redirect.data.redirect_uri}
               copyLabel={t("Copy callback URL")}
             />
           </span>
         </ReadOnlyField>
       )}
+      <ErrorNotice
+        error={redirect.error}
+        retry={() => void redirect.refetch()}
+      />
       <FormField label={t("Client ID")}>
         <Input
           autoFocus
           autoComplete="off"
           required
-          maxLength={2048}
+          maxLength={512}
           value={clientId}
           onChange={(event) => setClientId(event.target.value)}
         />
@@ -192,10 +201,10 @@ export function MCPOAuthClientEditor({
           )}
         >
           <Input
-            required
+            required={!keepsSecret}
             type="password"
             autoComplete="new-password"
-            maxLength={16384}
+            maxLength={4096}
             value={secret}
             onChange={(event) => setSecret(event.target.value)}
           />
@@ -209,7 +218,6 @@ export function MCPOAuthClientEditor({
             ? "Save and connect"
             : "Save and authorize",
         )}
-        disabled={!methods.length}
       />
       <div className={styles.actions}>
         {onCancel && (
@@ -222,7 +230,7 @@ export function MCPOAuthClientEditor({
             {t("Cancel")}
           </Button>
         )}
-        {configuration?.source === "pre_registered" && (
+        {saved?.client_id && (
           <Button
             type="button"
             variant="outline"

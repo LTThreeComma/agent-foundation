@@ -22,7 +22,6 @@ export function EditProviderDialog({
   definition,
   scope,
   readOnly = false,
-  description,
   loading = false,
   error,
   onOpenChange,
@@ -38,8 +37,6 @@ export function EditProviderDialog({
   definition?: string;
   scope?: "workspace" | "organization";
   readOnly?: boolean;
-  /** Replaces the composed description where the category must explain more. */
-  description?: string;
   loading?: boolean;
   error?: unknown;
   onOpenChange?: ComponentProps<typeof ModalFrame>["onOpenChange"];
@@ -70,7 +67,7 @@ export function EditProviderDialog({
           t(readOnly ? "Provider" : "Edit provider")
         )
       }
-      description={description ?? composed}
+      description={composed}
     >
       {open &&
         (loading ? (

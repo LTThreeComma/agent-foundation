@@ -23,11 +23,11 @@ export function compareValues(
 }
 
 export function compareObservations(
-  left: Schema["Observation"],
-  right: Schema["Observation"],
+  left: Schema["Span"],
+  right: Schema["Span"],
   sort: ObservationSort,
 ): number {
-  const value = (observation: Schema["Observation"]) =>
+  const value = (observation: Schema["Span"]) =>
     sort.field === "cost"
       ? observation.cost_usd
       : sort.field === "duration"

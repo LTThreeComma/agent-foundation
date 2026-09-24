@@ -10,11 +10,11 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 afterEach(cleanup);
-function mount(value: unknown, media_type: string | null = null) {
+function mount(value: unknown) {
   const cache = new QueryClient();
   return render(
     <QueryClientProvider client={cache}>
-      <TraceContent content={{ media_type, value: value as never }} />
+      <TraceContent content={value} />
     </QueryClientProvider>,
   );
 }
@@ -64,7 +64,7 @@ it("extracts retained OTel messages, tool arguments and results without losing r
   expect(screen.getByRole("button", { name: /Tool definitions/ })).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Raw JSON" }));
   const raw = container.querySelector("pre code")?.textContent;
-  expect(JSON.parse(raw ?? "")).toEqual({ media_type: null, value });
+  expect(JSON.parse(raw ?? "")).toEqual(value);
   expect(
     screen.getByRole("button", { name: "Copy retained content" }),
   ).toBeTruthy();
@@ -119,14 +119,9 @@ it("keeps JSON fences inert, highlights tokens, and does not execute HTML", () =
   ).toContain("<script>");
 });
 
-it("distinguishes unavailable, compact-omitted, empty text, and explicit JSON null", () => {
-  const { rerender } = render(<TraceContent content={null} />);
+it("distinguishes unavailable content from empty text", () => {
+  render(<TraceContent content={null} />);
   expect(screen.getByText(UNKNOWN)).toBeTruthy();
-  rerender(<TraceContent content={null} compact />);
-  expect(screen.getByText("Content omitted in Compact view.")).toBeTruthy();
-  cleanup();
-  mount(null, "application/json");
-  expect(screen.getByText("null")).toBeTruthy();
   cleanup();
   mount("");
   expect(screen.getByText("Empty text")).toBeTruthy();
@@ -151,7 +146,7 @@ it("does not reinterpret scalar strings or malformed JSON and preserves large ra
 
 it("distinguishes chat, tools, agents and phases without guessing unknown types", () => {
   const kind = (type: string, name = "operation") =>
-    observationKind({ type, name });
+    observationKind({ kind: type, name });
   expect(kind("generation")).toBe("chat");
   expect(kind("TOOL")).toBe("tool");
   expect(kind("agent")).toBe("agent");

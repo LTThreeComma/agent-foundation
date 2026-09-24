@@ -1,30 +1,27 @@
 import type { Client } from "../../service-client";
-import { representation, workspaceHeaders } from "../../shared/api";
+import { ifMatch, representation } from "../../shared/api";
 
+/** Replace an agent's avatar with `file`, or remove it; the agent's ETag guards either change. */
 export function changeAgentImage(
   client: Client,
-  workspace: string,
-  agent: string,
+  workspaceId: string,
+  agentId: string,
   etag: string,
   file: File | null,
 ) {
-  const headers = {
-    ...workspaceHeaders(workspace),
-    "Content-Type": file?.type ?? "application/octet-stream",
-  };
-  const params = { path: { workspace, agent }, header: { "If-Match": etag } };
+  const params = { path: { workspace_id: workspaceId, agent_id: agentId } };
   return file
     ? client.http
-        .PUT("/api/v1/workspaces/{workspace}/agents/{agent}/avatar", {
+        .PUT("/api/v1/workspaces/{workspace_id}/agents/{agent_id}/avatar", {
           params,
-          headers,
+          headers: { ...ifMatch(etag), "Content-Type": file.type },
           body: file,
         })
         .then(representation)
     : client.http
-        .DELETE("/api/v1/workspaces/{workspace}/agents/{agent}/avatar", {
+        .DELETE("/api/v1/workspaces/{workspace_id}/agents/{agent_id}/avatar", {
           params,
-          headers,
+          headers: ifMatch(etag),
         })
         .then(representation);
 }

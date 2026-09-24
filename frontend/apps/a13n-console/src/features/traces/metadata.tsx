@@ -2,12 +2,15 @@ import { Badge } from "a13n-ui";
 import { useTranslation } from "react-i18next";
 import type { Schema } from "../../shared/api";
 import { TraceJson } from "./content";
-import { UNKNOWN } from "../../shared/unknown";
+import { correlationAttributes } from "./correlation";
 import styles from "./traces.module.css";
 
-export function metadataChips(observation: Schema["Observation"]) {
-  const attributes = observation.attributes ?? {};
-  const resource = observation.resource_attributes ?? {};
+// Correlation has its own section, so chips keep to the remaining metadata.
+const correlationKeys = new Set<string>(Object.values(correlationAttributes));
+
+export function metadataChips(observation: Schema["Span"]) {
+  const attributes = observation.attributes;
+  const resource = observation.resource_attributes;
   const entries: { key: string; label: string; value: string }[] = [];
   const add = (key: string, label: string, value: unknown) => {
     if (["string", "number", "boolean"].includes(typeof value))
@@ -27,7 +30,10 @@ export function metadataChips(observation: Schema["Observation"]) {
   if (Array.isArray(labels))
     labels.forEach((value, index) => add(`label:${index}`, "Label", value));
   for (const [key, value] of Object.entries(attributes)) {
-    if (key.startsWith("a13n.observation.metadata."))
+    if (
+      key.startsWith("a13n.observation.metadata.") &&
+      !correlationKeys.has(key)
+    )
       add(key, key.slice("a13n.observation.metadata.".length), value);
   }
   return entries;
@@ -36,7 +42,7 @@ export function metadataChips(observation: Schema["Observation"]) {
 export function MetadataChips({
   observation,
 }: {
-  observation: Schema["Observation"];
+  observation: Schema["Span"];
 }) {
   const { t } = useTranslation();
   const chips = metadataChips(observation);
@@ -59,9 +65,8 @@ export function MetadataChips({
 export function AttributeValues({
   value,
 }: {
-  value: Schema["Observation"]["attributes"];
+  value: Schema["Span"]["attributes"];
 }) {
-  if (value === null) return <p className={styles.providerNote}>{UNKNOWN}</p>;
   if (Object.keys(value).length === 0) return <TraceJson value={value} />;
   return (
     <dl className={styles.properties}>

@@ -96,26 +96,26 @@ nav:
       - Host security boundaries: a13n-envd/isolation.md
   - Service:
       - Overview: a13n-service/index.md
-      - Get started:
-          - Use Console: a13n-service/console.md
+      - Get started: a13n-service/get-started.md
+      - Use:
           - Identity and access: a13n-service/identity.md
-          - Agents, Threads, and Runs: a13n-service/agents-and-runs.md
-          - Configuration Assistant: a13n-service/configuration-assistant.md
+          - Agents, threads and runs: a13n-service/agents-and-runs.md
+          - Configuration assistant: a13n-service/configuration-assistant.md
       - Configure resources:
-          - Resource lifecycles: a13n-service/resources.md
+          - Resource basics: a13n-service/resources.md
           - Models: a13n-service/models.md
-          - External tools: a13n-service/external-tools.md
-          - Web Providers: a13n-service/web.md
-          - Long-term memory: a13n-service/memory.md
+          - Tools and connections: a13n-service/tools.md
+          - Skills and secrets: a13n-service/skills.md
+          - Environments: a13n-service/environments.md
+          - Files and webhooks: a13n-service/files-and-webhooks.md
       - Integrate:
-          - Language SDKs: a13n-service/sdks.md
-          - HTTP contracts: a13n-service/http-contracts.md
-          - Streams, events, and gateways: a13n-service/streams-and-events.md
-          - Native API reference: a13n-service/api-reference.md
+          - HTTP conventions: a13n-service/http.md
+          - HTTP reference: a13n-service/api-reference.md
       - Operate:
           - Configure Service: a13n-service/configuration.md
-          - Configuration reference: a13n-service/configuration-reference.md
-          - Background tasks: a13n-service/background-tasks.md
+          - Run and maintain: a13n-service/operations.md
+          - Settings reference: a13n-service/configuration-reference.md
+
   - Stream Protocol:
       - Overview: a13n-stream-protocol/index.md
       - Getting started: a13n-stream-protocol/getting-started.md

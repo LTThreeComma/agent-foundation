@@ -5,7 +5,7 @@ import { TextAreaField } from "../../../shared/forms";
 import { Section } from "../../../shared/page";
 import type { AgentDraft } from "./draft";
 
-/** Protocol, input adapter, structured output, retries, and subagents. */
+/** Structured output, retries, and subagents. */
 export function AdvancedSection({
   draft,
   readOnly,
@@ -23,9 +23,7 @@ export function AdvancedSection({
   return (
     <Section
       title={t("Advanced configuration")}
-      description={t(
-        "Protocol, input adapter, structured output, retries, and subagents.",
-      )}
+      description={t("Structured output, retries, and subagents.")}
     >
       <DisclosureSection
         open={expanded}

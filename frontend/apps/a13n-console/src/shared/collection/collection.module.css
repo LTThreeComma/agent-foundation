@@ -236,3 +236,10 @@ tr:focus-within .rowMenu,
     margin-left: 0;
   }
 }
+.archivedChip {
+  border-radius: 999px;
+}
+.archivedChip[data-active="true"] {
+  background: var(--a13n-selected);
+  color: var(--a13n-text);
+}

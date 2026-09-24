@@ -19,7 +19,7 @@ from a13n_harness.providers.environment.commands import (
     ShellCommand,
 )
 from a13n_harness.providers.environment.direct_local.processes import LocalProcessManager
-from a13n_harness.providers.environment.direct_local.provider import DIRECT_LOCAL
+from a13n_harness.providers.environment.direct_local.provider import DIRECT_LOCAL, DirectLocalEnvironment
 from a13n_harness.providers.environment.models import EnvironmentError
 from a13n_harness.providers.environment.retention import EnvironmentOutputPolicy
 
@@ -120,6 +120,33 @@ async def test_native_background_stdin_and_output(tmp_path: Path) -> None:
         assert terminal.output is not None
         assert terminal.output.stdout.inline == b"first\nsecond\n"
         await processes.release(started.process.handle)
+
+
+async def test_process_identity_follows_a_retyped_provider(tmp_path: Path) -> None:
+    class Workspace(DirectLocalEnvironment):
+        @property
+        def provider_key(self) -> str:
+            return "custom_workspace"
+
+    configuration = DIRECT_LOCAL.validate_environment(
+        {
+            "root": {"path": str(tmp_path)},
+            "allowed_executables": [str(Path(sys.executable).resolve())],
+            "allowed_environment_keys": ["SYSTEMROOT", "PATH"],
+        }
+    )
+    environment = Workspace(configuration, environment_id="w")
+    await environment.enter(mount_id="root")
+    try:
+        await environment.prepare()
+        processes = environment.operations.processes
+        assert processes is not None
+        started = await processes.start(_request("pass"))
+        assert started.process.handle.identity.provider_type == "custom_workspace"
+        await processes.wait(started.process.handle, condition="tree_cleaned", timeout_seconds=5)
+        await processes.release(started.process.handle)
+    finally:
+        await environment.close()
 
 
 @pytest.mark.parametrize("ending", ["root_exit", "kill", "cancel", "close"])

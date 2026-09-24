@@ -15,7 +15,8 @@ export interface ClientOptions {
 const publicMutations = new Set([
   "/api/v1/auth/login",
   "/api/v1/auth/password-reset",
-  "/api/v1/auth/password-reset/complete",
+  "/api/v1/auth/password-reset/confirm",
+  "/api/v1/auth/email-change/confirm",
 ]);
 
 export function delay(
@@ -118,7 +119,7 @@ export class Transport {
         throw new Error(
           "Restore the browser CSRF token before mutating Service resources.",
         );
-      headers.set("X-A13N-CSRF-Token", this.csrfToken);
+      headers.set("X-CSRF-Token", this.csrfToken);
     }
     const request = new Request(input, {
       headers,

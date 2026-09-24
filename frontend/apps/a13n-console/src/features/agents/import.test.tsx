@@ -12,6 +12,7 @@ vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_target" },
+    organization: { id: "org_target" },
     basePath: "/workspace/test",
   }),
 }));
@@ -27,10 +28,10 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 const config = {
-  ...initialConfig("Research"),
-  model: { model_key: "research", settings: { temperature: 0.4 } },
+  ...initialConfig(),
+  model: { model_id: "mdl_0123456789abcdef", settings: { temperature: 0.4 } },
   plugins: [{ instance_name: "memory", plugin_key: "memory", config: {} }],
-  secret_requirements: [{ key: "token", required: true }],
+  secret_requirements: [{ key: "token", scope: "workspace" as const }],
 };
 const source = serializeAgentFile(
   agentFile({ name: "Research", description: "Keep me" }, config),
@@ -41,7 +42,7 @@ function setup() {
     data: {
       items: [
         {
-          id: "mdl_local",
+          id: "mdl_0123456789abcdef",
           key: "research",
           name: "Research model",
           enabled: true,
@@ -70,7 +71,7 @@ it("previews before creation and retries the same request without losing advance
   const { user, onSuccess } = setup();
   http.POST.mockRejectedValueOnce(
     new Error("Network interrupted"),
-  ).mockResolvedValueOnce({ data: { agent: { key: "imported" } } });
+  ).mockResolvedValueOnce({ data: { key: "research" } });
   await user.click(screen.getByLabelText("Agent YAML"));
   await user.paste(source);
   await user.click(screen.getByRole("button", { name: "Review" }));
@@ -87,21 +88,27 @@ it("previews before creation and retries the same request without losing advance
   await user.click(screen.getByRole("button", { name: "Create agent" }));
   await screen.findByText("Network interrupted");
   expect(http.POST.mock.calls[0]?.[1].body).toEqual({
+    key: "research",
     name: "Research",
     description: "Keep me",
     config,
   });
   await user.click(screen.getByRole("button", { name: "Create agent" }));
   await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
-  expect(http.POST.mock.calls[0]?.[1].params.header["Idempotency-Key"]).toBe(
-    http.POST.mock.calls[1]?.[1].params.header["Idempotency-Key"],
+  expect(http.POST.mock.calls[1]?.[1].body).toEqual(
+    http.POST.mock.calls[0]?.[1].body,
   );
 });
 
 it("blocks missing dependencies and requires an explicit replacement", async () => {
   const { user } = setup();
   await user.click(screen.getByLabelText("Agent YAML"));
-  await user.paste(source.replace("model_key: research", "model_key: missing"));
+  await user.paste(
+    source.replace(
+      "model_id: mdl_0123456789abcdef",
+      "model_id: mdl_fedcba9876543210",
+    ),
+  );
   await user.click(screen.getByRole("button", { name: "Review" }));
   await screen.findByText(
     "Dependency unavailable. Choose a resource in this workspace.",
@@ -110,7 +117,7 @@ it("blocks missing dependencies and requires an explicit replacement", async () 
     (screen.getByRole("button", { name: "Create agent" }) as HTMLButtonElement)
       .disabled,
   ).toBe(true);
-  await user.click(screen.getByRole("combobox", { name: "model.model_key" }));
+  await user.click(screen.getByRole("combobox", { name: "model.model_id" }));
   await user.keyboard("{ArrowDown}");
   await user.click(
     await screen.findByRole("option", { name: "Research model · research" }),
@@ -127,7 +134,7 @@ it("blocks missing dependencies and requires an explicit replacement", async () 
   await user.click(screen.getByRole("button", { name: "Back" }));
   expect(
     (screen.getByLabelText("Agent YAML") as HTMLTextAreaElement).value,
-  ).toContain("model_key: research");
+  ).toContain("model_id: mdl_0123456789abcdef");
   expect(http.POST).not.toHaveBeenCalled();
 });
 
@@ -137,18 +144,13 @@ it("blocks an unavailable root Environment template until mapped in the destinat
     data: url.endsWith("/environment-templates")
       ? {
           items: [
-            {
-              id: "et_fedcba9876543210",
-              name: "Local sandbox",
-              version: 2,
-              default_revision_id: "etr_fedcba9876543210",
-            },
+            { id: "et_fedcba9876543210", name: "Local sandbox", enabled: true },
           ],
         }
       : {
           items: [
             {
-              id: "mdl_local",
+              id: "mdl_0123456789abcdef",
               key: "research",
               name: "Research model",
               enabled: true,
@@ -217,7 +219,7 @@ it("uploads a file, validates its contents, and rejects unsupported versions wit
   );
   await user.click(screen.getByRole("button", { name: "Review" }));
   await screen.findByText(
-    "Unsupported Agent file version. Expected schema_version: 1.",
+    "Unsupported Agent file version. Expected schema_version: 2.",
   );
   expect(http.GET).not.toHaveBeenCalled();
   expect(http.POST).not.toHaveBeenCalled();

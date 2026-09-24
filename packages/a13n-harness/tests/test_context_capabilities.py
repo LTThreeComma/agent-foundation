@@ -156,6 +156,7 @@ def test_agent_spec_model_config_derives_context_capability_thresholds() -> None
         "image_understanding",
         "video_understanding",
         "audio_understanding",
+        "document_understanding",
     }
     assert handoff.configuration.include_summary_reminder
     assert handoff.configuration.summary_reminder_tokens == 130_000

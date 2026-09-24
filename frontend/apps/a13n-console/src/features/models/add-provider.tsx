@@ -20,7 +20,7 @@ import {
 import { useModelProviderDefinitions } from "./provider-definitions";
 import { credentialFieldFor, useProviderDraft } from "./provider-draft";
 
-type Definition = Schema["ModelProviderMetadata"];
+type Definition = Schema["ProviderType"];
 
 /** Familiar services first; the rest keep the catalog order. */
 const featured = [

@@ -1,26 +1,25 @@
 import { DotsThreeOutlineVerticalIcon } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Menu, MenuItem, MenuPopup, MenuTrigger } from "a13n-ui";
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { commandHeaders, data, type Schema } from "../../shared/api";
+import { data, ifMatch, type Schema } from "../../shared/api";
 import { Confirm } from "../../shared/dialogs";
 import {
   ErrorNotice,
-  ErrorToast,
   Loading,
   StatePill,
   Timestamp,
 } from "../../shared/feedback";
 import { CopyableId, ProviderIcon } from "../../shared/identity";
-import { useIdempotency } from "../../shared/idempotency";
 import { Panel } from "../../shared/page";
 import { environmentQuery } from "./api";
 import styles from "./environments.module.css";
+import { EnvironmentConnectionEditor } from "./instance-connection";
 import { EnvironmentNameEditor } from "./instance-name";
-import { DeviceConnectionStatus } from "./device-status";
+import { useEnvironmentTypes } from "./providers";
 
 /**
  * Standalone entry point: a "Details" button that opens the same inspector.
@@ -29,7 +28,7 @@ import { DeviceConnectionStatus } from "./device-status";
 export function EnvironmentDetails({
   environment,
 }: {
-  environment: Schema["Environment"];
+  environment: Schema["EnvironmentView"];
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -63,97 +62,107 @@ export function EnvironmentPanel({
   open,
   onClose,
 }: {
-  environment: Schema["Environment"];
+  environment: Schema["EnvironmentView"];
   open: boolean;
   onClose: () => void;
 }) {
   const client = useClient(),
     cache = useQueryClient(),
-    { workspace, can } = useWorkspace(),
+    { can } = useWorkspace(),
     { t } = useTranslation(),
     [renaming, setRenaming] = useState(false),
     [nameEditorKey, setNameEditorKey] = useState(0),
-    [commandId, setCommandId] = useState<string>(),
-    key = useIdempotency();
+    [reconnecting, setReconnecting] = useState(false),
+    [connectionEditorKey, setConnectionEditorKey] = useState(0);
   const detail = useQuery({
-    ...environmentQuery(client, environment.id),
+    ...environmentQuery(client, environment.workspace_id, environment.id),
     enabled: open,
+    // The outstanding lifecycle operation settles in the background.
+    refetchInterval: (query) =>
+      query.state.data?.value.operation_id ? 2000 : false,
   });
+  // An external target has no provider: it is reached at its own endpoint.
   const provider = useQuery({
     queryKey: ["environment-provider", environment.provider_id],
-    enabled: open && can("environment_provider.read"),
+    enabled: open && can("read") && !!environment.provider_id,
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/environment-providers/{resource_id}", {
-          params: { path: { resource_id: environment.provider_id } },
-          signal,
-        })
+        .GET(
+          "/api/v1/organizations/{organization_id}/environment-providers/{provider_id}",
+          {
+            params: {
+              path: {
+                organization_id: environment.organization_id,
+                provider_id: environment.provider_id!,
+              },
+            },
+            signal,
+          },
+        )
         .then(data),
   });
-  const command = useQuery({
-    queryKey: ["environment-command", commandId],
-    enabled: !!commandId,
+  // The idle policy is the template's current one.
+  const template = useQuery({
+    queryKey: ["environment-template", environment.template_id],
+    enabled: open && !!environment.template_id,
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/environment-commands/{command_id}", {
-          params: { path: { command_id: commandId! } },
-          signal,
-        })
+        .GET(
+          "/api/v1/workspaces/{workspace_id}/environment-templates/{template_id}",
+          {
+            params: {
+              path: {
+                workspace_id: environment.workspace_id,
+                template_id: environment.template_id!,
+              },
+            },
+            signal,
+          },
+        )
         .then(data),
-    refetchInterval: (query) =>
-      query.state.data?.status === "pending" ? 2000 : false,
   });
-  useEffect(() => {
-    if (!command.data || command.data.status === "pending") return;
-    void cache.invalidateQueries({ queryKey: ["environment", environment.id] });
-    void cache.invalidateQueries({ queryKey: ["environments"] });
-    void cache.invalidateQueries({ queryKey: ["run-options"] });
-  }, [cache, environment.id, command.data?.id, command.data?.status]);
   async function act(action: "stop" | "delete") {
-    const params = {
-      path: { environment_id: environment.id },
-      header: commandHeaders(
-        workspace.id,
-        key.forBody({ action, id: environment.id }),
-      ),
+    const request = {
+      params: {
+        path: {
+          workspace_id: environment.workspace_id,
+          environment_id: environment.id,
+        },
+      },
+      headers: ifMatch(detail.data?.etag),
     };
-    const receipt =
-      action === "stop"
-        ? data(
-            await client.http.POST(
-              "/api/v1/environments/{environment_id}/stop",
-              { params },
-            ),
-          )
-        : data(
-            await client.http.POST(
-              "/api/v1/environments/{environment_id}/delete",
-              { params },
-            ),
-          );
-    key.reset();
-    setCommandId(receipt.id);
-  }
-  async function revoke() {
-    await client.http
-      .POST("/api/v1/environments/{environment_id}/revoke-device", {
-        params: { path: { environment_id: environment.id } },
-      })
-      .then(data);
+    if (action === "stop")
+      await client.http
+        .POST(
+          "/api/v1/workspaces/{workspace_id}/environments/{environment_id}/stop",
+          request,
+        )
+        .then(data);
+    else
+      await client.http
+        .DELETE(
+          "/api/v1/workspaces/{workspace_id}/environments/{environment_id}",
+          request,
+        )
+        .then(data);
     await Promise.all([
       cache.invalidateQueries({ queryKey: ["environment", environment.id] }),
       cache.invalidateQueries({ queryKey: ["environments"] }),
-      cache.invalidateQueries({
-        queryKey: ["environment-connection", environment.id],
-      }),
       cache.invalidateQueries({ queryKey: ["run-options"] }),
     ]);
   }
+  const types = useEnvironmentTypes(open);
   const value = detail.data?.value;
-  const canRevoke = value?.device_registration === "paired";
+  const capabilities = types.data?.items.find(
+    (item) => item.type === provider.data?.type,
+  );
+  // External targets are connect-only: the Service never stops them, and
+  // deleting one only retires it, so no provider type decides anything.
+  const managed = !!value?.template_id;
+  const supportsStop = managed && !!capabilities?.supports_stop;
+  const supportsDestroy = !managed || !!capabilities?.supports_destroy;
   const lifecycle =
-    can("environment.manage") &&
-    (value?.supports_stop || value?.supports_destroy || canRevoke);
+    can("write") && !!value && (supportsStop || supportsDestroy);
   return (
     <Panel
       open={open}
@@ -165,13 +174,7 @@ export function EnvironmentPanel({
           <strong title={value?.name ?? environment.name}>
             {value?.name ?? environment.name}
           </strong>
-          {value &&
-            (value.device_registration ||
-            provider.data?.type === "websocket_envd" ? (
-              <DeviceConnectionStatus environment={value} />
-            ) : (
-              <StatePill state={value.status} />
-            ))}
+          {value && <StatePill state={value.status} />}
         </span>
       }
       actions={
@@ -191,23 +194,7 @@ export function EnvironmentPanel({
               <DotsThreeOutlineVerticalIcon size={14} weight="fill" />
             </MenuTrigger>
             <MenuPopup align="end">
-              {canRevoke && (
-                <Confirm
-                  subject={environment.id}
-                  title={t("Revoke device connection")}
-                  description={t(
-                    "This permanently blocks this envd credential and ends its active connection. Files, the operating-system process, and Environment history are not deleted. Use a new envd instance to enroll again.",
-                  )}
-                  danger
-                  triggerElement={
-                    <MenuItem closeOnClick={false} variant="destructive">
-                      {t("Revoke connection")}
-                    </MenuItem>
-                  }
-                  action={revoke}
-                />
-              )}
-              {value?.supports_stop && (
+              {supportsStop && (
                 <Confirm
                   subject={environment.id}
                   title={t("Stop environment target")}
@@ -220,12 +207,12 @@ export function EnvironmentPanel({
                   action={() => act("stop")}
                 />
               )}
-              {value?.supports_destroy && (
+              {supportsDestroy && (
                 <Confirm
                   subject={environment.id}
                   title={t("Delete environment target")}
                   description={t(
-                    "Files and processes on the target will be lost. The next use automatically creates a fresh target from the frozen template revision; old files are not restored. Environment identity and history are retained.",
+                    "The environment is retired and cannot be used again. A managed target is destroyed with its files; a registered device keeps running outside the Service. Environments in use by a run, or mounted by a conversation while still usable, cannot be deleted.",
                   )}
                   danger
                   triggerElement={
@@ -243,7 +230,6 @@ export function EnvironmentPanel({
     >
       <div className={styles.panelBody}>
         <ErrorNotice error={detail.error} />
-        <ErrorToast error={command.error} />
         {detail.isPending ? (
           <Loading variant="form" rows={5} />
         ) : (
@@ -254,7 +240,7 @@ export function EnvironmentPanel({
                 <dl className={styles.facts}>
                   <Fact label={t("Name")}>
                     <span>{value.name}</span>
-                    {can("environment.manage") && !renaming && (
+                    {can("write") && !renaming && (
                       <Button
                         type="button"
                         size="sm"
@@ -265,34 +251,19 @@ export function EnvironmentPanel({
                       </Button>
                     )}
                   </Fact>
-                  {(value.device_registration ||
-                    provider.data?.type === "websocket_envd") && (
-                    <Fact label={t("Connection")}>
-                      <DeviceConnectionStatus environment={value} />
-                    </Fact>
-                  )}
-                  {value.device_registration && (
-                    <Fact label={t("Device registration")}>
-                      <StatePill state={value.device_registration} />
-                    </Fact>
-                  )}
                   {value.device_id && (
                     <Fact label={t("Device ID")}>
                       <CopyableId value={value.device_id} />
                     </Fact>
                   )}
                   <Fact label={t("Activity")}>
-                    <StatePill state={value.retention_condition} />
+                    <Timestamp value={value.last_used_at} />
                   </Fact>
-                  <Fact label={t("Activity since")}>
-                    <Timestamp value={value.condition_since} />
-                  </Fact>
-                  <Fact label={t("Generation")}>{value.generation}</Fact>
                   <Fact label={t("Updated")}>
                     <Timestamp value={value.updated_at} />
                   </Fact>
                 </dl>
-                {renaming && can("environment.manage") && (
+                {renaming && can("write") && (
                   <EnvironmentNameEditor
                     key={nameEditorKey}
                     environment={value}
@@ -310,39 +281,80 @@ export function EnvironmentPanel({
                 <h3>{t("Source")}</h3>
                 <dl className={styles.facts}>
                   <Fact label={t("Ownership")}>
-                    {t(value.ownership === "managed" ? "Managed" : "External")}
+                    {t(value.template_id ? "Managed" : "External")}
                   </Fact>
-                  <Fact label={t("Provider")}>
-                    {provider.data ? (
-                      <>
-                        <ProviderIcon type={provider.data.type} />
-                        <span>{provider.data.name}</span>
-                      </>
-                    ) : (
-                      <CopyableId value={value.provider_id} />
-                    )}
-                  </Fact>
-                  {value.template_revision_id && (
-                    <Fact label={t("Template revision")}>
-                      <CopyableId value={value.template_revision_id} />
+                  {value.endpoint ? (
+                    <Fact label={t("Endpoint")}>
+                      <CopyableId value={value.endpoint} />
+                      {can("write") &&
+                        value.status !== "deleted" &&
+                        !reconnecting && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setReconnecting(true)}
+                          >
+                            {t("Update connection")}
+                          </Button>
+                        )}
+                    </Fact>
+                  ) : (
+                    value.provider_id && (
+                      <Fact label={t("Provider")}>
+                        {provider.data ? (
+                          <>
+                            <ProviderIcon type={provider.data.type} />
+                            <span>{provider.data.name}</span>
+                          </>
+                        ) : (
+                          <CopyableId value={value.provider_id} />
+                        )}
+                      </Fact>
+                    )
+                  )}
+                  {value.template_id && (
+                    <Fact label={t("Template")}>
+                      <CopyableId value={value.template_id} />
                     </Fact>
                   )}
                 </dl>
+                {reconnecting && can("write") && (
+                  <EnvironmentConnectionEditor
+                    key={connectionEditorKey}
+                    environment={value}
+                    etag={detail.data?.etag}
+                    onClose={() => setReconnecting(false)}
+                    reload={async () => {
+                      const result = await detail.refetch();
+                      if (result.isSuccess)
+                        setConnectionEditorKey((current) => current + 1);
+                    }}
+                  />
+                )}
               </section>
-              <RetentionDetails environment={value} />
+              <ErrorNotice error={template.error} />
+              {(!managed || template.data) && (
+                <RetentionDetails policy={template.data?.config ?? null} />
+              )}
             </>
           )
         )}
-        {command.data && (
+        {(value?.operation_id || value?.failure) && (
           <section className={styles.factGroup} role="status">
             <h3>{t("Lifecycle command")}</h3>
             <dl className={styles.facts}>
               <Fact label={t("Status")}>
-                <StatePill state={command.data.status} />
+                <StatePill state={value.failure ? "failed" : "pending"} />
               </Fact>
-              <Fact label={t("Command")}>
-                <CopyableId value={command.data.id} />
-              </Fact>
+              {value.operation_id && (
+                <Fact label={t("Command")}>
+                  <CopyableId value={value.operation_id} />
+                </Fact>
+              )}
+              {value.failure && (
+                <Fact label={t("Error")}>{value.failure.message}</Fact>
+              )}
             </dl>
           </section>
         )}
@@ -360,13 +372,13 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+/** The template's current idle policy; an external target has none. */
 function RetentionDetails({
-  environment,
+  policy,
 }: {
-  environment: Schema["EnvironmentDetail"];
+  policy: Schema["TemplateConfig"] | null;
 }) {
   const { t, i18n } = useTranslation();
-  const policy = environment.retention;
   return (
     <section className={styles.factGroup}>
       <h3>{t("Effective retention policy")}</h3>
@@ -381,8 +393,8 @@ function RetentionDetails({
           <dl className={styles.facts}>
             {(
               [
-                [t("Stop after idle"), policy.idle.stop_after],
-                [t("Delete after idle"), policy.idle.delete_after],
+                [t("Stop after idle"), policy.stop_after_seconds ?? null],
+                [t("Delete after idle"), policy.delete_after_seconds ?? null],
               ] as const
             ).map(([label, seconds]) => (
               <Fact key={label} label={label}>
@@ -399,17 +411,7 @@ function RetentionDetails({
           <div className={styles.panelNotes}>
             <p className={styles.panelNote}>
               {t(
-                "Frozen at allocation. Later template changes do not affect this environment.",
-              )}
-            </p>
-            <p className={styles.panelNote}>
-              {t(
                 "Idle time starts when no runs actively use this environment. Stopping does not reset the deletion timer.",
-              )}
-            </p>
-            <p className={styles.panelNote}>
-              {t(
-                "After target deletion, the next use creates a fresh target from the frozen template revision. Old files are not restored.",
               )}
             </p>
           </div>

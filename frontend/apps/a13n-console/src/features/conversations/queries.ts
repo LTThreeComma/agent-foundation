@@ -11,3 +11,12 @@ export function useRun(runId?: string | null) {
     enabled: !!runId,
   });
 }
+
+export function useSession(sessionId?: string | null) {
+  const client = useClient(),
+    { workspace } = useWorkspace();
+  return useQuery({
+    ...conversationQueries(client, workspace.id).session(sessionId ?? ""),
+    enabled: !!sessionId,
+  });
+}

@@ -14,7 +14,9 @@ const entries: Schema["CatalogModel"][] = [
     ref: { provider: "openai", model: "gpt-5.5" },
     provider_name: "OpenAI",
     release_date: "2026-04-23",
-    declarations: {},
+    characteristics: {},
+    pricing: null,
+    pricing_warning: null,
   },
   ...["au", "us"].map((region) => ({
     identity: "anthropic/claude-opus-5",
@@ -25,7 +27,9 @@ const entries: Schema["CatalogModel"][] = [
     },
     provider_name: "Bedrock",
     release_date: "2026-05-01",
-    declarations: {},
+    characteristics: {},
+    pricing: null,
+    pricing_warning: null,
   })),
 ];
 beforeEach(() => {

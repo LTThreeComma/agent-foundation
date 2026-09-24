@@ -71,6 +71,7 @@ async def test_input_appears_before_admission_and_rejection_preserves_draft() ->
 def test_status_keeps_native_cache_counters_decimal_cost_and_unknown_cost() -> None:
     def record(identifier: str, cost: Decimal | None):
         return ModelUsageRecord(
+            call_id="call_fixture",
             record_id=identifier,
             run_id="run-one",
             response_ordinal=0,
@@ -293,6 +294,7 @@ async def test_live_cost_and_zero_context_are_projected_before_completion(
     from ag_ui.core import CustomEvent
 
     root = ModelUsageRecord(
+        call_id="call_fixture",
         record_id="root-1",
         run_id="run-one",
         response_ordinal=0,
@@ -311,11 +313,12 @@ async def test_live_cost_and_zero_context_are_projected_before_completion(
         name="a13n.usage",
         value={
             "event": {
+                "schema_version": "1",
                 "payload": {
                     "type": "usage_report",
                     "records": [item.model_dump(mode="json") for item in (root, root, child, zero)],
                     "padding": "x" * (50000 if fragmented else 0),
-                }
+                },
             }
         },
     )

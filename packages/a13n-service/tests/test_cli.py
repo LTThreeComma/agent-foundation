@@ -1,71 +1,55 @@
-import asyncio
+"""The installed CLI against a real database: bootstrap once, and the operator's user enable/disable switch."""
 
-import httpx2
-import pytest
+import json
+from pathlib import Path
+
 from a13n_service.cli import main
-from a13n_service.settings import get_settings
+from a13n_service.infra.audit import AuditEventRow
+from a13n_service.settings import Settings
+from a13n_service.tenancy.tables import PrincipalRow
 from click.testing import CliRunner
-from fastapi import FastAPI
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
 
-def test_serve_role_overrides_environment_role(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("A13N_SERVICE_ROLE", "all")
-    get_settings.cache_clear()
-    served_apps: list[FastAPI] = []
+def test_bootstrap_then_operator_disables_and_enables_a_user(settings: Settings, tmp_path: Path) -> None:
+    config = tmp_path / "service.toml"
+    config.write_text(f'[database]\nurl = "{settings.database.url.get_secret_value()}"\nauto_migrate = false\n')
+    runner = CliRunner()
 
-    def capture_app(app: FastAPI, **kwargs: object) -> None:
-        del kwargs
-        served_apps.append(app)
+    def cli(*args: str, password: str | None = None) -> dict:
+        result = runner.invoke(main, ["--config", str(config), *args], input=password, catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        return json.loads(result.output.splitlines()[-1])
 
-    monkeypatch.setattr("a13n_service.cli._prepare_database", lambda settings: None)
-    monkeypatch.setattr("a13n_service.cli.serve_app", capture_app)
+    bootstrap = ["bootstrap", "--email", "Owner@Example.com", "--password-stdin"]
+    short = runner.invoke(main, ["--config", str(config), *bootstrap], input="too-short\n")
+    assert short.exit_code == 1 and "12 characters" in short.output
+    created = cli(*bootstrap, password="a-long-enough-password\n")
+    again = runner.invoke(main, ["--config", str(config), *bootstrap], input="another-long-password\n")
+    assert again.exit_code == 3 and "already initialized" in again.output
+    assert cli("user", "disable", "--email", "OWNER@example.com") == {
+        "id": created["principal_id"],
+        "status": "disabled",
+    }
+    assert cli("user", "disable", "--email", "owner@example.com")["status"] == "disabled"
+    assert cli("user", "enable", "--email", "owner@example.com")["status"] == "active"
+    missing = runner.invoke(main, ["--config", str(config), "user", "enable", "--email", "nobody@example.com"])
+    assert missing.exit_code != 0 and "not found" in missing.output
+
+    engine = create_engine(settings.database.url.get_secret_value())
     try:
-        result = CliRunner().invoke(main, ["serve", "--role", "worker"])
+        with Session(engine) as session:
+            assert session.get_one(PrincipalRow, created["principal_id"]).status == "active"
+            events = session.scalars(
+                select(AuditEventRow)
+                .where(AuditEventRow.target_id == created["principal_id"])
+                .order_by(AuditEventRow.occurred_at)
+            ).all()
     finally:
-        get_settings.cache_clear()
-
-    assert result.exit_code == 0, result.output
-    assert len(served_apps) == 1
-
-    async def read_health() -> httpx2.Response:
-        transport = httpx2.ASGITransport(app=served_apps[0])
-        async with httpx2.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            return await client.get("/healthz")
-
-    assert asyncio.run(read_health()).json() == {"status": "ok", "role": "worker"}
-
-
-def test_database_cli_delegates_to_service_migrator(monkeypatch: pytest.MonkeyPatch) -> None:
-    revisions: list[str] = []
-
-    class Migrator:
-        def upgrade(self, revision: str) -> None:
-            revisions.append(revision)
-
-    monkeypatch.setattr("a13n_service.cli._migrator", lambda: Migrator())
-
-    result = CliRunner().invoke(main, ["db", "upgrade", "--revision", "head"])
-
-    assert result.exit_code == 0, result.output
-    assert revisions == ["head"]
-
-
-def test_version_reports_installed_package_without_starting_service(monkeypatch: pytest.MonkeyPatch) -> None:
-    from importlib.metadata import version
-
-    monkeypatch.setenv("A13N_SERVICE_BUILD_VERSION", "deployment-label")
-    result = CliRunner().invoke(main, ["--version"])
-    assert result.exit_code == 0
-    assert version("a13n-service") in result.output
-    assert "deployment-label" not in result.output
-
-
-def test_default_build_identity_uses_installed_version(monkeypatch: pytest.MonkeyPatch) -> None:
-    from importlib.metadata import version
-
-    from a13n_service.settings import Settings
-
-    monkeypatch.delenv("A13N_SERVICE_BUILD_VERSION", raising=False)
-    assert Settings().service.build_version == version("a13n-service")
+        engine.dispose()
+    # A repeated switch changes nothing and records nothing; the operator acts without a principal.
+    assert [(event.action, event.actor_id, event.details) for event in events] == [
+        ("user.disable", None, {"authority": "operator"}),
+        ("user.enable", None, {"authority": "operator"}),
+    ]

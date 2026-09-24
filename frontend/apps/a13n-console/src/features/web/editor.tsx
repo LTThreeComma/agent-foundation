@@ -3,6 +3,7 @@ import { Button } from "a13n-ui";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
+import { useAccess } from "../../layout/workspace";
 import { ApiError } from "../../service-client";
 import { allPages, data, type Schema } from "../../shared/api";
 import { ListRow, ListRows } from "../../shared/collection";
@@ -41,7 +42,7 @@ import {
 } from "../providers";
 import { webProviderApi, type WebProviderScope } from "./api";
 
-type Definition = Schema["WebProviderMetadata"];
+type Definition = Schema["ProviderType"];
 
 function useWebProviderDefinitions(enabled = true) {
   const client = useClient();
@@ -49,7 +50,12 @@ function useWebProviderDefinitions(enabled = true) {
     queryKey: ["web-provider-types"],
     enabled,
     queryFn: ({ signal }) =>
-      client.http.GET("/api/v1/web-provider-types", { signal }).then(data),
+      client.http
+        .GET("/api/v1/provider-types/{kind}", {
+          params: { path: { kind: "web" } },
+          signal,
+        })
+        .then(data),
   });
 }
 
@@ -59,7 +65,7 @@ export function AddWebProvider({
   onSaved,
 }: {
   scope: WebProviderScope;
-  onSaved?: (provider: Schema["WebProvider"]) => void;
+  onSaved?: (provider: Schema["Provider"]) => void;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -116,12 +122,12 @@ export function WebProviderEditor({
   readOnly?: boolean;
   scope: WebProviderScope;
   providerId: string;
-  onSaved?: (provider: Schema["WebProvider"]) => void;
+  onSaved?: (provider: Schema["Provider"]) => void;
 }) {
-  const { t } = useTranslation(),
-    client = useClient();
+  const client = useClient(),
+    { organization } = useAccess();
   const state = useResourceEditorState({ controlledOpen, onClose, finalFocus });
-  const api = webProviderApi(client, scope);
+  const api = webProviderApi(client, organization.id, scope);
   const definitions = useWebProviderDefinitions(state.open);
   const resource = useQuery({
     queryKey: ["web-provider", scope.kind, scope.id, providerId],
@@ -150,7 +156,7 @@ export function WebProviderEditor({
           <ProviderReadOnly
             enabled={resource.data.value.enabled}
             credentials={
-              credentialMode(definition, resource.data.value.configuration) !==
+              credentialMode(definition, resource.data.value.config) !==
               "required"
                 ? "not_required"
                 : resource.data.value.credential_configured
@@ -185,14 +191,15 @@ export function WebProviderForm({
 }: {
   scope: WebProviderScope;
   onCancel?: () => void;
-  resource?: { value: Schema["WebProvider"]; etag?: string };
+  resource?: { value: Schema["Provider"]; etag?: string };
   /** Fixed by the catalog when creating. */
   definition?: Definition;
   definitions: Definition[];
-  onSaved: (provider: Schema["WebProvider"]) => void;
+  onSaved: (provider: Schema["Provider"]) => void;
 }) {
   const { t } = useTranslation(),
     client = useClient(),
+    { organization } = useAccess(),
     cache = useQueryClient();
   const [original, setOriginal] = useState(resource),
     type = resource?.value.type ?? chosen?.type ?? definitions[0]?.type ?? "",
@@ -203,12 +210,12 @@ export function WebProviderForm({
         "",
     ),
     [configuration, setConfiguration] = useState<Record<string, unknown>>(
-      resource?.value.configuration ?? {},
+      resource?.value.config ?? {},
     ),
     [enabled, setEnabled] = useState(resource?.value.enabled ?? true);
-  const [existing, setExisting] = useState<Schema["WebProvider"][]>();
+  const [existing, setExisting] = useState<Schema["Provider"][]>();
   const [reloadError, setReloadError] = useState<unknown>();
-  const api = webProviderApi(client, scope),
+  const api = webProviderApi(client, organization.id, scope),
     definition = definitions.find((item) => item.type === type) ?? chosen;
   const section = useCredentialSection(
     definition,
@@ -246,7 +253,7 @@ export function WebProviderForm({
           ...(credential === undefined || credential === null
             ? {}
             : { credential }),
-          configuration: config,
+          config,
           enabled,
         });
       }
@@ -257,7 +264,7 @@ export function WebProviderForm({
       return api.updateProvider(original.value.id, original.etag, {
         name,
         enabled,
-        configuration: config,
+        config,
         ...(credential === undefined ? {} : { credential }),
       });
     },
@@ -268,12 +275,7 @@ export function WebProviderForm({
       onSaved(provider);
     },
     onError: (error) => {
-      if (
-        !original &&
-        (!(error instanceof ApiError) ||
-          error.status >= 500 ||
-          error.code === "web_provider_name_conflict")
-      )
+      if (!original && (!(error instanceof ApiError) || error.status >= 500))
         reconcile.mutate();
     },
   });

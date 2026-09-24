@@ -3,9 +3,10 @@ import { ChoiceField } from "a13n-ui";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { allPages, data } from "../../shared/api";
+import { allPages } from "../../shared/api";
 import { ErrorNotice } from "../../shared/feedback";
 import { Section } from "../../shared/page";
+import { environmentTemplates } from "../environments/api";
 
 export function AgentEnvironment({
   value,
@@ -23,15 +24,7 @@ export function AgentEnvironment({
     queryKey: ["environment-template-choices", workspace.id],
     queryFn: ({ signal }) =>
       allPages((cursor) =>
-        client.http
-          .GET("/api/v1/workspaces/{workspace}/environment-templates", {
-            params: {
-              path: { workspace: workspace.id },
-              query: { cursor, limit: 100 },
-            },
-            signal,
-          })
-          .then(data),
+        environmentTemplates(client, workspace.id, signal, cursor),
       ),
   });
   return (

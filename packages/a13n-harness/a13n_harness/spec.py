@@ -22,6 +22,8 @@ class ModelCapability(StrEnum):
     IMAGE_UNDERSTANDING = "image_understanding"
     VIDEO_UNDERSTANDING = "video_understanding"
     AUDIO_UNDERSTANDING = "audio_understanding"
+    # PDF documents as native content.
+    DOCUMENT_UNDERSTANDING = "document_understanding"
 
 
 class HarnessModelCharacteristics(BaseModel):

@@ -76,6 +76,7 @@ class ModelCapability(StrEnum):
     IMAGE_UNDERSTANDING = "image_understanding"
     VIDEO_UNDERSTANDING = "video_understanding"
     AUDIO_UNDERSTANDING = "audio_understanding"
+    DOCUMENT_UNDERSTANDING = "document_understanding"
 
 
 class HarnessModelCharacteristics(BaseModel):
@@ -120,7 +121,7 @@ This example retains the parent's Capabilities and their tools, plugins, output 
 
 `system_prompt=None` or an empty list means that the definition supplies no system-prompt block. A string is one block; a list preserves authored order. The builder normalizes this field once, supplies it through Pydantic AI's native `system_prompt` construction argument for an empty history, and retains it on the copied definition for later history reconciliation. A Host convenience API may materialize a system-prompt argument into this field, but no lower layer accepts a competing prompt source or silently merges two owners. `toolset_instructions=True` enables Harness Toolset instruction blocks by default; the single-run override and child inheritance contract belong to [Context and Memory](09-context-and-memory.md#toolset-instruction-enablement).
 
-`HarnessModelCharacteristics` is the resolved per-model Harness value, not a provider request setting or a replacement for native `ModelProfile`. Its `capabilities` set is authoritative for Harness behavior that Pydantic AI profiles do not represent consistently. `IMAGE_UNDERSTANDING`, `VIDEO_UNDERSTANDING`, and `AUDIO_UNDERSTANDING` mean the active Agent model can consume that native media kind; absence means the Harness must use an explicitly configured fallback or report unavailability. The Harness never infers these facts from a model name or provider profile.
+`HarnessModelCharacteristics` is the resolved per-model Harness value, not a provider request setting or a replacement for native `ModelProfile`. Its `capabilities` set is authoritative for Harness behavior that Pydantic AI profiles do not represent consistently. `IMAGE_UNDERSTANDING`, `VIDEO_UNDERSTANDING`, and `AUDIO_UNDERSTANDING` mean the active Agent model can consume that native media kind; absence means the Harness must use an explicitly configured fallback or report unavailability. `DOCUMENT_UNDERSTANDING` means the model can consume PDF documents as native content; the Harness declares it for hosts that deliver documents and does not act on it itself. The Harness never infers these facts from a model name or provider profile.
 
 `context_window_tokens` is the narrow intentional overlap. When it is explicit, the builder projects it onto the final concrete, run-resolved, or inferred Model's native `ModelProfile.context_window`, preserving all other provider profile fields and behavior. The Harness value takes precedence over a conflicting model value because it is the definition input the Harness can validate and manage. When it is `None`, no overlay is installed and the native Model remains authoritative. This lets external Capabilities consume the same effective value through ordinary Pydantic AI APIs without depending on Harness types. [Input, Model, and Output Boundaries](16-input-model-and-output.md#settings-and-profile) owns the projection details.
 

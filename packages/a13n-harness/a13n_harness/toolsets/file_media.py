@@ -24,6 +24,7 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RunUsage
 
 from a13n_harness.errors import HarnessError
+from a13n_harness.models.binding import selected_model
 from a13n_harness.models.inference import infer_model
 from a13n_harness.observation import _auxiliary_agent_capabilities
 from a13n_harness.providers.environment.models import EnvironmentPath
@@ -119,14 +120,22 @@ class MediaUnderstandingProvider(Protocol):
 
 
 class AgentMediaUnderstandingProvider:
-    """Default image, video, and audio understanding implementation using Pydantic AI Agents."""
+    """Default image, video, and audio understanding implementation using Pydantic AI Agents.
+
+    `model_ids` names the ID a host selected a kind's model by; that kind's requests carry it as their
+    `ModelCall.model_id`.
+    """
 
     def __init__(
         self,
         *,
         models: Mapping[NativeInputMediaKind, str | Model],
         model_settings: Mapping[NativeInputMediaKind, ModelSettings] | None = None,
+        model_ids: Mapping[NativeInputMediaKind, str] | None = None,
     ) -> None:
+        model_ids = dict(model_ids or {})
+        if any(kind not in models for kind in model_ids):
+            raise ValueError("media understanding model IDs name a kind without a model")
         resolved_models: dict[NativeInputMediaKind, Model] = {}
         for kind, model in models.items():
             if kind not in _MODEL_ENV_BY_KIND:
@@ -144,8 +153,10 @@ class AgentMediaUnderstandingProvider:
         for kind, model in resolved_models.items():
             settings = ModelSettings(temperature=0.1)
             settings.update(configured_settings.get(kind, {}))
+            selection, capabilities = selected_model(model, model_ids.get(kind))
             agent = Agent(
-                model,
+                selection,
+                capabilities=capabilities,
                 output_type=str,
                 name=f"{kind}-understanding",
                 system_prompt=_system_prompt(kind),

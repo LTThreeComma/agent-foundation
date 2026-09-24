@@ -16,7 +16,7 @@ import { SaveBar } from "../../shared/page";
 import styles from "./settings.module.css";
 
 type ProfileRepresentation = {
-  value: Schema["User"] | Schema["Workspace"] | Schema["Organization"];
+  value: Schema["Profile"] | Schema["Workspace"] | Schema["Organization"];
   etag?: string;
 };
 
@@ -47,14 +47,14 @@ export function Profile({
           .then(representation);
       if (target.kind === "workspace")
         return client.http
-          .GET("/api/v1/workspaces/{workspace}", {
-            params: { path: { workspace: target.id } },
+          .GET("/api/v1/workspaces/{workspace_id}", {
+            params: { path: { workspace_id: target.id } },
             signal,
           })
           .then(representation);
       return client.http
-        .GET("/api/v1/organizations/{organization}", {
-          params: { path: { organization: target.id } },
+        .GET("/api/v1/organizations/{organization_id}", {
+          params: { path: { organization_id: target.id } },
           signal,
         })
         .then(representation);
@@ -119,15 +119,15 @@ function ProfileForm({
           .then(representation);
       if (target.kind === "workspace")
         return client.http
-          .PATCH("/api/v1/workspaces/{workspace}", {
-            params: { header: headers, path: { workspace: target.id } },
+          .PATCH("/api/v1/workspaces/{workspace_id}", {
+            params: { header: headers, path: { workspace_id: target.id } },
             headers,
             body: { name, key },
           })
           .then(representation);
       return client.http
-        .PATCH("/api/v1/organizations/{organization}", {
-          params: { header: headers, path: { organization: target.id } },
+        .PATCH("/api/v1/organizations/{organization_id}", {
+          params: { header: headers, path: { organization_id: target.id } },
           headers,
           body: { name, key },
         })
@@ -204,30 +204,30 @@ function ProfileForm({
       if (target.kind === "workspace")
         return file
           ? client.http
-              .PUT("/api/v1/workspaces/{workspace}/icon", {
+              .PUT("/api/v1/workspaces/{workspace_id}/icon", {
                 headers,
-                params: { header: headers, path: { workspace: target.id } },
+                params: { header: headers, path: { workspace_id: target.id } },
                 body: file,
               })
               .then(representation)
           : client.http
-              .DELETE("/api/v1/workspaces/{workspace}/icon", {
+              .DELETE("/api/v1/workspaces/{workspace_id}/icon", {
                 headers,
-                params: { header: headers, path: { workspace: target.id } },
+                params: { header: headers, path: { workspace_id: target.id } },
               })
               .then(representation);
       return file
         ? client.http
-            .PUT("/api/v1/organizations/{organization}/icon", {
+            .PUT("/api/v1/organizations/{organization_id}/icon", {
               headers,
-              params: { header: headers, path: { organization: target.id } },
+              params: { header: headers, path: { organization_id: target.id } },
               body: file,
             })
             .then(representation)
         : client.http
-            .DELETE("/api/v1/organizations/{organization}/icon", {
+            .DELETE("/api/v1/organizations/{organization_id}/icon", {
               headers,
-              params: { header: headers, path: { organization: target.id } },
+              params: { header: headers, path: { organization_id: target.id } },
             })
             .then(representation);
     },
@@ -322,9 +322,9 @@ function ProfileForm({
           description={t("These actions cannot be undone.")}
         >
           <SettingsRow
-            label={t("Delete this workspace")}
+            label={t("Archive this workspace")}
             description={t(
-              "Agents, sessions, and credentials in this workspace are removed.",
+              "Everything in this workspace stays readable but can no longer change or run.",
             )}
           >
             {danger}

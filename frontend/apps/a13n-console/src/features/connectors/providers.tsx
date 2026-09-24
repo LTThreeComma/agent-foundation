@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useAccess } from "../../layout/workspace";
-import { commandHeaders, data, type Schema } from "../../shared/api";
+import { data, ifMatch, rowTag, type Schema } from "../../shared/api";
 import { useCursor } from "../../shared/collection";
 import {
   CatalogStep,
@@ -23,7 +23,6 @@ import {
   validateSettings,
   withSchemaValues,
 } from "../../shared/forms";
-import { useIdempotency } from "../../shared/idempotency";
 import { useCredentialSection } from "../../shared/use-credential-section";
 import styles from "../../shared/shared.module.css";
 import {
@@ -43,10 +42,11 @@ import {
   credentialLabel,
   providerKeyLink,
   providerStyles,
+  providerTestResult,
 } from "../providers";
 import { connectorApi, type ConnectorScope } from "./api";
 
-type Definition = Schema["ConnectorProviderMetadata"];
+type Definition = Schema["ProviderType"];
 
 function useConnectorDefinitions(enabled = true) {
   const client = useClient();
@@ -55,16 +55,19 @@ function useConnectorDefinitions(enabled = true) {
     enabled,
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/connector-provider-types", { signal })
+        .GET("/api/v1/provider-types/{kind}", {
+          params: { path: { kind: "connector" } },
+          signal,
+        })
         .then(data),
   });
 }
 
 export function ConnectorProviders({ scope }: { scope: ConnectorScope }) {
   const client = useClient(),
-    { can, organizationAdmin } = useAccess(),
+    { can, organizationCan, organization } = useAccess(),
     page = useCursor();
-  const rows = useResourceRows<Schema["ConnectorProvider"]>();
+  const rows = useResourceRows<Schema["Provider"]>();
   const query = useQuery({
     queryKey: [
       "connector-providers",
@@ -74,12 +77,13 @@ export function ConnectorProviders({ scope }: { scope: ConnectorScope }) {
       page.cursor,
     ],
     queryFn: ({ signal }) =>
-      connectorApi(client, scope).providers(signal, page.cursor),
+      connectorApi(client, organization.id, scope).providers(
+        signal,
+        page.cursor,
+      ),
   });
   const manage =
-    scope.kind === "organization"
-      ? organizationAdmin
-      : can("connector_provider.manage");
+    scope.kind === "organization" ? organizationCan("write") : can("write");
   return (
     <>
       {rows.selected && (
@@ -91,7 +95,9 @@ export function ConnectorProviders({ scope }: { scope: ConnectorScope }) {
               : { kind: "organization", id: rows.selected.organization_id }
           }
           providerId={rows.selected.id}
-          readOnly={!(rows.selected.workspace_id ? manage : organizationAdmin)}
+          readOnly={
+            !(rows.selected.workspace_id ? manage : organizationCan("write"))
+          }
           {...rows.control}
         />
       )}
@@ -104,8 +110,8 @@ export function ConnectorProviders({ scope }: { scope: ConnectorScope }) {
         nextCursor={query.data?.next_cursor}
         action={manage ? <AddConnectorProvider scope={scope} /> : undefined}
         canActivateRow={(item) =>
-          (item.workspace_id ? manage : organizationAdmin) ||
-          (scope.kind === "workspace" && item.status === "active")
+          (item.workspace_id ? manage : organizationCan("write")) ||
+          (scope.kind === "workspace" && item.enabled)
         }
         onRowActivate={rows.activate}
         row={(item) => ({
@@ -117,7 +123,7 @@ export function ConnectorProviders({ scope }: { scope: ConnectorScope }) {
           credentials: item.credential_configured
             ? "configured"
             : "not_configured",
-          state: item.status === "active" ? "enabled" : "disabled",
+          state: item.enabled ? "enabled" : "disabled",
         })}
       />
     </>
@@ -177,6 +183,7 @@ function EditConnectorProvider({
   readOnly?: boolean;
 }) {
   const client = useClient(),
+    { organization } = useAccess(),
     [generation, setGeneration] = useState(0);
   const state = useResourceEditorState({ controlledOpen, onClose, finalFocus });
   const definitions = useConnectorDefinitions(state.open);
@@ -191,10 +198,18 @@ function EditConnectorProvider({
     enabled: state.open,
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/connector-providers/{connector_provider_id}", {
-          params: { path: { connector_provider_id: providerId } },
-          signal,
-        })
+        .GET(
+          "/api/v1/organizations/{organization_id}/connector-providers/{provider_id}",
+          {
+            params: {
+              path: {
+                organization_id: organization.id,
+                provider_id: providerId,
+              },
+            },
+            signal,
+          },
+        )
         .then(data),
   });
   const definition = definitions.data?.items.find(
@@ -216,13 +231,13 @@ function EditConnectorProvider({
       {resource.data &&
         (readOnly ? (
           <ProviderReadOnly
-            enabled={resource.data.status === "active"}
+            enabled={resource.data.enabled}
             credentials={
               resource.data.credential_configured
                 ? "configured"
                 : "not_configured"
             }
-            configuration={resource.data.configuration}
+            configuration={resource.data.config}
             schema={definition?.configuration_schema}
             only={["endpoint"]}
             onClose={() => state.setOpen(false)}
@@ -275,7 +290,7 @@ function ProviderForm({
   reload,
 }: {
   scope: ConnectorScope;
-  initial?: Schema["ConnectorProvider"];
+  initial?: Schema["Provider"];
   definition?: Definition;
   close: () => void;
   reload: () => Promise<void>;
@@ -283,12 +298,12 @@ function ProviderForm({
   const client = useClient(),
     cache = useQueryClient(),
     { t } = useTranslation(),
-    key = useIdempotency(),
+    { organization } = useAccess(),
     [basis] = useState(initial),
     [name, setName] = useState(initial?.name ?? definition?.display_name ?? ""),
-    [enabled, setEnabled] = useState(initial?.status === "active"),
+    [enabled, setEnabled] = useState(initial?.enabled ?? false),
     [configuration, setConfiguration] = useState<Record<string, unknown>>(
-      initial?.configuration ?? {},
+      initial?.config ?? {},
     ),
     [advancedOpen, setAdvancedOpen] = useState(false);
   const type = initial?.type ?? definition?.type ?? "";
@@ -306,22 +321,30 @@ function ProviderForm({
           validateSettings(section.schema, secret);
         }
         return client.http
-          .PATCH("/api/v1/connector-providers/{connector_provider_id}", {
-            params: { path: { connector_provider_id: basis.id } },
-            body: {
-              name,
-              status: enabled ? "active" : "disabled",
-              expected_version: basis.version,
-              ...(secret === undefined
-                ? {}
-                : {
-                    credentials:
-                      secret === null
-                        ? null
-                        : jsonObject(JSON.stringify(secret)),
-                  }),
+          .PATCH(
+            "/api/v1/organizations/{organization_id}/connector-providers/{provider_id}",
+            {
+              params: {
+                path: {
+                  organization_id: basis.organization_id,
+                  provider_id: basis.id,
+                },
+              },
+              headers: ifMatch(rowTag(basis)),
+              body: {
+                name,
+                enabled,
+                ...(secret === undefined
+                  ? {}
+                  : {
+                      credential:
+                        secret === null
+                          ? null
+                          : jsonObject(JSON.stringify(secret)),
+                    }),
+              },
             },
-          })
+          )
           .then(data);
       }
       if (!definition) throw new Error(t("Select a provider type."));
@@ -331,31 +354,30 @@ function ProviderForm({
       );
       validateSettings(definition.configuration_schema, config);
       if (secret) validateSettings(section.schema, secret);
-      const body = {
+      return connectorApi(client, organization.id, scope).create({
         name,
         type,
-        configuration: jsonObject(JSON.stringify(config)),
-        credentials: secret ? jsonObject(JSON.stringify(secret)) : null,
-      };
-      return connectorApi(client, scope).create(body, key.forBody(body));
+        config: jsonObject(JSON.stringify(config)),
+        credential: secret ? jsonObject(JSON.stringify(secret)) : null,
+      });
     },
     onSuccess: done,
   });
   const test = useMutation({
     mutationFn: () => {
       if (!basis) throw new Error(t("Save the provider first."));
-      const body = { expected_version: basis.version };
       return client.http
-        .POST("/api/v1/connector-providers/{connector_provider_id}/test", {
-          params: {
-            path: { connector_provider_id: basis.id },
-            header: commandHeaders(
-              scope.kind === "workspace" ? scope.id : undefined,
-              key.forBody({ test: basis.id, ...body }),
-            ),
+        .POST(
+          "/api/v1/organizations/{organization_id}/connector-providers/{provider_id}/test",
+          {
+            params: {
+              path: {
+                organization_id: basis.organization_id,
+                provider_id: basis.id,
+              },
+            },
           },
-          body,
-        })
+        )
         .then(data);
     },
   });
@@ -441,26 +463,20 @@ function ProviderForm({
             dirty={
               save.isPending ||
               name !== basis.name ||
-              enabled !== (basis.status === "active") ||
+              enabled !== basis.enabled ||
               Object.keys(section.credential).length > 0 ||
               section.removing
             }
             action={async () => {
-              const result = await test.mutateAsync();
-              return {
-                success: true,
-                message: `${result.verified_access
-                  .map((access) =>
-                    t(
-                      access === "account_read"
-                        ? "Connected-account access verified."
-                        : "Catalog access verified.",
+              const result = providerTestResult(await test.mutateAsync());
+              return result.success
+                ? {
+                    ...result,
+                    message: t(
+                      "OAuth callback configuration and upstream account credentials were not tested.",
                     ),
-                  )
-                  .join(" ")} ${t(
-                  "OAuth callback configuration and upstream account credentials were not tested.",
-                )}`,
-              };
+                  }
+                : result;
             }}
           />
         }

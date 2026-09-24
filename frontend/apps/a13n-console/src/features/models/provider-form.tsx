@@ -15,6 +15,7 @@ import {
   ProviderGroup,
   ProviderName,
   providerKeyLink,
+  providerTestResult,
 } from "../providers";
 import { type ModelScope } from "./api";
 import {
@@ -33,8 +34,8 @@ export function ProviderForm({
 }: {
   reload: () => Promise<void>;
   scope: ModelScope;
-  resource: { value: Schema["ModelProvider"]; etag?: string };
-  definitions: Schema["ModelProviderMetadata"][];
+  resource: { value: Schema["Provider"]; etag?: string };
+  definitions: Schema["ProviderType"][];
   close: () => void;
 }) {
   const { t } = useTranslation();
@@ -111,10 +112,14 @@ export function ProviderForm({
         onCancel={close}
         leading={
           original &&
-          definition?.supports_connection_probe && (
+          definition?.supports_test && (
             <ConnectionTest
               placement="footer"
-              action={() => draft.api.testProvider(original.value.id)}
+              action={async () =>
+                providerTestResult(
+                  await draft.api.testProvider(original.value.id),
+                )
+              }
               description="May consume quota or incur cost."
               dirty={draft.changed}
             />

@@ -1,22 +1,19 @@
 # Replace every REPLACE_* value; external infrastructure must already exist.
-profile: distributed
 roles:
   control:
     replicaCount: 2
   worker:
     replicaCount: 2
-  connectivity:
-    replicaCount: 2
-environmentName: aws
 image:
   repository: REPLACE_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/a13n-service
   tag: REPLACE_IMMUTABLE_TAG
-publicOrigin: https://agents.example.com
+publicUrl: https://agents.example.com
+# The load balancer and the Console Pods forward client addresses from inside the VPC.
+trustedProxies: [REPLACE_VPC_CIDR]
 objects:
+  backend: s3
   bucket: REPLACE_S3_BUCKET
   region: us-east-1
-persistence:
-  existingClaim: a13n-files
 ingress:
   enabled: false # Enable after the controller, certificate and DNS are prepared.
   className: alb

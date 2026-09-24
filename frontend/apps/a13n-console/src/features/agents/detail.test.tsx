@@ -18,6 +18,7 @@ vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_test" },
+    organization: { id: "org_test" },
     basePath: "/workspace/test",
     can: () => true,
   }),
@@ -33,6 +34,9 @@ vi.mock("./settings", () => ({
   AgentDetails: () => null,
 }));
 vi.mock("./export", () => ({ ExportAgent: () => null }));
+vi.mock("./assistant", () => ({
+  useConfigurationAssistant: () => ({ available: false, error: null }),
+}));
 vi.mock("./editor", () => ({
   AgentEditor: ({
     initial,
@@ -75,48 +79,44 @@ it("reloads the selected configuration and version after Set as default", async 
   );
   HTMLElement.prototype.scrollIntoView = () => {};
   const agent = {
-    id: "agt_1234567890abcdef",
+    id: "ap_1234567890abcdef",
     key: "research",
     name: "Research",
-    description: null,
-    image_url: null,
-    enabled: true,
+    description: "",
+    source: "custom",
     archived_at: null,
-    updated_at: "2026-09-17T00:00:00Z",
-    default_revision_id: "agtr_v2",
+    version: 1,
+    default_revision_id: "apr_v2",
   };
   const revisions = [
     {
-      id: "agtr_v2",
-      version: 2,
-      config: { ...initialConfig("Research"), instructions: "Second" },
-      created_at: "2026-09-17T00:00:00Z",
-      created_by: { principal_id: "user" },
-      change_summary: "Second",
+      id: "apr_v2",
+      number: 2,
+      config: { ...initialConfig(), instructions: "Second" },
+      note: "Second",
     },
     {
-      id: "agtr_v1",
-      version: 1,
-      config: { ...initialConfig("Research"), instructions: "First" },
-      created_at: "2026-09-16T00:00:00Z",
-      created_by: { principal_id: "user" },
-      change_summary: null,
+      id: "apr_v1",
+      number: 1,
+      config: { ...initialConfig(), instructions: "First" },
+      note: null,
     },
   ];
   http.GET.mockImplementation(
     async (
       path: string,
-      options?: { params?: { path?: { agent_revision_id?: string } } },
+      options?: { params?: { path?: { revision_id?: string } } },
     ) => {
       if (path.endsWith("/revisions"))
         return { data: { items: revisions, next_cursor: null } };
-      if (path.includes("/agent-revisions/"))
+      if (path.endsWith("/revisions/{revision_id}"))
         return {
           data: revisions.find(
-            (revision) =>
-              revision.id === options?.params?.path?.agent_revision_id,
+            (revision) => revision.id === options?.params?.path?.revision_id,
           ),
         };
+      if (path.endsWith("/agents") || path.endsWith("/models"))
+        return { data: { items: [], next_cursor: null } };
       return {
         data: { ...agent },
         response: new Response(null, {
@@ -126,8 +126,8 @@ it("reloads the selected configuration and version after Set as default", async 
     },
   );
   http.POST.mockImplementation(async () => {
-    agent.default_revision_id = "agtr_v1";
-    return { data: { agent: { ...agent }, revision: revisions[1] } };
+    agent.default_revision_id = "apr_v1";
+    return { data: { ...agent } };
   });
   render(
     <QueryClientProvider
@@ -167,8 +167,8 @@ it("reloads the selected configuration and version after Set as default", async 
   expect(screen.getByLabelText("Editor instructions").textContent).toBe(
     "First",
   );
-  expect(http.POST.mock.calls[0]?.[1].params.header["If-Match"]).toBe(
-    '"agtr_v2"',
+  expect(http.POST.mock.calls[0]?.[0]).toBe(
+    "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions/{revision_id}/set-default",
   );
-  expect(http.POST.mock.calls[0]?.[1].body).toEqual({});
+  expect(http.POST.mock.calls[0]?.[1].headers["If-Match"]).toBe('"apr_v2"');
 });

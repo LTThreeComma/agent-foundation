@@ -34,12 +34,10 @@ export interface ProviderRow {
   /** Domain state for the status pill (`enabled`, `disabled`, …). */
   state: string;
   stateLabel?: string;
-  /** Overflow entry label when the row opens something other than an editor. */
-  editLabel?: string;
 }
 
 /**
- * One table anatomy for models, web, memory, environment, and connector
+ * One table anatomy for models, web, environment, and connector
  * providers: brand identity, scope, credentials, status, overflow menu.
  */
 export function ProviderTable<T extends { id: string }>({
@@ -122,7 +120,6 @@ export function ProviderTable<T extends { id: string }>({
           onRowActivate || rowMenu
             ? (item) => (
                 <ProviderRowMenu
-                  label={row(item).editLabel}
                   edit={
                     opens(item)
                       ? (element) => onRowActivate?.(item, element)
@@ -180,11 +177,9 @@ export function ProviderTable<T extends { id: string }>({
 }
 
 function ProviderRowMenu({
-  label,
   edit,
   children,
 }: {
-  label?: string;
   edit?: (element: HTMLElement) => void;
   children?: ReactNode;
 }) {
@@ -195,7 +190,7 @@ function ProviderRowMenu({
       {edit && (
         <MenuItem onClick={(event) => edit(event.currentTarget as HTMLElement)}>
           <PencilSimpleIcon aria-hidden="true" />
-          {label ?? t("Edit")}
+          {t("Edit")}
         </MenuItem>
       )}
       {children}

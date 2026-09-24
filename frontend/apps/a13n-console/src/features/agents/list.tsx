@@ -11,15 +11,9 @@ import {
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
+import { data, ifMatch, rowTag, type Schema } from "../../shared/api";
 import {
-  allPages,
-  commandHeaders,
-  data,
-  representation,
-  workspaceHeaders,
-  type Schema,
-} from "../../shared/api";
-import {
+  ArchivedFilter,
   CollectionFooter,
   Empty,
   Pagination,
@@ -36,18 +30,14 @@ import {
   StatePill,
   Timestamp,
 } from "../../shared/feedback";
-import { useIdempotency } from "../../shared/idempotency";
 import { Page } from "../../shared/page";
-import { modelApi } from "../models/api";
 import { ModelIcon } from "../models/model-icon";
 import { AgentAvatar } from "./avatar";
 import { ExportAgent } from "./export";
 import { AgentCreationMenu } from "./import";
+import { useModelsById } from "./queries";
 import styles from "./agents.module.css";
 
-/** The service lists agents by cursor without a search parameter, so search
- *  reads a bounded number of pages and matches them in the browser. */
-const SEARCH_PAGES = 5;
 const PAGE_SIZE = 30;
 
 type Agent = Schema["Agent"];
@@ -55,68 +45,37 @@ type Agent = Schema["Agent"];
 export function Agents() {
   const { t } = useTranslation(),
     client = useClient(),
-    { workspace, can } = useWorkspace(),
-    page = useCursor();
+    { workspace, can } = useWorkspace();
   const [archived, setArchived] = useState(false),
     [search, setSearch] = useState("");
   const query = search.trim().toLocaleLowerCase();
+  const page = useCursor({ query, archived });
   const searching = query.length > 0;
+  const filtered = searching || archived;
   const list = useQuery({
-    queryKey: ["agents", workspace.id, archived, page.cursor],
-    enabled: !searching,
+    queryKey: ["agents", workspace.id, query, archived, page.cursor],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/workspaces/{workspace}/agents", {
+        .GET("/api/v1/workspaces/{workspace_id}/agents", {
           params: {
-            path: { workspace: workspace.id },
+            path: { workspace_id: workspace.id },
             query: {
               limit: PAGE_SIZE,
               cursor: page.cursor,
-              include_archived: archived,
+              // The chip adds archived items; omitting the filter lists both.
+              ...(!archived && { archived: false }),
+              ...(searching && { q: query }),
             },
           },
           signal,
         })
         .then(data),
   });
-  const everything = useQuery({
-    queryKey: ["agents-search", workspace.id, archived],
-    enabled: searching,
-    queryFn: async ({ signal }) => {
-      const items: Agent[] = [];
-      let cursor: string | undefined;
-      let complete = true;
-      for (let read = 0; read < SEARCH_PAGES; read++) {
-        const result = await client.http
-          .GET("/api/v1/workspaces/{workspace}/agents", {
-            params: {
-              path: { workspace: workspace.id },
-              query: { limit: 100, cursor, include_archived: archived },
-            },
-            signal,
-          })
-          .then(data);
-        items.push(...result.items);
-        cursor = result.next_cursor ?? undefined;
-        if (!cursor) break;
-        if (read === SEARCH_PAGES - 1) complete = false;
-      }
-      return { items, complete };
-    },
-  });
-  const active = searching ? everything : list;
-  const items = searching
-    ? (everything.data?.items ?? []).filter((agent) =>
-        `${agent.name} ${agent.key} ${agent.description ?? ""}`
-          .toLocaleLowerCase()
-          .includes(query),
-      )
-    : (list.data?.items ?? []);
-  const create = can("agent.create") ? <AgentCreationMenu /> : undefined;
+  const items = list.data?.items ?? [];
+  const create = can("write") ? <AgentCreationMenu /> : undefined;
   const clear = () => {
     setSearch("");
     setArchived(false);
-    page.reset();
   };
   return (
     <Page
@@ -131,22 +90,8 @@ export function Agents() {
           searchLabel={t("Find an agent…")}
           filters={
             <>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className={styles.chip}
-                data-active={archived ? "true" : undefined}
-                aria-pressed={archived}
-                onClick={() => {
-                  setArchived(!archived);
-                  page.reset();
-                }}
-              >
-                <ArchiveIcon size={13} aria-hidden="true" />
-                {t("Archived")}
-              </Button>
-              {(searching || archived) && (
+              <ArchivedFilter value={archived} onChange={setArchived} />
+              {filtered && (
                 <Button type="button" size="sm" variant="ghost" onClick={clear}>
                   {t("Clear")}
                 </Button>
@@ -156,15 +101,15 @@ export function Agents() {
         />
       }
     >
-      {active.isPending ? (
+      {list.isPending ? (
         <Loading variant="table" columns={4} />
-      ) : active.error ? (
-        <ErrorNotice error={active.error} retry={() => void active.refetch()} />
+      ) : list.error ? (
+        <ErrorNotice error={list.error} retry={() => void list.refetch()} />
       ) : !items.length ? (
         <Empty
           icon={<RobotIcon aria-hidden="true" />}
           title={
-            searching
+            filtered
               ? t("No matching agents")
               : t("Your next agent starts here")
           }
@@ -173,9 +118,11 @@ export function Agents() {
               ? t(
                   "No agent in this workspace matches that name, key, or description.",
                 )
-              : t("Choose a model, give it instructions, and put it to work.")
+              : archived
+                ? t("Change or clear the search and filters.")
+                : t("Choose a model, give it instructions, and put it to work.")
           }
-          action={!searching && create}
+          action={!filtered && create}
         />
       ) : (
         <AgentRows items={items} />
@@ -188,17 +135,8 @@ export function Agents() {
               : t("{{count}} agents on this page", { count: items.length })
           }
         >
-          {!searching && list.data && (
-            <Pagination page={page} next={list.data.next_cursor} />
-          )}
+          <Pagination page={page} next={list.data?.next_cursor} />
         </CollectionFooter>
-      )}
-      {searching && everything.data?.complete === false && (
-        <p className={styles.searchBound}>
-          {t("Search covers the first {{count}} agents in this workspace.", {
-            count: everything.data.items.length,
-          })}
-        </p>
       )}
     </Page>
   );
@@ -215,34 +153,22 @@ function useRevisions(items: readonly Agent[]) {
       staleTime: Infinity,
       queryFn: ({ signal }: { signal: AbortSignal }) =>
         client.http
-          .GET("/api/v1/agent-revisions/{agent_revision_id}", {
-            params: {
-              path: { agent_revision_id: agent.default_revision_id! },
+          .GET(
+            "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions/{revision_id}",
+            {
+              params: {
+                path: {
+                  workspace_id: workspace.id,
+                  agent_id: agent.id,
+                  revision_id: agent.default_revision_id!,
+                },
+              },
+              signal,
             },
-            headers: workspaceHeaders(workspace.id),
-            signal,
-          })
+          )
           .then(data),
     })),
   });
-}
-
-/** Agent rows name their model, so the table never leads with a raw key. */
-function useModelsByKey() {
-  const client = useClient(),
-    { workspace } = useWorkspace();
-  const query = useQuery({
-    queryKey: ["agent-list-models", workspace.id],
-    staleTime: 60_000,
-    queryFn: ({ signal }) =>
-      allPages((cursor) =>
-        modelApi(client, { kind: "workspace", id: workspace.id }).models(
-          signal,
-          cursor,
-        ),
-      ),
-  });
-  return new Map((query.data ?? []).map((model) => [model.key, model]));
 }
 
 function AgentRows({ items }: { items: readonly Agent[] }) {
@@ -250,9 +176,8 @@ function AgentRows({ items }: { items: readonly Agent[] }) {
     { can, basePath } = useWorkspace(),
     navigate = useNavigate();
   const revisions = useRevisions(items);
-  const modelsByKey = useModelsByKey();
-  const state = (agent: Agent) =>
-    agent.archived_at ? "archived" : agent.enabled ? "enabled" : "disabled";
+  const modelsById = useModelsById();
+  const state = (agent: Agent) => (agent.archived_at ? "archived" : "enabled");
   return (
     <div className={styles.listTable}>
       <ResourceTable
@@ -264,9 +189,9 @@ function AgentRows({ items }: { items: readonly Agent[] }) {
           const revision = revisions[items.indexOf(agent)]?.data;
           return (
             <>
-              {can("agent.invoke") && (
+              {can("run") && (
                 <MenuItem
-                  disabled={!agent.enabled || !!agent.archived_at}
+                  disabled={!!agent.archived_at}
                   onClick={() =>
                     navigate(`${basePath}/sessions/new?agent=${agent.id}`)
                   }
@@ -279,7 +204,7 @@ function AgentRows({ items }: { items: readonly Agent[] }) {
                 <ExportAgent
                   agent={agent}
                   config={revision.config}
-                  version={revision.version}
+                  version={revision.number}
                   trigger={
                     <MenuItem closeOnClick={false}>
                       <DownloadSimpleIcon size={14} aria-hidden="true" />
@@ -288,7 +213,7 @@ function AgentRows({ items }: { items: readonly Agent[] }) {
                   }
                 />
               )}
-              {can("agent.lifecycle") && (
+              {can("write") && agent.source === "custom" && (
                 <>
                   <MenuSeparator />
                   <ArchiveAgent agent={agent} />
@@ -326,20 +251,16 @@ function AgentRows({ items }: { items: readonly Agent[] }) {
               if (!agent.default_revision_id)
                 return <span className={styles.modelName}>—</span>;
               if (revision?.isPending) return <InlineLoading width="6rem" />;
-              const key = revision?.data?.config.model.model_key;
-              const model = key ? modelsByKey.get(key) : undefined;
+              const id = revision?.data?.config.model.model_id;
+              const model = id ? modelsById.get(id) : undefined;
               return (
-                <span className={styles.modelName} title={key ?? undefined}>
-                  {key ? (
-                    <ModelIcon
-                      upstream={model?.upstream_model ?? key}
-                      catalogRef={model?.catalog_ref}
-                      size={16}
-                    />
+                <span className={styles.modelName} title={id ?? undefined}>
+                  {model ? (
+                    <ModelIcon upstream={model.config.model_name} size={16} />
                   ) : (
                     <span aria-hidden="true" />
                   )}
-                  <span>{model?.name ?? key ?? t("Unavailable")}</span>
+                  <span>{model?.name ?? id ?? t("Unavailable")}</span>
                 </span>
               );
             },
@@ -359,12 +280,11 @@ function AgentRows({ items }: { items: readonly Agent[] }) {
   );
 }
 
-/** The list has no ETag for a row, so the confirmation reads it before acting. */
+/** The row's ETag is the one the reader saw; a stale row fails its precondition. */
 function ArchiveAgent({ agent }: { agent: Agent }) {
   const { t } = useTranslation(),
     client = useClient(),
-    { workspace } = useWorkspace(),
-    idempotency = useIdempotency();
+    { workspace } = useWorkspace();
   const archived = !!agent.archived_at;
   return (
     <Confirm
@@ -383,38 +303,21 @@ function ArchiveAgent({ agent }: { agent: Agent }) {
           {t(archived ? "Unarchive" : "Archive")}
         </MenuItem>
       }
-      action={async () => {
-        const current = representation(
-          await client.http.GET(
-            "/api/v1/workspaces/{workspace}/agents/{agent}",
+      action={() =>
+        client.http
+          .POST(
+            archived
+              ? "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/unarchive"
+              : "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/archive",
             {
-              params: { path: { workspace: workspace.id, agent: agent.id } },
-              headers: workspaceHeaders(workspace.id),
-            },
-          ),
-        );
-        if (!current.etag)
-          throw new Error(
-            t("Version information is unavailable. Reload this page."),
-          );
-        const action = archived ? "unarchive" : "archive";
-        await client.http.POST(
-          "/api/v1/workspaces/{workspace}/agents/{agent}/{action}",
-          {
-            params: {
-              path: { workspace: workspace.id, agent: agent.id, action },
-              header: {
-                ...commandHeaders(
-                  workspace.id,
-                  idempotency.forBody({ action, etag: current.etag }),
-                ),
-                "If-Match": current.etag,
+              params: {
+                path: { workspace_id: workspace.id, agent_id: agent.id },
               },
+              headers: ifMatch(rowTag(agent)),
             },
-          },
-        );
-        idempotency.reset();
-      }}
+          )
+          .then(data)
+      }
     />
   );
 }

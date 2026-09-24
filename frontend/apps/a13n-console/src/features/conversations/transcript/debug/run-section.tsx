@@ -13,7 +13,7 @@ import { runOutcome } from "../../lifecycle";
 import { runRequest } from "../../request";
 import type { RunTimeline } from "../../timeline";
 import { RequestContent, requestLabel } from "../user-message";
-import { isInteractive, useRetryRun, useRunAcceptance } from "../run-actions";
+import { isInteractive } from "../run-actions";
 import {
   childThreadOf,
   childThreadPath,
@@ -32,16 +32,16 @@ export function DebugRunSection({
   thread,
   timeline,
   index,
-  runNumber,
+  resubmit,
 }: {
-  run: Schema["RunResource"];
-  thread: Schema["ThreadResource"];
+  run: Schema["RunView"];
+  thread: Schema["ThreadView"];
   /** The same reading of the Run the Chat level renders. */
   timeline: RunTimeline;
   /** Position in the Thread; omitted while the Thread's Runs are unknown. */
   index: number | null;
-  /** Position of any Run of this Thread, for lineage notes. */
-  runNumber?: (runId: string) => number | null;
+  /** Prefills the dock with this stopped Run's message, when it may be sent again. */
+  resubmit?: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const { can, basePath } = useWorkspace();
@@ -51,10 +51,8 @@ export function DebugRunSection({
   const now = useNow(active);
   const children = useChildThreads(run.session_id, run.thread_id);
   const child = childThreadOf(children, run.id);
-  const { accepted, refresh } = useRunAcceptance(run, thread);
-  const retry = useRetryRun(run, thread, accepted, refresh);
   const started = Date.parse(run.started_at ?? run.created_at);
-  const ended = run.completed_at ? Date.parse(run.completed_at) : now;
+  const ended = run.sealed_at ? Date.parse(run.sealed_at) : now;
   const duration =
     timeline.totals.durationMs ?? (active ? ended - started : null);
   const scope: RunScope = {
@@ -65,7 +63,7 @@ export function DebugRunSection({
       path: childThreadPath(basePath, child),
       runs: child.runs.length,
     },
-    answerable: isInteractive(thread) && can("run.feedback"),
+    answerable: isInteractive(thread) && can("run"),
     jumpToDock() {
       const stage = document.querySelector("[data-session-stage]");
       if (stage instanceof HTMLElement)
@@ -94,11 +92,7 @@ export function DebugRunSection({
           </span>
         </button>
         <StatePill state={run.status} />
-        <Lineage
-          run={run}
-          attempts={attemptCount(timeline)}
-          runNumber={runNumber}
-        />
+        <Lineage run={run} />
         <span className={styles.headingMeta}>
           <span>
             {new Intl.DateTimeFormat(i18n.resolvedLanguage, {
@@ -155,22 +149,15 @@ export function DebugRunSection({
               entry={outcome}
               scope={scope}
               action={
-                ["failed", "cancelled"].includes(run.status) &&
-                isInteractive(thread) &&
-                can("run.retry") && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    loading={retry.isPending}
-                    onClick={() => retry.mutate()}
-                  >
-                    {t("Retry run")}
+                resubmit && (
+                  <Button size="sm" variant="outline" onClick={resubmit}>
+                    {t("Resubmit")}
                   </Button>
                 )
               }
             />
           )}
-          {run.output != null && run.output !== run.output_text && (
+          {run.output != null && typeof run.output !== "string" && (
             <DisclosureSection
               className={styles.structured}
               title={<>{t("Structured output")}</>}
@@ -185,42 +172,12 @@ export function DebugRunSection({
 }
 
 /** Where this Run came from, when it was not simply the next one. */
-function Lineage({
-  run,
-  attempts,
-  runNumber,
-}: {
-  run: Schema["RunResource"];
-  attempts: number;
-  runNumber?: (runId: string) => number | null;
-}) {
+function Lineage({ run }: { run: Schema["RunView"] }) {
   const { t } = useTranslation();
-  const source = run.retry_of_run_id
-    ? (runNumber?.(run.retry_of_run_id) ?? null)
-    : null;
   const notes = [
-    run.retry_of_run_id &&
-      (source === null
-        ? t("retry")
-        : t("retry of Run {{index}}", { index: source })),
-    run.lineage_kind === "fork" && t("fork"),
-    attempts > 1 && t("{{count}} attempts", { count: attempts }),
+    run.lineage === "fork" && t("fork"),
+    run.attempts > 1 && t("{{count}} attempts", { count: run.attempts }),
   ].filter(Boolean) as string[];
   if (!notes.length) return null;
   return <span className={styles.lineage}>{notes.join(" · ")}</span>;
-}
-
-/**
- * How many attempts the Run reported. Attempts are read from observed
- * lifecycle facts: the first one earns no row, so the highest number observed
- * is the count, and a Run that reported none ran once.
- */
-function attemptCount(timeline: RunTimeline) {
-  return timeline.entries.reduce(
-    (count, entry) =>
-      entry.kind === "event" && entry.type.startsWith("run_attempt.")
-        ? Math.max(count, entry.attempt ?? 1)
-        : count,
-    1,
-  );
 }

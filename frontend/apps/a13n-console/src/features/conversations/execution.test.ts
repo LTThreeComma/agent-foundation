@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import type { RunEvent } from "../../service-client";
+import type { RunEvent } from "./display";
 import { applyRun, emptyExecution, type RunFold } from "./execution";
 import type { PresentedItem } from "./projection";
 
@@ -16,11 +16,9 @@ function event(
     event: {
       event_type: type,
       event_id: `event-${sequence}`,
-      run_id: "run",
-      thread_id: "thread",
       occurred_at: occurredAt,
       payload,
-      item_id: item,
+      item_id: item ?? null,
       run_attempt_id: "attempt",
       harness_run_id: scope,
     },

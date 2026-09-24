@@ -26,8 +26,9 @@ Everything that renders many resources.
 - `ResourceTable` — the one table anatomy. Columns declare `label`, `tone`, and `render`; the first column is the identity. `onRowActivate` makes rows clickable and keyboard-activatable; `rowMenu` adds the trailing overflow menu column, which stays visible on touch devices.
 - `ResourceIdentity` — the identity cell: a 32px tile, the name at 13.5px medium, one line of secondary text, and the reference popover for identifiers. Re-exported here because it is a table concern as much as an identity one.
 - `Toolbar` — search input at 300px with a leading icon, then filters, then secondary actions at the right. `searchLabel` names the field; `searchPlaceholder` adds the hint when the field accepts something more specific.
+- `ArchivedFilter` — the toolbar chip that adds archived items to a head list (agents, skills) of open ones.
 - `CollectionFooter` — result count at the left, pagination at the right.
-- `Pagination` + `useCursor` — server-side Previous/Next over an opaque cursor.
+- `Pagination` + `useCursor` — server-side Previous/Next over an opaque cursor. Pass the list's filters: a cursor belongs to the filters that produced it, so any other filters start at the first page.
 - `Empty` — centred empty state on a surface: icon tile, title, one line, and the primary action.
 - `ListRows`, `ListRow`, `ListRowsEmpty` — surface rows for lists that live inside a section or an editor: icon tile, name plus secondary line, an optional trailing control, and row actions.
 - `ResourcePicker` — the popover picker that attaches workspace resources to something: search, checkbox rows with selected items first, and a footer that counts the selection and links to the managing page.
@@ -36,7 +37,7 @@ Everything that renders many resources.
 
 State that the user has to read.
 
-- `StatePill` — maps a domain state to a semantic `StatusPill` and translates it through `state.<value>`. This is the only status affordance in the console; feature pills such as the bot `SetupPill` delegate to it rather than picking their own hue.
+- `StatePill` — maps a domain state to a semantic `StatusPill` and translates it through `state.<value>`. This is the only status affordance in the console; feature pills delegate to it rather than picking their own hue.
 - `ErrorNotice` — inline, beside the form or collection that owns the failure, with an optional retry.
 - `ErrorToast` — for isolated action results; it self-dismisses with its owner.
 - `ErrorPage` — reserved for views that cannot function at all.
@@ -88,7 +89,7 @@ How a resource presents itself.
 
 ## `shared/` root
 
-Infrastructure with no visual surface: `api.ts` (typed request helpers and pagination), `idempotency.ts`, `download.ts`, `paths.ts`, `time.ts`, `local-date-time.ts`, `markdown.tsx`, `cost.ts`, `unknown.ts` (the one mark for a value the service never reported), `authorization-link.tsx`, `configuration-summary.tsx`, and `shared.module.css` — layout utilities (`stack`, `form`, `twoColumns`, `filters`, `cardGrid`, `card`, `muted`) that feature screens reuse.
+Infrastructure with no visual surface: `api.ts` (typed request helpers and pagination), `idempotency.ts`, `keys.ts` (derived keys for new agents and workspaces), `download.ts`, `paths.ts`, `time.ts`, `local-date-time.ts`, `markdown.tsx`, `cost.ts`, `unknown.ts` (the one mark for a value the service never reported), `authorization-link.tsx`, `configuration-summary.tsx`, and `shared.module.css` — layout utilities (`stack`, `form`, `twoColumns`, `filters`, `cardGrid`, `card`, `muted`) that feature screens reuse.
 
 ## Page anatomies
 

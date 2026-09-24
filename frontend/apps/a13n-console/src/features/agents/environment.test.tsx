@@ -10,21 +10,13 @@ const http = vi.hoisted(() => ({ GET: vi.fn() }));
 vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
-    workspace: { id: "ws_test" },
+    workspace: { id: "ws_test", settings: {} },
+    organization: { id: "org_test" },
     can: () => true,
     basePath: "/workspace/test",
   }),
 }));
 vi.mock("./toolsets", () => ({ AgentToolsets: () => null }));
-vi.mock("../memory/availability", () => ({
-  useMemoryProviders: () => ({ visible: false }),
-  useWorkspaceMemoryProviderDefinitions: () => ({ data: { items: [] } }),
-  eligibleMemoryProvider: () => false,
-}));
-vi.mock("../memory/presets", () => ({ MemoryPresets: () => null }));
-vi.mock("../models/provider-definitions", () => ({
-  useModelProviderDefinitions: () => ({ data: { items: [] } }),
-}));
 vi.mock("./choices", () => ({
   useAgentChoices: () => ({
     isPending: false,
@@ -69,8 +61,8 @@ it("saves the environment choice together with other configuration edits", async
       <MemoryRouter>
         <AgentEditor
           initial={{
-            ...initialConfig("Research"),
-            model: { model_key: "research" },
+            ...initialConfig(),
+            model: { model_id: "mdl_0123456789abcdef" },
             instructions: "Check the evidence.",
           }}
           version={7}

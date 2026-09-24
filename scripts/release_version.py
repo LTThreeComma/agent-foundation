@@ -31,9 +31,10 @@ HARNESS_UI_PACKAGE = "a13n-harness-ui"
 RELEASE_DEPENDENCIES_TOOL = "tool.a13n.release-dependencies"
 LOGGING_MANIFEST = Path("packages/a13n-logging/pyproject.toml")
 LOGGING_PACKAGE = "a13n-logging"
+A13N_SERVICE_MANIFEST = Path("packages/a13n-service/pyproject.toml")
 A13N_SERVICE_MANIFESTS = (
     Path("pyproject.toml"),
-    Path("packages/a13n-service/pyproject.toml"),
+    A13N_SERVICE_MANIFEST,
 )
 A13N_SERVICE_PACKAGES = (
     "a13n-workspace",
@@ -184,6 +185,7 @@ def release_dependency_ranges(root: Path, manifest: Path) -> dict[str, str]:
     """Read independently versioned dependencies without constraining local workspace members."""
     expected = {
         HARNESS_MANIFEST: (LOGGING_PACKAGE, A13N_ENVD_CLIENT_PACKAGE),
+        A13N_SERVICE_MANIFEST: HARNESS_PACKAGES,
         HARNESS_UI_MANIFEST: (*HARNESS_PACKAGES, LOGGING_PACKAGE, A13N_ENVD_CLIENT_PACKAGE),
     }[manifest]
     label = f"{RELEASE_DEPENDENCIES_TOOL} in {manifest}"
@@ -195,10 +197,11 @@ def release_dependency_ranges(root: Path, manifest: Path) -> dict[str, str]:
     ranges = {
         package: validate_dependency_range(_string(declarations[package], f"{label}.{package}")) for package in expected
     }
-    if manifest == HARNESS_UI_MANIFEST and len({ranges[package] for package in HARNESS_PACKAGES}) != 1:
-        raise ReleaseVersionError(
-            "Harness UI must declare the same compatible range for all Harness-group dependencies"
-        )
+    if (
+        manifest in {HARNESS_UI_MANIFEST, A13N_SERVICE_MANIFEST}
+        and len({ranges[package] for package in HARNESS_PACKAGES}) != 1
+    ):
+        raise ReleaseVersionError("Consumers must declare the same compatible range for all Harness-group dependencies")
     return ranges
 
 
@@ -352,6 +355,7 @@ def validate_component_version(root: Path, component: str, version: str) -> None
     manifests = {
         "a13n-harness": (HARNESS_MANIFEST,),
         "a13n-harness-ui": (HARNESS_UI_MANIFEST,),
+        "a13n-service": (A13N_SERVICE_MANIFEST,),
     }.get(component, ())
     for manifest in manifests:
         for package_name, constraint in release_dependency_ranges(root, manifest).items():
@@ -581,6 +585,7 @@ def prepare_component_version(root: Path, component: str, version: str) -> tuple
     manifests = {
         "a13n-harness": (HARNESS_MANIFEST,),
         "a13n-harness-ui": (HARNESS_UI_MANIFEST,),
+        "a13n-service": (A13N_SERVICE_MANIFEST,),
     }.get(component, ())
     for manifest in manifests:
         for package_name, constraint in release_dependency_ranges(root, manifest).items():

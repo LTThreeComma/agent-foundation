@@ -114,7 +114,7 @@ export function WorkspaceMenu({
             <GearSixIcon aria-hidden="true" />
             {t("Workspace settings")}
           </MenuItem>
-          {context.organizationAdmin && (
+          {context.organizationCan("admin") && (
             <MenuItem onClick={() => open("/organization/settings/workspaces")}>
               <PlusIcon aria-hidden="true" />
               {t("Create workspace")}

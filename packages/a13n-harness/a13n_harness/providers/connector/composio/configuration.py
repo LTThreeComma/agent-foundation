@@ -8,6 +8,7 @@ from ..contracts import JsonObject, StrictModel
 from ..validation import model_json
 
 COMPOSIO_ENDPOINT = "https://backend.composio.dev"
+COMPOSIO_CONNECT_ENDPOINT = "https://connect.composio.dev"
 
 
 class ComposioConfiguration(StrictModel):

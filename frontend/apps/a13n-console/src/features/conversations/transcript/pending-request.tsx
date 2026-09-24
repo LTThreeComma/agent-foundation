@@ -16,6 +16,7 @@ import { ErrorNotice } from "../../../shared/feedback";
 import { CopyButton } from "../../../shared/identity";
 import { JsonView, TextAreaField } from "../../../shared/forms";
 import { QuestionResponse, readQuestions } from "./questions";
+import { questionsOnly } from "./run-actions";
 import styles from "./cards.module.css";
 
 type Answer = {
@@ -29,7 +30,7 @@ type Answer = {
 export function PendingRequests({
   actions,
 }: {
-  actions: Schema["PendingActionResource"][];
+  actions: readonly Schema["PendingItem"][];
 }) {
   const { t } = useTranslation();
   return (
@@ -43,22 +44,25 @@ export function PendingRequests({
         )}
       </p>
       {actions.map((action) => (
-        <ActionCard key={action.call_id} action={action}>
-          {action.presentation != null && (
-            <DisclosureSection
-              className={styles.inlineDisclosure}
-              title={<>{t("Request details")}</>}
-            >
-              <JsonView value={action.presentation} />
-            </DisclosureSection>
-          )}
+        <ActionCard key={action.tool_call_id} action={action}>
+          <DisclosureSection
+            className={styles.inlineDisclosure}
+            title={<>{t("Request details")}</>}
+          >
+            <JsonView value={action.presentation ?? action.arguments} />
+          </DisclosureSection>
         </ActionCard>
       ))}
     </div>
   );
 }
 
-/** Every pending action is answered together; the agent resumes with the set. */
+/**
+ * Every pending action is answered together; the agent resumes with the set.
+ * Questions are answered by a message, which a wait of questions alone takes
+ * as the next run's input; any other wait resumes with approvals and tool
+ * results, and its questions go unanswered.
+ */
 export function RunFeedback({
   run,
   thread,
@@ -66,10 +70,10 @@ export function RunFeedback({
   accepted,
   continuation,
 }: {
-  run: Schema["RunResource"];
-  thread: Schema["ThreadResource"];
-  actions: Schema["PendingActionResource"][];
-  accepted: (receipt: Schema["RunAcceptanceReceipt"]) => void;
+  run: Schema["RunView"];
+  thread: Schema["ThreadView"];
+  actions: readonly Schema["PendingItem"][];
+  accepted: (next: Schema["RunView"] | null) => void;
   /** The "continue without feedback" escape, shown beside Submit. */
   continuation?: ReactNode;
 }) {
@@ -78,69 +82,83 @@ export function RunFeedback({
     { workspace, can } = useWorkspace();
   const [answers, setAnswers] = useState<Record<string, Answer>>({}),
     [key, setKey] = useState(crypto.randomUUID());
+  const answerable = questionsOnly(actions);
   const mutation = useMutation({
     mutationFn: async () => {
-      const resolutions: NonNullable<
-        Schema["WaitingRunFeedbackRequest"]["resolutions"]
-      > = [];
+      const resume: Schema["Answer"][] = [];
+      const message: Schema["Part"][] = [];
       for (const pending of actions) {
-        const answer = answers[pending.call_id];
+        const answer = answers[pending.tool_call_id];
         if (!answer?.action)
           throw new Error(t("Choose a response for every pending action."));
         if (answer.action === "omit") continue;
         if (answer.action === "approve" || answer.action === "reject") {
-          resolutions.push(
+          resume.push(
             answer.action === "reject"
               ? {
                   action: "reject",
-                  call_id: pending.call_id,
+                  tool_call_id: pending.tool_call_id,
                   ...(answer.value.trim()
                     ? { reason: answer.value.trim() }
                     : {}),
                 }
-              : { action: "approve", call_id: pending.call_id },
+              : { action: "approve", tool_call_id: pending.tool_call_id },
           );
+          continue;
+        }
+        if (answer.action === "respond" && !answer.structured) {
+          message.push({ type: "text", text: answer.value });
           continue;
         }
         let value: Schema["JsonValue"];
         try {
-          value =
-            answer.action === "respond" && !answer.structured
-              ? pending.tool_name === "ask_user_question"
-                ? { response: answer.value }
-                : answer.value
-              : JSON.parse(answer.value);
+          value = JSON.parse(answer.value);
         } catch {
           throw new Error(t("Tool results and responses must be valid JSON."));
         }
         if (answer.action === "complete")
-          resolutions.push({
+          resume.push({
             action: "complete",
-            call_id: pending.call_id,
+            tool_call_id: pending.tool_call_id,
             result: value,
           });
-        else
-          resolutions.push({
-            action: "respond",
-            call_id: pending.call_id,
-            response: value,
-          });
+        else message.push({ type: "json", value });
       }
-      return client.http
-        .POST("/api/v1/runs/{run_id}/feedback", {
-          params: {
-            path: { run_id: run.id },
-            header: commandHeaders(workspace.id, key),
+      const workspace_id = workspace.id;
+      if (message.length) {
+        const receipt = data(
+          await client.http.POST(
+            "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/inbox",
+            {
+              params: {
+                path: { workspace_id, thread_id: thread.id },
+                header: commandHeaders(key),
+              },
+              body: {
+                kind: "message",
+                delivery: "next_run",
+                payload: { content: message },
+                agent_id: run.agent_id,
+              },
+            },
+          ),
+        );
+        return receipt.run;
+      }
+      return data(
+        await client.http.POST(
+          "/api/v1/workspaces/{workspace_id}/runs/{run_id}/resume",
+          {
+            params: {
+              path: { workspace_id, run_id: run.id },
+              header: commandHeaders(key),
+            },
+            body: { answers: resume },
           },
-          body: {
-            expected_thread_version: thread.version,
-            sealed_state_digest_sha256: run.sealed_state_digest_sha256!,
-            resolutions,
-          },
-        })
-        .then(data);
+        ),
+      );
     },
-    onSuccess: (receipt) => accepted(receipt),
+    onSuccess: (next) => accepted(next),
   });
   function change(id: string, answer: Answer) {
     setAnswers((previous) => ({ ...previous, [id]: answer }));
@@ -164,22 +182,24 @@ export function RunFeedback({
         )}
       </p>
       <fieldset
-        disabled={mutation.isPending || !can("run.feedback")}
+        disabled={mutation.isPending || !can("run")}
         className={styles.cards}
       >
         {actions.map((action) => {
-          const answer = answers[action.call_id] ?? { action: "", value: "" };
+          const answer = answers[action.tool_call_id] ?? {
+            action: "",
+            value: "",
+          };
           const questions =
-            action.kind === "user_input" &&
-            action.tool_name === "ask_user_question"
-              ? readQuestions(action.presentation)
+            answerable && action.tool_name === "ask_user_question"
+              ? readQuestions(action.arguments)
               : null;
           if (questions)
             return (
-              <ActionCard key={action.call_id} action={action}>
+              <ActionCard key={action.tool_call_id} action={action}>
                 <QuestionResponse
                   questions={questions}
-                  onChange={(value) => change(action.call_id, value)}
+                  onChange={(value) => change(action.tool_call_id, value)}
                 />
               </ActionCard>
             );
@@ -188,7 +208,11 @@ export function RunFeedback({
               ? approvalDetails(action.presentation)
               : null;
           return (
-            <ActionCard key={action.call_id} action={action} details={details}>
+            <ActionCard
+              key={action.tool_call_id}
+              action={action}
+              details={details}
+            >
               {details?.target && (
                 <div className={styles.cardCommand}>
                   <code>{details.target}</code>
@@ -216,12 +240,12 @@ export function RunFeedback({
                   )}
                 </dl>
               )}
-              {action.presentation != null && !details && (
+              {!details && (
                 <DisclosureSection
                   className={styles.inlineDisclosure}
                   title={<>{t("Request details")}</>}
                 >
-                  <JsonView value={action.presentation} />
+                  <JsonView value={action.presentation ?? action.arguments} />
                 </DisclosureSection>
               )}
               {action.kind === "approval" ? (
@@ -248,7 +272,7 @@ export function RunFeedback({
                         variant={pressed ? "secondary" : variant}
                         aria-pressed={pressed}
                         onClick={() =>
-                          change(action.call_id, {
+                          change(action.tool_call_id, {
                             ...answer,
                             action: target,
                             reasonMode: choice === "reject_with_reason",
@@ -270,20 +294,27 @@ export function RunFeedback({
                   placeholder={t("Choose a response")}
                   value={answer.action}
                   onValueChange={(value) =>
-                    change(action.call_id, { ...answer, action: value })
+                    change(action.tool_call_id, { ...answer, action: value })
                   }
                   label={t("Response")}
                   hideLabel
                   options={[
-                    {
-                      value:
-                        action.kind === "client_tool" ? "complete" : "respond",
-                      label: t(
-                        action.kind === "client_tool"
-                          ? "Return tool result"
-                          : "Respond",
-                      ),
-                    },
+                    // Only a wait of questions alone takes a message as answer.
+                    ...(action.kind === "client_tool" || answerable
+                      ? [
+                          {
+                            value:
+                              action.kind === "client_tool"
+                                ? "complete"
+                                : "respond",
+                            label: t(
+                              action.kind === "client_tool"
+                                ? "Return tool result"
+                                : "Respond",
+                            ),
+                          },
+                        ]
+                      : []),
                     { value: "omit", label: t("Continue without a response") },
                   ]}
                 />
@@ -295,7 +326,7 @@ export function RunFeedback({
                     label={t("Denial reason (optional)")}
                     value={answer.value}
                     onChange={(value) =>
-                      change(action.call_id, {
+                      change(action.tool_call_id, {
                         ...answer,
                         value: value.slice(0, 2000),
                       })
@@ -310,7 +341,7 @@ export function RunFeedback({
                       <Switch
                         checked={!!answer.structured}
                         onCheckedChange={(checked) =>
-                          change(action.call_id, {
+                          change(action.tool_call_id, {
                             ...answer,
                             structured: checked === true,
                           })
@@ -328,7 +359,7 @@ export function RunFeedback({
                     code={answer.action === "complete" || answer.structured}
                     value={answer.value}
                     onChange={(value) =>
-                      change(action.call_id, { ...answer, value })
+                      change(action.tool_call_id, { ...answer, value })
                     }
                   />
                 </>
@@ -342,7 +373,7 @@ export function RunFeedback({
             type="submit"
             variant="default"
             disabled={
-              !actions.every((action) => !!answers[action.call_id]?.action)
+              !actions.every((action) => !!answers[action.tool_call_id]?.action)
             }
             loading={mutation.isPending}
           >
@@ -364,7 +395,7 @@ function ActionCard({
   details,
   children,
 }: {
-  action: Schema["PendingActionResource"];
+  action: Schema["PendingItem"];
   details?: { risk?: string } | null;
   children: ReactNode;
 }) {
@@ -409,7 +440,7 @@ const highRisk = (risk?: string) => risk === "high" || risk === "extra_high";
 const lowRisk = (risk?: string) => !!risk && !highRisk(risk);
 
 function approvalDetails(
-  value: Schema["JsonValue"] | null,
+  value: Schema["PendingItem"]["presentation"],
 ): { target?: string; reason?: string; risk?: string } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const details = value as Record<string, unknown>;

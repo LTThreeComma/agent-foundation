@@ -253,6 +253,7 @@ class ModalEnvironment(NativeEnvironment[ModalEnvironmentConfiguration, ModalSta
         async with asyncio.timeout(self.config.request_timeout_seconds):
             sandbox = await self.inspect()
             if sandbox is None:
+                await self.adopt_snapshot()
                 return
             assert self.target
             self.sandbox = sandbox
@@ -286,6 +287,24 @@ class ModalEnvironment(NativeEnvironment[ModalEnvironmentConfiguration, ModalSta
                 await sandbox.set_tags.aio({**tags, "a13n_snapshot": image_id})
                 await sandbox.terminate.aio(wait=True)
             await self.cleanup_snapshots()
+
+    async def adopt_snapshot(self) -> None:
+        """Record the image a stop that ended before its state was kept left on its terminated sandbox's tags."""
+        import modal
+
+        if self.target is None or self.target.snapshot_id is not None:
+            return
+        with sdk_errors():
+            try:
+                source = await modal.Sandbox.from_id.aio(self.target.target_id, client=await self.connection())
+            except modal.exception.NotFoundError:
+                return
+            tags = await source.get_tags.aio()
+        self.validate_labels(tags)
+        if image_id := tags.get("a13n_snapshot"):
+            self.remember(
+                self.target.model_copy(update={"snapshot_id": image_id, "snapshot_source_id": source.object_id})
+            )
 
     async def validate_snapshot(self, reference: SnapshotReference) -> None:
         import modal

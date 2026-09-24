@@ -45,11 +45,11 @@ Read `00`, `01`, and `02`, then follow the owner for the concern being changed.
 
 ### Build an Agent or Plugin
 
-Read `03`, `04`, `05`, and `14`. Hosted durable definitions are owned by [a13n Service](../a13n-service/README.md).
+Read `03`, `04`, `05`, and `14`. Hosted durable definitions are owned by [Service resources](../a13n-service/04-resources.md).
 
 ### Author or Select a Provider
 
-Read `22` for the shared Provider core, credential declaration, catalogs, and the installed-plugin manifest, then the owning domain: `16b` for Model, `08a` for Environment, `09` for Memory, and [Service Connectivity](../a13n-service/40-connectivity/README.md) for the Connector and Web deployment boundaries.
+Read `22` for the shared Provider core, credential declaration, catalogs, and the installed-plugin manifest, then the owning domain: `16b` for Model, `08a` for Environment, `09` for Memory, and [Service providers](../a13n-service/08-providers.md) for the Connector and Web deployment boundaries.
 
 ### Understand Models and Recovery
 
@@ -57,7 +57,7 @@ Read `06`, `10`, and `16`. Read `16a` for OAuth-backed native Models and Host cr
 
 ### Integrate Tools or Environments
 
-Read `07`, `08`, `13`, and `15`, then `08a` for Provider definitions, adapter lifecycle, and built-ins, and `22` for the shared Provider core. For restricted Python orchestration over tools, also read `18`. Read `11` and `20` for async subagents; `08` solely owns background-process semantics. A Run receives fresh Environment adapters and exposes one internal multi-mount facade; `DynamicEnvironmentCapability` is only the optional model-facing projection. For durable client-tool delivery, also read [a13n Service](../a13n-service/README.md).
+Read `07`, `08`, `13`, and `15`, then `08a` for Provider definitions, adapter lifecycle, and built-ins, and `22` for the shared Provider core. For restricted Python orchestration over tools, also read `18`. Read `11` and `20` for async subagents; `08` solely owns background-process semantics. A Run receives fresh Environment adapters and exposes one internal multi-mount facade; `DynamicEnvironmentCapability` is only the optional model-facing projection. For durable client-tool delivery, also read [Service runs](../a13n-service/05-runs.md).
 
 ### Implement Hosting or Persistence
 
@@ -65,7 +65,7 @@ Read `10`, `12`, `13`, `14`, and `20`, then the a13n Service catalog. A Host own
 
 ### Integrate Document Memory
 
-Read `21`, the memory boundary in `09`, and Environment file access in `08`. Hosted integrations also read Service `42` for storage bindings, authorization, organization completion, change-query metadata, and publication semantics. Native record adapters retain their contract in `09`.
+Read `21`, the memory boundary in `09`, and Environment file access in `08`. Embedded Hosts own storage bindings, authorization, organization completion, and publication; the current Service does not offer memory. Native record adapters retain their contract in `09`.
 
 ### Integrate Observation
 

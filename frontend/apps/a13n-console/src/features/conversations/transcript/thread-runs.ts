@@ -1,11 +1,11 @@
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useClient } from "../../../auth/context";
 import { useWorkspace } from "../../../layout/workspace";
 import type { Schema } from "../../../shared/api";
 import { conversationQueries, runPath } from "../api";
 
-type Run = Schema["RunResource"];
-type Thread = Schema["ThreadResource"];
+type Run = Schema["RunView"];
+type Thread = Schema["ThreadView"];
 
 export const chronological = <T extends { created_at: string; id: string }>(
   entries: readonly T[],
@@ -36,8 +36,8 @@ export function useThreadRuns(threadId: string) {
 }
 
 /**
- * The child Threads this Thread delegated to, with their own Runs: what the
- * navigator lists beneath the Run that dispatched them.
+ * The Threads that branched from this one, delegated children and forks, with
+ * their own Runs: what the navigator lists beneath the Run they started from.
  */
 export function useChildThreads(sessionId: string, threadId: string) {
   const client = useClient(),
@@ -50,7 +50,7 @@ export function useChildThreads(sessionId: string, threadId: string) {
   const children = chronological(
     (threads.data ?? []).filter(
       (thread) =>
-        thread.role === "child" && thread.origin_thread_id === threadId,
+        thread.origin !== "new" && thread.origin_thread_id === threadId,
     ),
   );
   const runs = useQueries({
@@ -65,14 +65,21 @@ export function useChildThreads(sessionId: string, threadId: string) {
 /**
  * The Threads this Run's lineage passes through before its own Thread — a
  * fork or child Thread reads on from them — oldest first, with their Runs.
+ * Only the lineage pages read so far are consulted; reaching further back
+ * extends them.
  */
 export function useLineageThreads(runId: string, threadId: string) {
   const client = useClient(),
     { workspace } = useWorkspace();
   const queries = conversationQueries(client, workspace.id);
-  const lineage = useQuery({ ...queries.lineage(runId), enabled: !!runId });
-  const ids = [...(lineage.data?.items ?? [])]
-    .sort((a, b) => b.depth_from_head - a.depth_from_head)
+  const lineage = useInfiniteQuery({
+    ...queries.lineage(runId),
+    enabled: !!runId,
+  });
+  // The lineage reads nearest first; its Threads are listed oldest first.
+  const ids = (lineage.data?.pages ?? [])
+    .flatMap((page) => page.items)
+    .reverse()
     .map((entry) => entry.thread_id)
     .filter((id, index, all) => id !== threadId && all.indexOf(id) === index);
   const threads = useQueries({ queries: ids.map((id) => queries.thread(id)) });

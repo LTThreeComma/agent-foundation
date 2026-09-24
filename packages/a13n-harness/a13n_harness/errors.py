@@ -76,3 +76,7 @@ class RunCleanupError(HarnessError):
         )
         self.outcome = outcome
         self.causes = causes
+        # Causes are not chained, so a logged traceback would otherwise omit what failed. Only their types: notes are
+        # shown as safe text, and a cause's message can carry private values.
+        for cause in causes:
+            self.add_note(f"Cleanup cause: {type(cause).__qualname__}")

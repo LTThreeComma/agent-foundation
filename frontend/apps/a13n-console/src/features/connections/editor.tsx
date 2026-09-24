@@ -20,7 +20,7 @@ import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { commandHeaders, data, type Schema } from "../../shared/api";
+import { data, ifMatch, rowTag, type Schema } from "../../shared/api";
 import { Confirm } from "../../shared/dialogs";
 import {
   ErrorNotice,
@@ -29,12 +29,18 @@ import {
   Timestamp,
 } from "../../shared/feedback";
 import { CopyableId, IconTile } from "../../shared/identity";
-import { useIdempotency } from "../../shared/idempotency";
 import { Panel } from "../../shared/page";
 import { ConnectionSetup } from "../connectors/setup";
 import { MCPAuthorization } from "../mcp/authorization";
 import { MCPTools } from "../mcp/tools";
 import { MCPConnectionIcon } from "./mcp-icon";
+import {
+  connectionPath,
+  connectionState,
+  revokeCleanup,
+  testConnection,
+  type RemoteCleanup,
+} from "./api";
 import styles from "./connections.module.css";
 
 /** One connection, inspected beside the collection instead of over it. */
@@ -44,7 +50,7 @@ export function ConnectionDetails({
   onClose,
 }: {
   connectionId: string;
-  onCleanup: (receipt: Schema["ConnectionCleanupReceipt"]) => void;
+  onCleanup: (cleanup: RemoteCleanup) => void;
   onClose: () => void;
 }) {
   const client = useClient(),
@@ -55,24 +61,21 @@ export function ConnectionDetails({
     queryKey: ["connections", workspace.id, connectionId],
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/connections/{connection_id}", {
-          params: { path: { connection_id: connectionId } },
+        .GET("/api/v1/workspaces/{workspace_id}/connections/{connection_id}", {
+          params: {
+            path: { workspace_id: workspace.id, connection_id: connectionId },
+          },
           signal,
         })
-        .then(data)
-        .then((connection) => {
-          if (connection.workspace_id !== workspace.id)
-            throw new Error(t("Connection belongs to another workspace."));
-          return connection;
-        }),
+        .then(data),
   });
   async function reload() {
     await query.refetch();
     setGeneration((value) => value + 1);
   }
   const connection = query.data;
-  const manage = can("connection.manage");
-  const mcp = connection?.source.kind === "mcp";
+  const manage = can("write");
+  const mcp = connection?.type === "mcp";
   const tabNames = manage
     ? ["details", "setup", ...(mcp ? ["tools"] : [])]
     : ["details"];
@@ -80,7 +83,8 @@ export function ConnectionDetails({
   const active =
     tab && tabNames.includes(tab)
       ? tab
-      : connection && ["pending", "action_required"].includes(connection.status)
+      : connection &&
+          ["pending", "reauthorization_required"].includes(connection.status)
         ? "setup"
         : "details";
   return (
@@ -91,13 +95,13 @@ export function ConnectionDetails({
       title={
         <>
           <IconTile size={32} tone="surface">
-            {connection?.source.kind === "mcp" ? (
-              <MCPConnectionIcon endpoint={connection.source.endpoint_url} />
+            {connection && "url" in connection.config ? (
+              <MCPConnectionIcon endpoint={connection.config.url} />
             ) : (
               <BrandIcon
                 alias={
-                  connection?.source.kind === "connector"
-                    ? connection.source.connector_key
+                  connection && "app" in connection.config
+                    ? connection.config.app
                     : undefined
                 }
               />
@@ -106,7 +110,9 @@ export function ConnectionDetails({
           <strong title={connection?.name}>
             {connection?.name ?? t("Connection")}
           </strong>
-          <StatePill state={connection?.status ?? "pending"} />
+          <StatePill
+            state={connection ? connectionState(connection) : "pending"}
+          />
         </>
       }
       actions={
@@ -142,13 +148,8 @@ export function ConnectionDetails({
       ) : (
         connection && (
           <div className={styles.panelBody} key={generation}>
-            {connection.status_reason && (
-              <p className={styles.reason}>
-                {t(`state.${connection.status_reason}`)}
-              </p>
-            )}
             {!manage ? (
-              <ConfigurationSummary value={connection.safe_metadata ?? {}} />
+              <ConfigurationSummary value={connection.config} />
             ) : (
               <>
                 {/* Details stays mounted so an unsaved name survives a tab visit. */}
@@ -156,7 +157,7 @@ export function ConnectionDetails({
                   <ConnectionSettings connection={connection} reload={reload} />
                 </div>
                 {active === "setup" &&
-                  (connection.source.kind === "connector" ? (
+                  (connection.type !== "mcp" ? (
                     <ConnectionSetup connection={connection} />
                   ) : (
                     <MCPAuthorization
@@ -182,15 +183,16 @@ function ConnectionMenu({
   onDone,
 }: {
   connection: Schema["Connection"];
-  onCleanup: (receipt: Schema["ConnectionCleanupReceipt"]) => void;
+  onCleanup: (cleanup: RemoteCleanup) => void;
   onDone: () => void;
 }) {
   const client = useClient(),
     cache = useQueryClient(),
-    { workspace } = useWorkspace(),
-    { t } = useTranslation(),
-    key = useIdempotency();
-  const body = { expected_version: connection.version };
+    { t } = useTranslation();
+  const request = {
+    params: { path: connectionPath(connection) },
+    headers: ifMatch(rowTag(connection)),
+  };
   const done = () => {
     void cache.invalidateQueries({ queryKey: ["connections"] });
     onDone();
@@ -217,100 +219,55 @@ function ConnectionMenu({
           subject={connection.name}
           retry={retry}
           title={t(
-            connection.status === "disabled"
-              ? "Enable connection"
-              : "Disable connection",
+            connection.enabled ? "Disable connection" : "Enable connection",
           )}
           description={t(
             "This changes whether new agent calls can use the connection.",
           )}
           triggerElement={
             <MenuItem closeOnClick={false}>
-              {t(connection.status === "disabled" ? "Enable" : "Disable")}
+              {t(connection.enabled ? "Disable" : "Enable")}
             </MenuItem>
           }
           action={async () => {
-            const action =
-              connection.status === "disabled" ? "enable" : "disable";
             data(
-              await client.http.POST(
-                action === "enable"
-                  ? "/api/v1/connections/{connection_id}/enable"
-                  : "/api/v1/connections/{connection_id}/disable",
-                {
-                  params: {
-                    path: { connection_id: connection.id },
-                    header: commandHeaders(
-                      workspace.id,
-                      key.forBody({ action, ...body }),
-                    ),
-                  },
-                  body,
-                },
+              await client.http.PATCH(
+                "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
+                { ...request, body: { enabled: !connection.enabled } },
               ),
             );
             done();
           }}
         />
-        <MenuSeparator />
-        {(connection.source.kind === "connector"
-          ? (["revoke", "delete"] as const)
-          : (["delete"] as const)
-        ).map((action) => (
-          <Confirm
-            key={action}
-            subject={connection.name}
-            retry={retry}
-            title={t(
-              action === "revoke"
-                ? "Revoke authorization"
-                : "Delete connection",
-            )}
-            description={t(
-              "Local access is disabled immediately. The result reports whether external cleanup succeeded.",
-            )}
-            triggerElement={
-              <MenuItem closeOnClick={false} variant="destructive">
-                {t(action === "revoke" ? "Revoke" : "Delete")}
-              </MenuItem>
-            }
-            danger
-            action={async () => {
-              const header = commandHeaders(
-                workspace.id,
-                key.forBody({ action, ...body }),
-              );
-              const result =
-                action === "revoke"
-                  ? data(
-                      await client.http.POST(
-                        "/api/v1/connections/{connection_id}/connector/revoke",
-                        {
-                          params: {
-                            path: { connection_id: connection.id },
-                            header,
-                          },
-                          body,
-                        },
-                      ),
-                    )
-                  : data(
-                      await client.http.DELETE(
-                        "/api/v1/connections/{connection_id}",
-                        {
-                          params: {
-                            path: { connection_id: connection.id },
-                            header,
-                            query: body,
-                          },
-                        },
-                      ),
-                    );
-              onCleanup(result);
-              done();
-            }}
-          />
-        ))}
+        {connection.auth !== "none" && (
+          <>
+            <MenuSeparator />
+            <Confirm
+              subject={connection.name}
+              retry={retry}
+              title={t("Revoke authorization")}
+              description={t(
+                "Local access is disabled immediately. The result reports whether external cleanup succeeded.",
+              )}
+              triggerElement={
+                <MenuItem closeOnClick={false} variant="destructive">
+                  {t("Revoke")}
+                </MenuItem>
+              }
+              danger
+              action={async () => {
+                const revoked = data(
+                  await client.http.POST(
+                    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/revoke",
+                    request,
+                  ),
+                );
+                onCleanup(revokeCleanup(revoked));
+                done();
+              }}
+            />
+          </>
+        )}
       </MenuPopup>
     </Menu>
   );
@@ -332,10 +289,14 @@ function ConnectionSettings({
   const save = useMutation({
     mutationFn: () =>
       client.http
-        .PATCH("/api/v1/connections/{connection_id}", {
-          params: { path: { connection_id: connection.id } },
-          body: { name, expected_version: connection.version },
-        })
+        .PATCH(
+          "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
+          {
+            params: { path: connectionPath(connection) },
+            headers: ifMatch(rowTag(connection)),
+            body: { name },
+          },
+        )
         .then(data),
     onSuccess: async () => {
       void cache.invalidateQueries({ queryKey: ["connections"] });
@@ -343,17 +304,12 @@ function ConnectionSettings({
     },
   });
   const check = useMutation({
-    mutationFn: () =>
-      client.http
-        .POST("/api/v1/connections/{connection_id}/check", {
-          params: { path: { connection_id: connection.id } },
-          body: { expected_version: connection.version },
-        })
-        .then(data),
+    mutationFn: () => testConnection(client, connection),
     onSuccess: () => {
       void cache.invalidateQueries({ queryKey: ["connections"] });
     },
   });
+  const lastCheck = connection.last_test;
   const changed = name !== connection.name;
   return (
     <>
@@ -382,20 +338,16 @@ function ConnectionSettings({
           </form>
         </SettingsRow>
         <SettingsRow label={t("Source")}>
-          {connection.source.kind === "mcp"
-            ? t("Remote MCP")
-            : t("Connected account")}
+          {connection.type === "mcp" ? t("Remote MCP") : t("Connected account")}
         </SettingsRow>
         <SettingsRow
-          label={t(
-            connection.source.kind === "mcp" ? "Endpoint" : "Connector key",
-          )}
+          label={t(connection.type === "mcp" ? "Endpoint" : "Connector key")}
         >
           <CopyableId
             value={
-              connection.source.kind === "mcp"
-                ? connection.source.endpoint_url
-                : connection.source.connector_key
+              "url" in connection.config
+                ? connection.config.url
+                : connection.config.app
             }
           />
         </SettingsRow>
@@ -408,20 +360,21 @@ function ConnectionSettings({
         <SettingsRow
           label={t("Last check")}
           description={
-            connection.last_check
-              ? t(
-                  connection.last_check.scope === "provider_account"
-                    ? "Provider account check"
-                    : "MCP discovery check",
-                )
+            lastCheck
+              ? (lastCheck.message ??
+                t(
+                  connection.type === "mcp"
+                    ? "MCP discovery check"
+                    : "Provider account check",
+                ))
               : t("No check has run for this connection.")
           }
         >
           <span className={styles.checkRow}>
-            {connection.last_check && (
+            {lastCheck && (
               <>
-                <StatePill state={connection.last_check.status} />
-                <Timestamp value={connection.last_check.checked_at} relative />
+                <StatePill state={lastCheck.status} />
+                <Timestamp value={lastCheck.tested_at} relative />
               </>
             )}
             <Button
@@ -429,7 +382,7 @@ function ConnectionSettings({
               variant="outline"
               size="sm"
               loading={check.isPending}
-              disabled={connection.status === "disabled"}
+              disabled={!connection.enabled}
               onClick={() => check.mutate()}
             >
               {t("Check connection")}
@@ -438,16 +391,14 @@ function ConnectionSettings({
         </SettingsRow>
       </SettingsSection>
       <ErrorNotice error={check.error} />
-      {connection.status === "disabled" && (
+      {!connection.enabled && (
         <p className={styles.reason}>
           {t(
             "After enabling, check the connection. Open the Authorization tab if new credentials are needed.",
           )}
         </p>
       )}
-      {Object.keys(connection.safe_metadata ?? {}).length > 0 && (
-        <ConfigurationSummary value={connection.safe_metadata ?? {}} />
-      )}
+      <ConfigurationSummary value={connection.config} />
     </>
   );
 }

@@ -1,16 +1,15 @@
 import { readDisplay } from "./display";
 import type { Client, paths } from "../../service-client";
-import { queryOptions, type QueryClient } from "@tanstack/react-query";
 import {
-  allPages,
-  data,
-  workspaceHeaders,
-  type Schema,
-} from "../../shared/api";
+  infiniteQueryOptions,
+  queryOptions,
+  type QueryClient,
+} from "@tanstack/react-query";
+import { allPages, data, type Schema } from "../../shared/api";
 
 export type SessionFilters = Omit<
   NonNullable<
-    paths["/api/v1/workspaces/{workspace}/sessions"]["get"]["parameters"]["query"]
+    paths["/api/v1/workspaces/{workspace_id}/sessions"]["get"]["parameters"]["query"]
   >,
   "limit" | "cursor"
 >;
@@ -20,34 +19,46 @@ export function conversationKeys(workspaceId: string) {
   return {
     root,
     sessions: () => [...root, "sessions"] as const,
+    session: (sessionId: string) => [...root, "session", sessionId] as const,
     threads: (sessionId: string) => [...root, "threads", sessionId] as const,
     thread: (threadId: string) => [...root, "thread", threadId] as const,
     runs: (threadId: string) => [...root, "runs", threadId] as const,
     queue: (threadId: string) => [...root, "queue", threadId] as const,
+    /** One inbox entry; it changes with its Thread's inbox. */
+    entry: (threadId: string, entryId: string) =>
+      [...root, "queue", threadId, "entry", entryId] as const,
     run: (runId: string) => [...root, "run", runId] as const,
     items: (runId: string) => [...root, "items", runId] as const,
-    pending: (runId: string) => [...root, "pending", runId] as const,
     attempts: (runId: string) => [...root, "attempts", runId] as const,
     lineage: (runId: string) => [...root, "lineage", runId] as const,
-    events: (runId: string) => [...root, "events", runId] as const,
   };
 }
 
 /** Query owns request cancellation; delivery attachments never abort shared reads. */
 export function conversationQueries(client: Client, workspaceId: string) {
-  const headers = workspaceHeaders(workspaceId),
-    keys = conversationKeys(workspaceId);
+  const keys = conversationKeys(workspaceId);
   return {
     sessions: (cursor?: string, filters: SessionFilters = {}) =>
       queryOptions({
         queryKey: [...keys.sessions(), filters, cursor],
         queryFn: ({ signal }) =>
           client.http
-            .GET("/api/v1/workspaces/{workspace}/sessions", {
+            .GET("/api/v1/workspaces/{workspace_id}/sessions", {
               params: {
-                path: { workspace: workspaceId },
+                path: { workspace_id: workspaceId },
                 query: { ...filters, cursor, limit: 20 },
               },
+              signal,
+            })
+            .then(data),
+      }),
+    session: (session_id: string) =>
+      queryOptions({
+        queryKey: keys.session(session_id),
+        queryFn: ({ signal }) =>
+          client.http
+            .GET("/api/v1/workspaces/{workspace_id}/sessions/{session_id}", {
+              params: { path: { workspace_id: workspaceId, session_id } },
               signal,
             })
             .then(data),
@@ -57,9 +68,8 @@ export function conversationQueries(client: Client, workspaceId: string) {
         queryKey: keys.run(run_id),
         queryFn: ({ signal }) =>
           client.http
-            .GET("/api/v1/runs/{run_id}", {
-              params: { path: { run_id } },
-              headers,
+            .GET("/api/v1/workspaces/{workspace_id}/runs/{run_id}", {
+              params: { path: { workspace_id: workspaceId, run_id } },
               signal,
             })
             .then(data),
@@ -69,21 +79,8 @@ export function conversationQueries(client: Client, workspaceId: string) {
         queryKey: keys.thread(thread_id),
         queryFn: ({ signal }) =>
           client.http
-            .GET("/api/v1/threads/{thread_id}", {
-              params: { path: { thread_id } },
-              headers,
-              signal,
-            })
-            .then(data),
-      }),
-    pending: (run_id: string) =>
-      queryOptions({
-        queryKey: keys.pending(run_id),
-        queryFn: ({ signal }) =>
-          client.http
-            .GET("/api/v1/runs/{run_id}/pending-actions", {
-              params: { path: { run_id } },
-              headers,
+            .GET("/api/v1/workspaces/{workspace_id}/threads/{thread_id}", {
+              params: { path: { workspace_id: workspaceId, thread_id } },
               signal,
             })
             .then(data),
@@ -94,17 +91,25 @@ export function conversationQueries(client: Client, workspaceId: string) {
         queryFn: ({ signal }) =>
           readDisplay(client, workspaceId, run_id, signal),
       }),
+    /**
+     * The Run and its ancestors, nearest first, across fork origins. Pages are
+     * read as the reader reaches further back, never all up front.
+     */
     lineage: (run_id: string) =>
-      queryOptions({
+      infiniteQueryOptions({
         queryKey: keys.lineage(run_id),
-        queryFn: ({ signal }) =>
+        initialPageParam: undefined as string | undefined,
+        queryFn: ({ signal, pageParam }) =>
           client.http
-            .GET("/api/v1/runs/{run_id}/lineage", {
-              params: { path: { run_id } },
-              headers,
+            .GET("/api/v1/workspaces/{workspace_id}/runs/{run_id}/lineage", {
+              params: {
+                path: { workspace_id: workspaceId, run_id },
+                query: { cursor: pageParam },
+              },
               signal,
             })
             .then(data),
+        getNextPageParam: (page) => page.next_cursor ?? undefined,
       }),
     threads: (session_id: string) =>
       queryOptions({
@@ -112,9 +117,11 @@ export function conversationQueries(client: Client, workspaceId: string) {
         queryFn: ({ signal }) =>
           allPages((cursor) =>
             client.http
-              .GET("/api/v1/sessions/{session_id}/threads", {
-                params: { path: { session_id }, query: { cursor } },
-                headers,
+              .GET("/api/v1/workspaces/{workspace_id}/threads", {
+                params: {
+                  path: { workspace_id: workspaceId },
+                  query: { session_id, cursor },
+                },
                 signal,
               })
               .then(data),
@@ -126,11 +133,16 @@ export function conversationQueries(client: Client, workspaceId: string) {
         queryFn: ({ signal }) =>
           allPages((cursor) =>
             client.http
-              .GET("/api/v1/threads/{thread_id}/runs", {
-                params: { path: { thread_id }, query: { cursor } },
-                headers,
-                signal,
-              })
+              .GET(
+                "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/runs",
+                {
+                  params: {
+                    path: { workspace_id: workspaceId, thread_id },
+                    query: { cursor },
+                  },
+                  signal,
+                },
+              )
               .then(data),
           ),
       }),
@@ -138,41 +150,49 @@ export function conversationQueries(client: Client, workspaceId: string) {
       queryOptions({
         queryKey: keys.attempts(run_id),
         queryFn: ({ signal }) =>
+          client.http
+            .GET("/api/v1/workspaces/{workspace_id}/runs/{run_id}/attempts", {
+              params: { path: { workspace_id: workspaceId, run_id } },
+              signal,
+            })
+            .then(data)
+            .then((attempts) => attempts.items),
+      }),
+    /** One Thread's inbox entries in the given states, in inbox order. */
+    queue: (thread_id: string, status: Schema["EntryStatus"][]) =>
+      queryOptions({
+        queryKey: [...keys.queue(thread_id), status],
+        queryFn: ({ signal }) =>
           allPages((cursor) =>
             client.http
-              .GET("/api/v1/runs/{run_id}/attempts", {
-                params: { path: { run_id }, query: { cursor } },
-                headers,
-                signal,
-              })
+              .GET(
+                "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/inbox",
+                {
+                  params: {
+                    path: { workspace_id: workspaceId, thread_id },
+                    query: { status, cursor, limit: 100 },
+                  },
+                  signal,
+                },
+              )
               .then(data),
           ),
       }),
-    events: (run_id: string, sequence: number) =>
+    /** One inbox entry, read on its own as its Thread reports changes. */
+    entry: (thread_id: string, entry_id: string) =>
       queryOptions({
-        queryKey: [...keys.events(run_id), sequence],
+        queryKey: keys.entry(thread_id, entry_id),
         queryFn: ({ signal }) =>
           client.http
-            .GET("/api/v1/runs/{run_id}/events", {
-              params: {
-                path: { run_id },
-                query: { after_resource_seq: sequence, limit: 50 },
+            .GET(
+              "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/inbox/{entry_id}",
+              {
+                params: {
+                  path: { workspace_id: workspaceId, thread_id, entry_id },
+                },
+                signal,
               },
-              headers,
-              signal,
-            })
-            .then(data),
-      }),
-    queue: (thread_id: string, state: Schema["QueuedSubmissionState"]) =>
-      queryOptions({
-        queryKey: [...keys.queue(thread_id), state],
-        queryFn: ({ signal }) =>
-          client.http
-            .GET("/api/v1/threads/{thread_id}/queued-submissions", {
-              params: { path: { thread_id }, query: { state, limit: 256 } },
-              headers,
-              signal,
-            })
+            )
             .then(data),
       }),
   };
@@ -184,7 +204,7 @@ export interface ConversationChange {
   runId?: string | null;
 }
 
-/** One invalidation map for command receipts, Run lifecycle events and notifications. */
+/** One invalidation map for command receipts and Thread stream changes. */
 export function invalidateConversation(
   cache: QueryClient,
   workspaceId: string,
@@ -197,6 +217,7 @@ export function invalidateConversation(
         switch (kind) {
           case "sessions":
             return !!(change.sessionId || change.threadId || change.runId);
+          case "session":
           case "threads":
             return !!change.sessionId && id === change.sessionId;
           case "thread":
@@ -205,16 +226,33 @@ export function invalidateConversation(
             return !!change.threadId && id === change.threadId;
           case "run":
           case "items":
-          case "pending":
           case "attempts":
           case "lineage":
-          case "events":
             return !!change.runId && id === change.runId;
           default:
             return false;
         }
       }),
   });
+}
+
+/**
+ * The label the Console gives every Session it starts. A Session without it
+ * was started by an application, so it opens for inspection at the Debug level.
+ */
+export const CONSOLE_SESSION_LABELS: Record<string, string> = {
+  "a13n.console": "debug",
+};
+
+export function isConsoleSession(
+  session?: Pick<Schema["SessionView"], "labels"> | null,
+) {
+  return (
+    !!session &&
+    Object.entries(CONSOLE_SESSION_LABELS).every(
+      ([key, value]) => session.labels[key] === value,
+    )
+  );
 }
 
 export const isActiveRun = (status?: string) =>

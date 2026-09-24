@@ -36,7 +36,7 @@ it("sorts reported durations rather than treating unfinished spans as zero", () 
   const root = {
     started_at: "2026-09-11T00:00:00Z",
     ended_at: null,
-  } as Schema["Observation"];
+  } as Schema["Span"];
   const finished = { ...root, ended_at: "2026-09-11T00:00:01Z" };
   expect(
     compareObservations(root, finished, {

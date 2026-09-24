@@ -11,9 +11,12 @@ import { EnvironmentDetails } from "./instance-details";
 /** One environment referenced from somewhere else: its name, then a way in. */
 export function EnvironmentReference({ id }: { id: string }) {
   const client = useClient();
-  const { can } = useWorkspace();
-  const allowed = can("environment.read");
-  const query = useQuery({ ...environmentQuery(client, id), enabled: allowed });
+  const { workspace, can } = useWorkspace();
+  const allowed = can("read");
+  const query = useQuery({
+    ...environmentQuery(client, workspace.id, id),
+    enabled: allowed,
+  });
   if (!allowed) return <CopyableId value={id} />;
   if (query.isPending) return <Loading variant="detail" />;
   if (!query.data)

@@ -8,7 +8,6 @@ import {
 export type AgentConfig = Schema["AgentConfig-Input"];
 const commonFields = new Set([
   "toolsets",
-  "memory",
   "model",
   "media_understanding",
   "instructions",
@@ -19,13 +18,8 @@ const commonFields = new Set([
   "plugins",
   "secret_requirements",
 ]);
-export function initialConfig(name: string): AgentConfig {
-  return {
-    model: { model_key: "" },
-    instructions: "",
-    input_adapter: { adapter_key: "native" },
-    protocol: { public_name: name },
-  };
+export function initialConfig(): AgentConfig {
+  return { model: { model_id: "" }, instructions: "" };
 }
 export function advancedConfig(config: AgentConfig) {
   return JSON.stringify(
@@ -46,7 +40,6 @@ export function buildConfig(
     | "skills"
     | "connection_tools"
     | "toolsets"
-    | "memory"
     | "reviewer"
     | "default_environment_template_id"
   >,

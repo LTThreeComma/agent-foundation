@@ -53,8 +53,7 @@ COPY --chown=root:root scripts/docker-entrypoint.sh /usr/local/bin/docker-entryp
 COPY --chown=root:root deploy/containers/a13n-service/service.toml /app/service.toml
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
     && chmod -R go-w /app \
-    && chmod -R a-w /app/packages/a13n-service/a13n_service/agent_configuration/assets \
-    && mkdir -p /app/var/files /app/var/objects \
+    && mkdir -p /app/var/objects \
     && chown -R app:app /app/var
 
 ENV PATH="/app/.venv/bin:${PATH}" \
@@ -67,7 +66,8 @@ RUN python -c 'import importlib.metadata, os; v = importlib.metadata.version("a1
 
 USER app
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD ["a13n-service", "--config", "/app/service.toml", "config", "healthcheck"]
+# The server answers only after startup, including an `all`/`control` automatic migration.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --start-interval=2s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
 ENTRYPOINT ["tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
-CMD ["a13n-service", "--config", "/app/service.toml", "serve"]
+CMD ["a13n-service", "--config", "/app/service.toml", "run"]

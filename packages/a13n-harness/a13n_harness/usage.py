@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
@@ -26,6 +26,7 @@ from a13n_harness._json import dump_json_bytes, is_sensitive_key
 from a13n_harness.context import AgentContext
 from a13n_harness.errors import DefinitionError, RunError
 from a13n_harness.identity import AgentInstanceContext
+from a13n_harness.model_calls import _check_model_call
 from a13n_harness.pricing import (
     MODEL_COST_CAPABILITY_ID,
     AbstractModelCostCapability,
@@ -150,6 +151,7 @@ class ModelUsageRecord(BaseModel):
     record_id: str = Field(min_length=1, max_length=128)
     run_id: str = Field(min_length=1, max_length=256)
     response_ordinal: int = Field(ge=0)
+    call_id: str | None = Field(default=None, min_length=1, max_length=128)
     model_run_id: str | None = Field(default=None, max_length=256)
     agent_instance_id: str = Field(min_length=1, max_length=512)
     parent_agent_instance_id: str | None = Field(default=None, max_length=512)
@@ -204,7 +206,6 @@ class _PricingOutcome:
     quote_source: Literal["catalog", "custom"] | None
     original_cost_present: bool
     calculated_cost: Decimal | None
-    response: ModelResponse
 
 
 class RunUsageLedger:
@@ -274,6 +275,7 @@ class RunUsageLedger:
         self,
         response: ModelResponse,
         *,
+        call_id: str | None,
         pricing: _PricingOutcome | None,
         source: str = "agent",
         tool_id: str | None = None,
@@ -290,6 +292,7 @@ class RunUsageLedger:
             record_id=_stable_id("model", self.run_id, str(ordinal)),
             run_id=self.run_id,
             response_ordinal=ordinal,
+            call_id=call_id,
             model_run_id=response.run_id,
             agent_instance_id=self._instance.agent_instance_id,
             parent_agent_instance_id=self._instance.parent_agent_instance_id,
@@ -375,6 +378,27 @@ class UsageCapability(AbstractCapability[AgentContext]):
         return CapabilityOrdering(position="innermost")
 
 
+@dataclass
+class _DispatchFrame:
+    responses: list[tuple[ModelResponse, str, _PricingOutcome]] = field(default_factory=list)
+    calls: int = 0
+    streaming_call_id: str | None = None
+
+    def committed(self, response: ModelResponse) -> tuple[str | None, _PricingOutcome | None]:
+        exact = [(call_id, pricing) for dispatched, call_id, pricing in self.responses if dispatched is response]
+        if exact:
+            return exact[0] if len(exact) == 1 else (None, None)
+        # Native partial/copy operations retain the actual usage object. Do not
+        # infer provenance from equal timestamps, content or numeric usage.
+        matching = [
+            (call_id, pricing) for dispatched, call_id, pricing in self.responses if dispatched.usage is response.usage
+        ]
+        return matching[0] if len(matching) == 1 else (None, None)
+
+
+_dispatch_frame: ContextVar[_DispatchFrame | None] = ContextVar("model_dispatch_frame", default=None)
+
+
 @dataclass(init=False)
 class _UsageActiveCapability(UsageCapability):
     def __init__(
@@ -391,7 +415,6 @@ class _UsageActiveCapability(UsageCapability):
         self._tool_call_id = tool_call_id
         self._cost_capability: AbstractModelCostCapability | None = None
         self._request_started_at: dict[str, datetime] = {}
-        self._pending_pricing: dict[str, _PricingOutcome] = {}
 
     async def for_run(self, ctx: RunContext[AgentContext]) -> AbstractCapability[AgentContext]:
         if ctx.deps is not self._context:
@@ -416,6 +439,22 @@ class _UsageActiveCapability(UsageCapability):
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
         self._require_context(ctx)
+        frame = _dispatch_frame.get()
+        if frame is None:
+            raise DefinitionError("Model dispatch has no native node frame.", code="capability_scope_invalid")
+        if frame.calls >= _MAX_RECORDS:
+            raise RunError("Model invocation capacity was exceeded.", code="usage_capacity_exceeded")
+        frame.calls += 1
+        call = await _check_model_call(
+            self._context,
+            request_context,
+            model_run_id=ctx.run_id,
+            source=self._source,
+            tool_id=self._tool_id,
+            tool_call_id=self._tool_call_id,
+        )
+        if request_context.streaming and frame.streaming_call_id is None:
+            frame.streaming_call_id = call.call_id
         response = await handler(request_context)
         capability = self._resolve_cost_capability(ctx)
         original_cost_present = response.usage.cost is not None
@@ -469,11 +508,9 @@ class _UsageActiveCapability(UsageCapability):
             quote_source=quote.source if quote is not None else None,
             original_cost_present=original_cost_present,
             calculated_cost=calculated_cost,
-            response=priced,
         )
         _enrich_current_model_span(priced, outcome)
-        if ctx.run_id is not None:
-            self._pending_pricing[ctx.run_id] = outcome
+        frame.responses.append((priced, call.call_id, outcome))
         return priced
 
     async def wrap_node_run(
@@ -487,18 +524,26 @@ class _UsageActiveCapability(UsageCapability):
         if not isinstance(node, ModelRequestNode):
             return await handler(node)
         requests_before = ctx.usage.requests
+        frame = _DispatchFrame()
+        token = _dispatch_frame.set(frame)
         try:
-            result = await handler(node)
-        except BaseException:
-            await self._record_committed_boundary(ctx, requests_before=requests_before)
-            raise
-        await self._record_committed_boundary(ctx, requests_before=requests_before)
-        return result
+            try:
+                result = await handler(node)
+            except BaseException:
+                await self._record_committed_boundary(
+                    ctx, requests_before=requests_before, frame=frame, interrupted=True
+                )
+                raise
+            await self._record_committed_boundary(ctx, requests_before=requests_before, frame=frame)
+            return result
+        finally:
+            _dispatch_frame.reset(token)
 
-    async def _record_committed_boundary(self, ctx: RunContext[AgentContext], *, requests_before: int) -> None:
+    async def _record_committed_boundary(
+        self, ctx: RunContext[AgentContext], *, requests_before: int, frame: _DispatchFrame, interrupted: bool = False
+    ) -> None:
         if ctx.usage.requests <= requests_before:
             return
-        pricing = self._pending_pricing.pop(ctx.run_id, None) if ctx.run_id is not None else None
         response: ModelResponse | None = None
         if ctx.messages and isinstance(ctx.messages[-1], ModelResponse):
             tail = ctx.messages[-1]
@@ -506,8 +551,14 @@ class _UsageActiveCapability(UsageCapability):
                 response = tail
         if response is None:
             return
+        call_id, pricing = frame.committed(response)
+        if interrupted and response.state == "interrupted" and call_id is None:
+            # The native streaming runner consumes its first opened stream and
+            # commits that stream's partial response when consumption fails.
+            call_id = frame.streaming_call_id
         await self._context.usage_attribution._record_model(
             response,
+            call_id=call_id,
             pricing=_pricing_for_committed_response(pricing, response),
             source=self._source,
             tool_id=self._tool_id,
@@ -633,15 +684,6 @@ def _pricing_for_committed_response(
     response: ModelResponse,
 ) -> _PricingOutcome | None:
     if pricing is None:
-        return None
-    same_response = pricing.response is response or (
-        pricing.response.run_id is not None
-        and pricing.response.run_id == response.run_id
-        and pricing.response.timestamp == response.timestamp
-        and pricing.response.model_name == response.model_name
-        and pricing.response.provider_name == response.provider_name
-    )
-    if not same_response:
         return None
     if pricing.status == "applied" and response.usage.cost != pricing.calculated_cost:
         return None

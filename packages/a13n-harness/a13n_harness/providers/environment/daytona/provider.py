@@ -24,16 +24,14 @@ class DaytonaConnectionConfiguration(BaseModel):
 
 
 class DaytonaEnvironmentConfiguration(CommandConfiguration):
-    model_config = ConfigDict(
-        frozen=True, extra="forbid", json_schema_extra={"x-primary-fields": ["snapshot", "cpu", "memory"]}
-    )
+    model_config = ConfigDict(frozen=True, extra="forbid", json_schema_extra={"x-primary-fields": ["snapshot"]})
     root: str = "/home/daytona"
+    # Daytona sizes a sandbox by its snapshot and refuses resources requested alongside one.
     snapshot: str | None = Field(
-        default=None, max_length=256, description="Existing Daytona snapshot; empty uses the default Python sandbox."
+        default=None,
+        max_length=256,
+        description="Existing Daytona snapshot, which sets the sandbox's resources; empty uses the default Python sandbox.",
     )
-    cpu: int = Field(default=2, ge=1, le=32)
-    memory: int = Field(default=4, ge=1, le=128, description="Memory in GiB")
-    disk: int = Field(default=10, ge=1, le=1024, description="Disk in GiB")
 
 
 class Sandbox(BaseModel):
@@ -134,9 +132,6 @@ class DaytonaEnvironment(NativeEnvironment[DaytonaEnvironmentConfiguration, Targ
                     "snapshot": self.config.snapshot,
                     "target": self.backend.target,
                     "labels": self.labels,
-                    "cpu": self.config.cpu,
-                    "memory": self.config.memory,
-                    "disk": self.config.disk,
                     "public": False,
                     "autoStopInterval": 0,
                     "autoPauseInterval": 0,

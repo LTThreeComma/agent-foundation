@@ -302,3 +302,30 @@ def test_examples_smoke_stops_when_first_agent_app_run_fails(workspace: Path, mo
     calls = uv_calls(workspace)
     assert "first turn" in calls[-1]
     assert not any("turn after restart" in call for call in calls)
+
+
+@pytest.mark.parametrize("target", ["db-upgrade", "db-check"])
+def test_database_targets_require_setup_configuration(workspace: Path, target: str) -> None:
+    result = run_make(workspace, target)
+    assert result.returncode != 0
+    assert "Run make setup first" in result.stderr
+    assert not uv_calls(workspace)
+
+
+@pytest.mark.parametrize("target", ["db-upgrade", "db-check"])
+@pytest.mark.parametrize("override", [False, True])
+def test_database_targets_use_generated_config_or_explicit_override(
+    workspace: Path, target: str, override: bool
+) -> None:
+    config = "custom config.toml" if override else "var/dev/service.toml"
+    path = workspace / config
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[database]\n")
+    arguments = [target, f"SERVICE_CONFIG={config}"] if override else [target]
+    result = run_make(workspace, *arguments)
+    assert result.returncode == 0, result.stdout + result.stderr
+    migrations = [call for call in uv_calls(workspace) if "migrate" in call]
+    assert len(migrations) == 1
+    call = migrations[0]
+    assert call[call.index("--config") + 1] == config
+    assert ("--check" in call) == (target == "db-check")

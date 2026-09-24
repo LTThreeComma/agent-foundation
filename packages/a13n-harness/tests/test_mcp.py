@@ -423,3 +423,54 @@ async def test_contextual_mcp_rejects_static_and_resolved_header_conflicts() -> 
         await capability.for_run(_run_context(_MCPContextDeps()))
 
     assert error.value.code == "mcp_context_header_conflict"
+
+
+@pytest.mark.anyio
+async def test_native_mcp_toolset_lifecycle_is_isolated_on_concurrent_cancellation() -> None:
+    import asyncio
+
+    from pydantic_ai.toolsets import DynamicToolset, FunctionToolset
+
+    entered: list[str] = []
+    closed: list[str] = []
+    active = asyncio.Event()
+
+    class OwnedTools(FunctionToolset[AgentContext]):
+        def __init__(self, run_id: str):
+            super().__init__(id="owned")
+            self.run_id = run_id
+
+        async def __aenter__(self):
+            entered.append(self.run_id)
+            return await super().__aenter__()
+
+        async def __aexit__(self, *args):
+            closed.append(self.run_id)
+            return await super().__aexit__(*args)
+
+    def factory(ctx: RunContext[AgentContext]) -> OwnedTools:
+        return OwnedTools(ctx.deps.run_id)
+
+    async def model(messages, info):
+        if len(entered) == 2:
+            active.set()
+        await asyncio.Event().wait()
+        yield "unreachable"
+
+    executable = HarnessBuilder().build(
+        AgentSpec(),
+        model=FunctionModel(stream_function=model),
+        output_type=str,
+        capabilities=(MCP(id="owned", local=DynamicToolset(factory, per_run_step=False)),),
+    )
+    tasks = [asyncio.create_task(executable.run("test", bindings=RunBindings.embedded())) for _ in range(2)]
+    try:
+        async with asyncio.timeout(5):
+            await active.wait()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert len(entered) == 2
+    assert len(set(entered)) == 2
+    assert sorted(closed) == sorted(entered)

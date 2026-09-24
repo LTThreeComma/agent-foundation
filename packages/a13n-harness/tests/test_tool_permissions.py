@@ -429,8 +429,9 @@ async def test_approval_context_is_call_local_and_cleared_after_dispatch() -> No
 
 @pytest.mark.parametrize("response", ["structured", "text"])
 @pytest.mark.parametrize("profile", ["general", "shell"])
-async def test_agent_reviewer_keeps_instruction_separate_and_requires_structured_output(response, profile) -> None:
-    from typing import cast
+async def test_agent_reviewer_keeps_instruction_separate_and_requires_structured_output(
+    reviewer_context, response, profile
+) -> None:
 
     from a13n_harness.capabilities import AgentToolReviewer, ToolReviewConfig, ToolReviewError
     from pydantic_ai.messages import SystemPromptPart
@@ -458,11 +459,11 @@ async def test_agent_reviewer_keeps_instruction_separate_and_requires_structured
     )
     if response == "text":
         with pytest.raises(ToolReviewError) as caught:
-            await reviewer.review(request, context=cast(AgentContext, object()))
+            await reviewer.review(request, context=reviewer_context)
         assert caught.value.code == "tool_review_failed"
         assert caught.value.usage
     else:
-        result = await reviewer.review(request, context=cast(AgentContext, object()))
+        result = await reviewer.review(request, context=reviewer_context)
         assert result.assessment.risk == "low" and result.usage
     assert len(seen) == 1
     messages, info = seen[0]

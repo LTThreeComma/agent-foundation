@@ -1,16 +1,7 @@
-# Non-secret image defaults. Mount deployment configuration at /app/service.toml
-# to keep the default command and health probe on the same explicit config file.
-[service]
+# Image defaults for every role. Deployments mount their own file here and supply credentials as
+# A13N_<SECTION>__<FIELD> environment variables.
+[server]
 host = "0.0.0.0"
 
 [objects]
-local_root = "/app/var/objects"
-
-[filesystem]
-root = "/app/var/files"
-
-[migration]
-auto_migrate = true
-
-[logging]
-format = "json"
+root = "/app/var/objects"

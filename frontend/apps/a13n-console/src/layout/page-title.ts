@@ -12,13 +12,8 @@ const PRODUCT = "a13n";
 /** Destination names, keyed by the first segment of the in-workspace path. */
 const destinations: Record<string, string> = {
   agents: "Agents",
-  "application-accounts": "Application accounts",
-  bots: "Bots",
-  configuration: "Configuration assistant",
-  "configuration-threads": "Configuration assistant",
   connections: "Connections",
   environments: "Environments",
-  memories: "Memories",
   models: "Models",
   schedules: "Schedules",
   sessions: "Sessions",

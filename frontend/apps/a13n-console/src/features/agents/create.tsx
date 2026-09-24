@@ -5,13 +5,13 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { commandHeaders, representation, type Schema } from "../../shared/api";
+import { representation, type Schema } from "../../shared/api";
 import { ErrorNotice } from "../../shared/feedback";
 import { ImagePicker, MAX_IMAGE_BYTES } from "../../shared/forms";
-import { useIdempotency } from "../../shared/idempotency";
+import { createWithKey } from "../../shared/keys";
 import { DetailHeader, DetailPage, Section } from "../../shared/page";
 import { AgentAvatar } from "./avatar";
-import { initialConfig } from "./configuration";
+import { initialConfig, type AgentConfig } from "./configuration";
 import { AgentEditor } from "./editor";
 import editorStyles from "./editor/editor.module.css";
 import { changeAgentImage } from "./images";
@@ -22,8 +22,7 @@ export function CreateAgent() {
     client = useClient(),
     { workspace, basePath } = useWorkspace(),
     cache = useQueryClient(),
-    navigate = useNavigate(),
-    idempotency = useIdempotency();
+    navigate = useNavigate();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -64,19 +63,16 @@ export function CreateAgent() {
     onSuccess: (result) => finish(result.value),
   });
   const create = useMutation({
-    mutationFn: (body: Schema["CreateAgentRequest"]) =>
-      client.http
-        .POST("/api/v1/workspaces/{workspace}/agents", {
-          params: {
-            path: { workspace: workspace.id },
-            header: commandHeaders(workspace.id, idempotency.forBody(body)),
-          },
-          body,
-        })
-        .then(representation),
-    onSuccess: async (result) => {
-      idempotency.reset();
-      const resource = { value: result.value.agent, etag: result.etag };
+    mutationFn: (config: AgentConfig) =>
+      createWithKey(name, "agent", (key) =>
+        client.http
+          .POST("/api/v1/workspaces/{workspace_id}/agents", {
+            params: { path: { workspace_id: workspace.id } },
+            body: { key, name, description, config },
+          })
+          .then(representation),
+      ),
+    onSuccess: (resource) => {
       setCreated(resource);
       if (file) upload.mutate(resource);
       else finish(resource.value);
@@ -155,7 +151,7 @@ export function CreateAgent() {
       }
     >
       <AgentEditor
-        initial={initialConfig("")}
+        initial={initialConfig()}
         pending={create.isPending || upload.isPending || !!created}
         error={create.error ?? fileError}
         saveLabel={t("Create agent")}
@@ -188,10 +184,7 @@ export function CreateAgent() {
             </div>
           </Section>
         }
-        submit={(config) => {
-          if (!config.protocol.public_name) config.protocol.public_name = name;
-          create.mutate({ config, name, description: description || null });
-        }}
+        submit={(config) => create.mutate(config)}
       />
     </DetailPage>
   );

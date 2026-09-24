@@ -1,11 +1,13 @@
 import { expect, test } from "vitest";
 import { advancedConfig, buildConfig, initialConfig } from "./configuration";
 
+const model = { model_id: "mdl_0123456789abcdef" };
+
 test("ordinary editing preserves hidden configuration and leaves omission distinct from null", () => {
   const original = {
-    ...initialConfig("Support"),
-    model: { model_key: "support" },
-    secret_requirements: [{ key: "support-token", required: true }],
+    ...initialConfig(),
+    model,
+    secret_requirements: [{ key: "support_token", scope: "user" as const }],
   };
   const config = buildConfig(
     original,
@@ -24,7 +26,7 @@ test("ordinary editing preserves hidden configuration and leaves omission distin
 });
 
 test("advanced fields cannot overwrite hidden or common fields", () => {
-  const original = initialConfig("Support");
+  const original = { ...initialConfig(), model };
   expect(() =>
     buildConfig(original, { model: original.model }, '{"plugins": []}'),
   ).toThrow(/dedicated field/);
@@ -42,8 +44,8 @@ test("advanced fields cannot overwrite hidden or common fields", () => {
 
 test("keeps reviewer and disabled tool configuration through dedicated fields", () => {
   const original = {
-    ...initialConfig("Support"),
-    model: { model_key: "support" },
+    ...initialConfig(),
+    model,
     reviewer: {
       model: "mdl_0123456789abcdef",
       risk_threshold: "high" as const,
@@ -76,66 +78,25 @@ test("keeps reviewer and disabled tool configuration through dedicated fields", 
 });
 
 test("schema validation reports the invalid advanced field", () => {
-  const original = initialConfig("Support");
+  const original = { ...initialConfig(), model };
   const advanced = {
     ...JSON.parse(advancedConfig(original)),
     retries: { tools: -1 },
   };
   expect(() =>
-    buildConfig(
-      original,
-      { model: { model_key: "support" } },
-      JSON.stringify(advanced),
-    ),
+    buildConfig(original, { model }, JSON.stringify(advanced)),
   ).toThrow(/retries\/tools/);
-});
-
-test("memory is a dedicated revision field preserving explicit false, zero and disable", () => {
-  const original = {
-    ...initialConfig("Support"),
-    model: { model_key: "support" },
-    memory: {
-      provider_id: "memprov_0123456789abcdef",
-      scope: "agent" as const,
-      auto_recall: false,
-      recall_threshold: 0,
-      toolset: false,
-    },
-  };
-  expect(JSON.parse(advancedConfig(original))).not.toHaveProperty("memory");
-  const updated = buildConfig(
-    original,
-    { model: original.model, memory: original.memory },
-    advancedConfig(original),
-  );
-  expect(updated.memory).toEqual(original.memory);
-  expect(
-    buildConfig(
-      original,
-      { model: original.model, memory: null },
-      advancedConfig(original),
-    ).memory,
-  ).toBeNull();
-  expect(() =>
-    buildConfig(original, { model: original.model }, '{"memory": null}'),
-  ).toThrow(/dedicated field/);
-  expect(() =>
-    buildConfig(
-      original,
-      {
-        model: original.model,
-        memory: { ...original.memory, recall_timeout: 0 },
-      },
-      advancedConfig(original),
-    ),
-  ).toThrow(/recall_timeout/);
 });
 
 test("media understanding is a dedicated field kept out of advanced configuration", () => {
   const original = {
-    ...initialConfig("Support"),
-    model: { model_key: "support" },
-    media_understanding: { image: "vision", video: null, audio: null },
+    ...initialConfig(),
+    model,
+    media_understanding: {
+      image: "mdl_fedcba9876543210",
+      video: null,
+      audio: null,
+    },
   };
   expect(JSON.parse(advancedConfig(original))).not.toHaveProperty(
     "media_understanding",
@@ -158,7 +119,7 @@ test("media understanding is a dedicated field kept out of advanced configuratio
     buildConfig(
       original,
       { model: original.model },
-      '{"media_understanding": {"image": "vision"}}',
+      '{"media_understanding": {"image": "mdl_fedcba9876543210"}}',
     ),
   ).toThrow(/dedicated field/);
 });

@@ -15,12 +15,14 @@ vi.mock("../auth/context", () => ({ useClient: () => ({ http }) }));
 vi.mock("../layout/workspace", () => ({
   useWorkspace: () => ({
     basePath: "/workspace/design",
+    organization: { id: "org_test" },
     workspace: { id: "ws_test" },
     can: () => true,
   }),
   useAccess: () => ({
     can: () => true,
-    organizationAdmin: true,
+    organizationCan: () => true,
+    organization: { id: "org_test" },
     workspace: { id: "ws_test" },
   }),
 }));
@@ -59,28 +61,27 @@ const cases = ["workspace", "organization"].flatMap((kind) =>
 function setup(
   kind: "workspace" | "organization",
   surface: string,
-  deployment = false,
   overrides: Record<string, unknown> = {},
 ) {
   const connector = surface === "connector";
   const scope = { kind, id: kind === "workspace" ? "ws_test" : "org_test" };
   const type = connector ? "composio" : "e2b";
   const provider = {
-    id: "provider_test",
+    id: connector ? "cprov_test" : "eprov_test",
     name: "Existing provider",
     type,
     organization_id: "org_test",
     workspace_id: kind === "workspace" ? "ws_test" : null,
-    configuration: {},
-    status: "active",
+    config: {},
     enabled: true,
     version: 3,
     credential_configured: true,
-    configuration_source: deployment ? "deployment" : "user",
   };
   const definition = {
     authentication: { mode: "required", cases: [] },
-    deployment_managed: deployment,
+    setup_url: null,
+    setup_label: null,
+    supports_test: connector,
     type,
     display_name: connector ? "Composio" : "e2b",
     configuration_schema: {
@@ -95,11 +96,13 @@ function setup(
     },
     ...overrides,
   };
-  const listPath = `/api/v1/${kind === "workspace" ? "workspaces/{workspace}" : "organizations/{organization}"}/${surface}-providers`;
-  const detailPath = `/api/v1/${surface}-providers/{${connector ? "connector_provider_id" : "resource_id"}}`;
-  const response = () => new Response(null, { headers: { ETag: '"v3"' } });
+  const listPath = `/api/v1/organizations/{organization_id}/${surface}-providers`;
+  const detailPath = `${listPath}/{provider_id}`;
+  // The Service's strong ETag of the provider's `{id, version}`.
+  const response = () =>
+    new Response(null, { headers: { ETag: `"${provider.id}:3"` } });
   http.GET.mockImplementation(async (path: string) => {
-    if (path === `/api/v1/${surface}-provider-types`)
+    if (path === "/api/v1/provider-types/{kind}")
       return { data: { items: [definition] }, response: response() };
     if (path === listPath)
       return {
@@ -165,11 +168,13 @@ it.each(cases)(
       expect(http.POST).toHaveBeenCalledWith(
         listPath,
         expect.objectContaining({
+          params: { path: { organization_id: "org_test" } },
           body: {
+            workspace_id: kind === "workspace" ? "ws_test" : null,
             name: "New provider",
             type,
-            configuration: {},
-            [connector ? "credentials" : "credential"]: credentials,
+            config: {},
+            credential: credentials,
           },
         }),
       ),
@@ -218,21 +223,13 @@ it.each(cases)(
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() =>
       expect(http.PATCH).toHaveBeenCalledWith(
-        `/api/v1/${surface}-providers/{${connector ? "connector_provider_id" : "provider_id"}}`,
+        detailPath,
         expect.objectContaining({
-          params: expect.objectContaining({
-            path: {
-              [connector ? "connector_provider_id" : "provider_id"]:
-                provider.id,
-            },
-            ...(!connector && { header: { "If-Match": '"v3"' } }),
-          }),
-          body: {
-            name: "Renamed provider",
-            ...(connector
-              ? { expected_version: 3, status: "active" }
-              : { enabled: true }),
+          params: {
+            path: { organization_id: "org_test", provider_id: provider.id },
           },
+          headers: { "If-Match": `"${provider.id}:3"` },
+          body: { name: "Renamed provider", enabled: true },
         }),
       ),
     );
@@ -240,9 +237,45 @@ it.each(cases)(
   },
 );
 
+it("checks a saved environment provider's connection with its read-only probe", async () => {
+  const user = userEvent.setup();
+  const { detailPath, provider } = setup("workspace", "environment", {
+    supports_test: true,
+  });
+  await screen.findByText("Existing provider");
+  const row = screen.getByRole("row", { name: /Existing provider/ });
+  row.focus();
+  await user.keyboard("{Enter}");
+  const name = await screen.findByRole("textbox", { name: "Name" });
+  http.POST.mockResolvedValueOnce({
+    data: {
+      provider_id: provider.id,
+      provider_version: 3,
+      status: "failed",
+      message: "provider_unavailable",
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Check connection" }));
+  expect(await screen.findByText("provider_unavailable")).toBeTruthy();
+  expect(http.POST).toHaveBeenCalledWith(`${detailPath}/test`, {
+    params: {
+      path: { organization_id: "org_test", provider_id: provider.id },
+    },
+  });
+  // An unsaved draft is not what the probe would check.
+  await user.type(name, " renamed");
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "Check connection",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+});
+
 it("saves connector name, credentials and enabled state in one atomic update", async () => {
   const user = userEvent.setup();
-  const { provider } = setup("workspace", "connector");
+  const { detailPath, provider } = setup("workspace", "connector");
   const response = new Response(null);
   http.PATCH.mockResolvedValue({
     data: { ...provider, name: "Renamed", version: 4 },
@@ -259,13 +292,12 @@ it("saves connector name, credentials and enabled state in one atomic update", a
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(http.PATCH).toHaveBeenCalledTimes(1));
   expect(http.PATCH).toHaveBeenCalledWith(
-    "/api/v1/connector-providers/{connector_provider_id}",
+    detailPath,
     expect.objectContaining({
       body: {
         name: "Renamed",
-        expected_version: 3,
-        status: "disabled",
-        credentials: {
+        enabled: false,
+        credential: {
           api_key: "new-project",
         },
       },
@@ -275,27 +307,9 @@ it("saves connector name, credentials and enabled state in one atomic update", a
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
-it("shows deployment providers read-only without a manual creation action", async () => {
-  const user = userEvent.setup();
-  setup("organization", "environment", true);
-  await screen.findByText("Existing provider");
-  expect(screen.queryByRole("button", { name: "Add provider" })).toBeNull();
-  await user.click(screen.getByText("Existing provider"));
-  // A deployment-managed provider is stated, never edited: no inputs, one way out.
-  const dialog = await screen.findByRole("dialog");
-  expect(dialog.textContent).toContain("Existing provider");
-  expect(screen.queryByRole("textbox")).toBeNull();
-  expect(screen.queryByRole("switch")).toBeNull();
-  expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
-  expect(dialog.querySelector("[data-a13n-form-actions]")?.textContent).toBe(
-    "Close",
-  );
-  expect(http.PATCH).not.toHaveBeenCalled();
-});
-
 it("preserves structured Connector credentials and setup help", async () => {
   const user = userEvent.setup();
-  const { listPath } = setup("workspace", "connector", false, {
+  const { listPath } = setup("workspace", "connector", {
     setup_url: "https://example.com/keys",
     setup_label: "Create Connector credentials",
     credential_schema: {
@@ -330,7 +344,7 @@ it("preserves structured Connector credentials and setup help", async () => {
       listPath,
       expect.objectContaining({
         body: expect.objectContaining({
-          credentials: {
+          credential: {
             authorization: { token: "nested-secret" },
             revision: 7,
             tier: "sandbox",
@@ -351,7 +365,7 @@ it("allows explicit removal of required Connector credentials", async () => {
     expect(http.PATCH).toHaveBeenCalledWith(
       detailPath,
       expect.objectContaining({
-        body: expect.objectContaining({ credentials: null }),
+        body: expect.objectContaining({ credential: null }),
       }),
     ),
   );

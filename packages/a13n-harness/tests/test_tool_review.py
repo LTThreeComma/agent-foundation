@@ -29,6 +29,9 @@ from a13n_harness.capabilities import (
     ToolReviewResult,
     ToolRiskLevel,
 )
+from a13n_harness.errors import RunError
+from a13n_harness.model_calls import ModelCall
+from a13n_harness.token_pricing import TokenPriceTier, TokenPricing, TokenPricingCapability, TokenRates
 from a13n_harness.tools import (
     HarnessTool,
     HarnessToolMetadata,
@@ -39,6 +42,7 @@ from a13n_harness.tools import (
     ToolPermissionsCapability,
 )
 from a13n_harness.usage import (
+    ModelUsageRecord,
     ProviderUsage,
     ProviderUsageRecord,
     UsageMeasure,
@@ -128,6 +132,7 @@ def _build(
     on_flagged: str = "approval_required",
     on_error: str = "approval_required",
     timeout_seconds: float = 120.0,
+    capabilities: tuple[Any, ...] = (),
 ):
     def shell_exec(
         command: str,
@@ -176,6 +181,7 @@ def _build(
                 ),
                 reviewer=reviewer,
             ),
+            *capabilities,
         ),
     )
 
@@ -296,6 +302,7 @@ async def test_shell_review_model_uses_builder_gateway_provider_factory(
 @pytest.mark.parametrize("risk", list(ToolRiskLevel))
 @pytest.mark.parametrize("include_reason", [False, True])
 async def test_default_reviewer_uses_only_output_tool_with_auto_choice_and_records_one_request_usage(
+    reviewer_context,
     risk: ToolRiskLevel,
     include_reason: bool,
 ) -> None:
@@ -334,7 +341,7 @@ async def test_default_reviewer_uses_only_output_tool_with_auto_choice_and_recor
             parameters_schema={},
             arguments={"command": "touch result.txt"},
         ),
-        context=cast(AgentContext, object()),  # The default reviewer intentionally ignores Harness context.
+        context=reviewer_context,
     )
 
     assert result.assessment.risk == risk
@@ -359,7 +366,7 @@ async def test_default_reviewer_uses_only_output_tool_with_auto_choice_and_recor
 
 
 @pytest.mark.parametrize("output", ["not a structured assessment", '{"risk":"low","reason":"looks valid"}'])
-async def test_default_reviewer_preserves_usage_and_rejects_text_output(output: str) -> None:
+async def test_default_reviewer_preserves_usage_and_rejects_text_output(reviewer_context, output: str) -> None:
     async def invalid_review(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
         del messages, info
         yield output
@@ -377,7 +384,7 @@ async def test_default_reviewer_preserves_usage_and_rejects_text_output(output: 
                 parameters_schema={},
                 arguments={"command": "touch result.txt"},
             ),
-            context=cast(AgentContext, object()),
+            context=reviewer_context,
         )
 
     assert error.value.usage
@@ -390,11 +397,12 @@ async def test_default_reviewer_preserves_usage_and_rejects_text_output(output: 
     [
         ModelHTTPError(400, "review-model", {"error": "private-provider-body"}),
         ValueError("private-provider-body"),
+        RunError("private-provider-body", code="unrelated_failure"),
     ],
-    ids=["http-400", "invalid-response"],
+    ids=["http-400", "invalid-response", "unrelated-harness-error"],
 )
 async def test_default_reviewer_logs_safe_failure_metadata(
-    failure: Exception, caplog: pytest.LogCaptureFixture
+    reviewer_context, failure: Exception, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def failed_review(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
         del messages, info
@@ -414,7 +422,7 @@ async def test_default_reviewer_logs_safe_failure_metadata(
                 parameters_schema={},
                 arguments={"command": "echo private-command-value"},
             ),
-            context=cast(AgentContext, object()),
+            context=reviewer_context,
         )
 
     assert error.value.code == "tool_review_failed"
@@ -482,6 +490,47 @@ async def test_below_threshold_dispatches_without_environment_values_and_attribu
     assert provider_record.source == "tool.review"
     assert provider_record.tool_id == "environment.shell_exec"
     assert provider_record.tool_call_id == "shell-call-1"
+
+
+async def test_default_reviewer_in_a_run_is_a_checked_priced_model_request_of_the_calling_agent() -> None:
+    """A gated review spends the review model like any request of the agent: the host's call check sees it under
+    the model ID its configuration selects, and it commits a model record the model-cost capability priced."""
+    checks: list[ModelCall] = []
+
+    class _Check:
+        async def check(self, call: ModelCall) -> None:
+            checks.append(call)
+
+    async def review_model(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls]:
+        del messages
+        yield {0: DeltaToolCall(name=info.output_tools[0].name, json_args='{"risk": "low"}')}
+
+    reviewer = AgentToolReviewer(
+        FunctionModel(stream_function=review_model), ToolReviewConfig(model="logical:review-model")
+    )
+    rates = TokenRates(input=Decimal(1), output=Decimal(2))
+    prices = TokenPricingCapability({"logical:review-model": TokenPricing(tiers=(TokenPriceTier(rates=rates),))})
+    executed: list[dict[str, Any]] = []
+    result = await _build(reviewer, executed, capabilities=(prices,)).run(
+        "go",
+        bindings=RunBindings.embedded(
+            model_call_check=_Check(),
+            capabilities=(InvocationPolicyCapability(evaluator=_Policy(InvocationPolicyDecision.allow())),),
+        ),
+    )
+
+    assert result.status == "completed" and len(executed) == 1
+    [call] = [call for call in checks if call.source == "tool.review"]
+    assert call.model_id == "logical:review-model"
+    [record] = [item for item in result.usage_records if item.source == "tool.review"]
+    assert isinstance(record, ModelUsageRecord)
+    assert (record.call_id, record.tool_id, record.tool_call_id) == (
+        call.call_id,
+        "environment.shell_exec",
+        "shell-call-1",
+    )
+    assert (record.pricing_status, record.cost_source) == ("applied", "custom")
+    assert record.request_usage.cost is not None and record.request_usage.cost > 0
 
 
 async def test_flagged_deny_outranks_policy_approval() -> None:
@@ -748,7 +797,9 @@ async def test_review_cancellation_propagates_without_dispatch() -> None:
     assert executed == []
 
 
-async def test_default_reviewer_timeout_preserves_proven_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_default_reviewer_timeout_preserves_proven_usage(
+    reviewer_context, monkeypatch: pytest.MonkeyPatch
+) -> None:
     original_timeout = asyncio.timeout
     deadline = None
 
@@ -782,7 +833,7 @@ async def test_default_reviewer_timeout_preserves_proven_usage(monkeypatch: pyte
                 parameters_schema={},
                 arguments={"command": "echo safe"},
             ),
-            context=cast(AgentContext, object()),
+            context=reviewer_context,
         )
     assert error.value.code == "tool_review_timeout"
     assert error.value.usage
@@ -857,7 +908,7 @@ async def test_timeout_emits_observable_denial_before_any_authorization() -> Non
         '{"risk":',
     ],
 )
-async def test_default_reviewer_rejects_invalid_output_tool_without_retry(arguments: str) -> None:
+async def test_default_reviewer_rejects_invalid_output_tool_without_retry(reviewer_context, arguments: str) -> None:
     requests = 0
 
     async def invalid_review(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls]:
@@ -879,7 +930,7 @@ async def test_default_reviewer_rejects_invalid_output_tool_without_retry(argume
                 parameters_schema={},
                 arguments={"command": "echo safe"},
             ),
-            context=cast(AgentContext, object()),
+            context=reviewer_context,
         )
     assert error.value.code == "tool_review_failed"
     assert requests == 1

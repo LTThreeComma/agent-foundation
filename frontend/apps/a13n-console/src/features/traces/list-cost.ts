@@ -7,18 +7,14 @@ import { observationCost } from "./cost";
 /** Bound background reads; an incomplete trace is never presented as a total. */
 export function useListCosts(
   workspace: string,
-  traces: readonly Schema["Trace"][],
+  traces: readonly Schema["Span"][],
 ) {
   const client = useClient();
   return useQuery({
     queryKey: [
       "trace-list-costs",
       workspace,
-      traces.map((trace) => [
-        trace.id,
-        trace.root.cost_usd,
-        trace.root.ended_at,
-      ]),
+      traces.map((root) => [root.trace_id, root.cost_usd, root.ended_at]),
     ],
     enabled: traces.length > 0,
     retry: false,
@@ -28,22 +24,25 @@ export function useListCosts(
       let accessError: ApiError | undefined;
       async function worker() {
         while (next < traces.length && !signal.aborted && !accessError) {
-          const trace = traces[next++];
-          const observations = new Map<string, Schema["Observation"]>();
+          const root = traces[next++];
+          const observations = new Map<string, Schema["Span"]>();
           const cursors = new Set<string>();
           let cursor: string | undefined;
-          results[trace.id] = null;
+          results[root.trace_id] = null;
           try {
             // At most 2,000 observations per trace. Larger traces stay unknown.
             for (let page = 0; page < 20 && !accessError; page++) {
               signal.throwIfAborted();
               const collection = data(
                 await client.http.GET(
-                  "/api/v1/workspaces/{workspace}/traces/{trace_id}/observations",
+                  "/api/v1/workspaces/{workspace_id}/traces/{trace_id}/spans",
                   {
                     params: {
-                      path: { workspace, trace_id: trace.id },
-                      query: { view: "compact", limit: 100, cursor },
+                      path: {
+                        workspace_id: workspace,
+                        trace_id: root.trace_id,
+                      },
+                      query: { limit: 100, cursor },
                     },
                     signal,
                   },
@@ -52,9 +51,8 @@ export function useListCosts(
               for (const observation of collection.items)
                 observations.set(observation.id, observation);
               if (collection.next_cursor === null) {
-                if (!observations.has(trace.root.id))
-                  observations.set(trace.root.id, trace.root);
-                results[trace.id] = observationCost([
+                if (!observations.has(root.id)) observations.set(root.id, root);
+                results[root.trace_id] = observationCost([
                   ...observations.values(),
                 ]).total;
                 break;

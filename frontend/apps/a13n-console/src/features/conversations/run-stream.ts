@@ -1,16 +1,19 @@
-import { useEarlierMessages } from "./earlier";
-import { ReplayGapError } from "../../service-client";
+import type { ThreadDelta } from "../../service-client";
 import { isCancelledError, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { revalidateSession, useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
+import type { Schema } from "../../shared/api";
+import { conversationQueries, invalidateConversation } from "./api";
 import {
-  conversationKeys,
-  conversationQueries,
-  invalidateConversation,
-} from "./api";
+  deltaEvent,
+  displayEvents,
+  isFragment,
+  isOmitted,
+  type Attempts,
+  type RunEvent,
+} from "./display";
 import {
-  interruptOpenItems,
   compareCursors,
   mergeRetainedItems,
   type PresentedItem,
@@ -20,6 +23,7 @@ import {
   emptyExecution,
   type Execution,
   type ExecutionCoverage,
+  type RunFold,
 } from "./execution";
 
 export type { ExecutionCoverage };
@@ -28,27 +32,26 @@ export interface RunExecution extends Execution {
   coverage: ExecutionCoverage;
 }
 
+/** How long an active Run may go unconfirmed while its Thread reports no change. */
+const SEAL_CHECK_MS = 10_000;
+
 /**
- * One stream consumer per Run. Every applied event folds the Item projection
- * and the execution view together, so the two can never disagree.
+ * One consumer per Run. The committed display is folded as the events it
+ * recorded, so the Item projection and the execution view can never disagree,
+ * and the Thread stream's deltas continue both after the display's position.
  *
- * `replay` attaches from the stream origin instead of after the Item
- * snapshot's `projection_cursor`, which is the only way to observe a complete
- * execution history. A replay gap falls back to the snapshot-then-live path
- * and reports the loss instead of hiding it.
+ * `live` follows the Thread stream while the page shows this Run: the Run's
+ * own output while it is active, and the Thread's changes at any time. An
+ * attempt reset discards provisional output; a gap re-reads the display and
+ * heals at the next boundary, whose display covers what the stream skipped.
  */
 export function useRunStream(
   runId: string,
-  { replay = false }: { replay?: boolean } = {},
+  { live = false }: { live?: boolean } = {},
 ) {
   const client = useClient(),
     { workspace } = useWorkspace(),
     cache = useQueryClient(),
-    fold = useRef({
-      items: new Map<string, PresentedItem>(),
-      execution: emptyExecution(),
-    }),
-    cursor = useRef<string | undefined>(undefined),
     identity = useRef("");
   const [items, setItems] = useState<PresentedItem[]>([]),
     [execution, setExecution] = useState<RunExecution>(() => ({
@@ -60,17 +63,9 @@ export function useRunStream(
     >("connecting"),
     [gap, setGap] = useState(false),
     [incomplete, setIncomplete] = useState(false),
+    [dropped, setDropped] = useState(0),
     [error, setError] = useState<unknown>(),
     [generation, setGeneration] = useState(0);
-  const earlier = useEarlierMessages(runId, (page) => {
-    fold.current.items = mergeRetainedItems(fold.current.items, page.items);
-    setItems(sorted(fold.current.items));
-    if (!page.complete || page.recovery_exhausted) {
-      setIncomplete(true);
-      setGap(true);
-    }
-  });
-  const { resetEarlier } = earlier;
   useEffect(() => {
     const controller = new AbortController(),
       { signal } = controller,
@@ -78,34 +73,34 @@ export function useRunStream(
     const selected = `${workspace.id}:${runId}`;
     if (identity.current !== selected) {
       identity.current = selected;
-      fold.current = { items: new Map(), execution: emptyExecution() };
-      cursor.current = undefined;
       setItems([]);
       setGap(false);
       setIncomplete(false);
-    } else if (replay) {
-      // Switching into replay keeps the Items already delivered — the origin
-      // replay deduplicates against them — but the execution view must fold
-      // the whole stream again rather than resume from its own checkpoint.
-      fold.current = { ...fold.current, execution: emptyExecution() };
+      setDropped(0);
     }
+    let read: Schema["RunItems"] | undefined;
+    let attempts: Attempts = new Map();
+    let fold: RunFold = { items: new Map(), execution: emptyExecution() };
+    // Deltas beyond the display's position.
+    let provisional: RunEvent[] = [];
+    const asked = new Set<number>();
+    // The display omitted content, or the stream skipped deltas not yet covered.
+    let omitted = false;
+    let skipped = false;
+    // What the stream could not supply waits for the next boundary's display.
+    let stale = false;
     let frame: number | undefined;
-    let initialized = false;
-    let windowed = false;
-    // Coverage facts for this attachment, published through `publish()`.
-    let origin = false;
-    let lost = false;
-    let attached = false;
-    let terminal = false;
     function publish() {
       if (frame !== undefined) return;
       frame = requestAnimationFrame(() => {
         frame = undefined;
         if (signal.aborted) return;
-        setItems(sorted(fold.current.items));
+        setItems(sorted(fold.items));
         setExecution({
-          ...fold.current.execution,
-          coverage: lost ? "unavailable" : origin ? "complete" : "partial",
+          ...fold.execution,
+          // Items the display dropped took their execution facts with them.
+          coverage:
+            omitted || skipped || !!read?.dropped ? "partial" : "complete",
         });
       });
     }
@@ -115,199 +110,129 @@ export function useRunStream(
         try {
           return await read();
         } catch (error) {
-          // Notifications may replace a shared query while recovery awaits it.
+          // Thread changes may replace a shared query while recovery awaits it.
           // Join its replacement instead of reporting a disconnected stream.
           if (!isCancelledError(error) || signal.aborted) throw error;
         }
       }
     }
-    /**
-     * `join` keeps the reader's window, `restart` rebuilds it from the current
-     * snapshot, and `origin` reads the same resources but keeps the projection
-     * and cursor empty so the stream itself supplies every event.
-     */
-    async function reconcile(mode: "join" | "restart" | "origin" = "join") {
-      signal.throwIfAborted();
-      // Recovery must read current resources even when the display cache is fresh.
-      const [run, retained] = await Promise.all([
-        current(() =>
-          cache.fetchQuery({ ...queries.run(runId), staleTime: 0 }),
-        ),
+    /** Read the display again and fold it with the output it does not cover yet. */
+    async function reconcile(discard = false) {
+      const [next, list] = await Promise.all([
         current(() =>
           cache.fetchQuery({ ...queries.items(runId), staleTime: 0 }),
         ),
         current(() =>
-          cache.fetchQuery({ ...queries.pending(runId), staleTime: 0 }),
+          cache.fetchQuery({ ...queries.attempts(runId), staleTime: 0 }),
         ),
       ]);
-      if (signal.aborted) return { run, retained };
-      if (retained.available) {
-        if (mode === "origin") {
-          resetEarlier(null);
-          windowed = false;
-          initialized = true;
-          cursor.current = undefined;
-        } else {
-          // A new attachment/gap starts a fresh window; ordinary reconciliation
-          // keeps pages the reader has already requested.
-          if (mode === "restart" || !initialized) {
-            resetEarlier(retained.next_cursor);
-            windowed = retained.next_cursor !== null;
-            initialized = true;
-          }
-          fold.current.items = mergeRetainedItems(
-            mode === "restart" ? new Map() : fold.current.items,
-            retained.items,
+      signal.throwIfAborted();
+      read = next;
+      attempts = new Map(list.map((attempt) => [attempt.number, attempt]));
+      cache.setQueryData(queries.run(runId).queryKey, next.run);
+      const { position } = next;
+      provisional = discard
+        ? []
+        : provisional.filter(
+            (entry) => !position || compareCursors(entry.cursor, position) > 0,
           );
-          if (mode === "restart" || cursor.current === undefined)
-            cursor.current = retained.projection_cursor ?? undefined;
-        }
-        setIncomplete(
-          !retained.complete || retained.recovery_exhausted === true,
-        );
-        if (!retained.complete || retained.recovery_exhausted) {
-          setGap(true);
-          lost = true;
-        }
-      }
+      fold = { items: new Map(), execution: emptyExecution() };
+      for (const entry of displayEvents(next, attempts))
+        fold = applyRun(fold, entry);
+      // The display is authoritative for Items.
+      fold = {
+        ...fold,
+        items: mergeRetainedItems(
+          fold.items,
+          next.items.filter((item) => item.kind !== "observation"),
+        ),
+      };
+      for (const entry of provisional) fold = applyRun(fold, entry);
+      omitted = next.items.some((item) => isOmitted(item.content));
+      setIncomplete(omitted);
+      setGap(omitted || skipped);
+      setDropped(next.dropped);
       publish();
-      void cache.invalidateQueries({
-        queryKey: conversationKeys(workspace.id).thread(run.thread_id),
-      });
-      return { run, retained };
+      return next;
     }
-    /**
-     * A finalized Item snapshot ends ordinary delivery, but it says nothing
-     * about execution history: an origin replay still has to run before the
-     * finalized snapshot can close the consumer.
-     */
-    function settled(
-      retained: Awaited<ReturnType<typeof reconcile>>["retained"],
-      awaitingReplay = false,
-    ) {
-      // Terminal display recovery has expired: no stream can fill the gap,
-      // so the consumer closes on whatever the snapshot kept.
-      if (retained.recovery_exhausted) {
-        setIncomplete(true);
-        setGap(true);
-        lost = true;
-        if (cursor.current !== undefined)
-          fold.current.items = interruptOpenItems(
-            fold.current.items,
-            cursor.current,
-          );
-        publish();
-        setState("closed");
-        return true;
+    function covered(cursor: string) {
+      const last = provisional.at(-1)?.cursor ?? read?.position;
+      return !!last && compareCursors(cursor, last) <= 0;
+    }
+    async function receive(delta: ThreadDelta) {
+      const cursor = `${delta.attempt}-${delta.sequence}`;
+      if (covered(cursor)) return;
+      if (!attempts.has(delta.attempt) && !asked.has(delta.attempt)) {
+        // A new attempt: learn its identity, and the Run's status, first.
+        asked.add(delta.attempt);
+        await reconcile();
+        if (covered(cursor)) return;
       }
-      if (!retained.available) return false;
-      const caughtUp =
-        retained.projection_cursor === null ||
-        (cursor.current !== undefined &&
-          compareCursors(cursor.current, retained.projection_cursor) >= 0);
-      if (
-        !retained.complete ||
-        (retained.finalized && caughtUp && !awaitingReplay)
-      ) {
-        if (retained.finalized && cursor.current !== undefined) {
-          fold.current.items = interruptOpenItems(
-            fold.current.items,
-            cursor.current,
-          );
+      if (isFragment(delta)) {
+        // Only the display holds a large observation, from the next boundary.
+        if (delta.item) stale = true;
+        return;
+      }
+      const entry = deltaEvent(delta, attempts);
+      provisional.push(entry);
+      fold = applyRun(fold, entry);
+      publish();
+    }
+    async function follow(threadId: string) {
+      // The Thread may have moved on between the display read and the stream
+      // attachment; its Run reports a seal the stream would never announce.
+      const check = setInterval(() => {
+        if (!read || read.complete) return;
+        void current(() =>
+          cache.fetchQuery({ ...queries.run(runId), staleTime: 0 }),
+        )
+          .then((run) => (run.sealed_at ? reconcile() : undefined))
+          .catch(() => undefined);
+      }, SEAL_CHECK_MS);
+      try {
+        for await (const next of client.streamThread(workspace.id, threadId, {
+          signal,
+        })) {
+          if (signal.aborted) return;
+          if (next.type === "changed") {
+            void invalidateConversation(cache, workspace.id, {
+              sessionId: read?.run.session_id,
+              threadId,
+            });
+            // Sealing this Run is one of the changes a Thread reports.
+            if (!read?.complete) {
+              const thread = await current(() =>
+                cache.fetchQuery({ ...queries.thread(threadId), staleTime: 0 }),
+              );
+              if (thread.current_run_id !== runId) await reconcile();
+            }
+          } else if (next.type === "delta") {
+            if (next.delta.run_id === runId) await receive(next.delta);
+          } else if (next.run_id !== runId) continue;
+          else if (next.type === "reset") {
+            stale = true;
+            await reconcile(true);
+          } else if (next.type === "gap") {
+            skipped = stale = true;
+            await reconcile();
+          } else if (stale) {
+            skipped = stale = false;
+            await reconcile();
+          }
+          setState(read?.complete ? "closed" : "connected");
         }
-        // A stream that ended without its terminal observation cannot
-        // establish a complete execution history.
-        if (attached && !terminal) lost = true;
-        publish();
-        setState(retained.finalized ? "closed" : "disconnected");
-        return true;
+      } finally {
+        clearInterval(check);
       }
-      return false;
     }
     async function attach() {
       setState("connecting");
       setError(undefined);
-      origin = replay;
-      const initial = await reconcile(replay ? "origin" : "restart");
-      if (signal.aborted) return;
-      if (settled(initial.retained, replay)) return;
-      let gaps = 0;
-      while (!signal.aborted) {
-        try {
-          attached = true;
-          for await (const entry of client.streamRun(runId, {
-            signal,
-            after: cursor.current,
-            workspaceId: workspace.id,
-          })) {
-            if (signal.aborted) return;
-            // The in-memory projection is committed before advancing our replay checkpoint.
-            const { event } = entry;
-            // An older, unloaded Item can still be generating. Do not render a
-            // fragment without its prefix; its page will provide the full Item.
-            const hiddenContinuation =
-              windowed &&
-              event.item_id &&
-              !fold.current.items.has(event.item_id) &&
-              !event.event_type.endsWith("_start") &&
-              event.payload.item_kind !== "run_output";
-            if (!hiddenContinuation)
-              fold.current = applyRun(fold.current, entry);
-            cursor.current = entry.cursor;
-            publish();
-            setState("connected");
-            if (
-              event.event_type.startsWith("run.") ||
-              event.event_type.startsWith("run_attempt.")
-            ) {
-              void invalidateConversation(cache, workspace.id, {
-                sessionId: initial.run.session_id,
-                threadId: event.thread_id,
-                runId,
-              });
-            }
-            if (
-              [
-                "run.waiting",
-                "run.completed",
-                "run.failed",
-                "run.cancelled",
-              ].includes(event.event_type)
-            ) {
-              terminal = true;
-              break;
-            }
-          }
-          const latest = await reconcile();
-          if (signal.aborted) return;
-          if (settled(latest.retained)) return;
-          await new Promise<void>((resolve) => {
-            const finish = () => {
-              clearTimeout(timer);
-              signal.removeEventListener("abort", finish);
-              resolve();
-            };
-            const timer = setTimeout(finish, 500);
-            signal.addEventListener("abort", finish, { once: true });
-            if (signal.aborted) finish();
-          });
-        } catch (error) {
-          if (signal.aborted) return;
-          if (error instanceof ReplayGapError && gaps++ < 3) {
-            setGap(true);
-            // Retention no longer reaches our checkpoint: history is lost, and
-            // the snapshot path is the only way to continue.
-            lost = true;
-            origin = false;
-            const latest = await reconcile("restart");
-            if (signal.aborted) return;
-            if (settled(latest.retained)) return;
-            if (!latest.retained.available) throw error;
-            continue;
-          }
-          throw error;
-        }
-      }
+      const first = await reconcile(true);
+      setState(first.complete ? "closed" : "connecting");
+      if (!live) return;
+      await follow(first.run.thread_id);
+      if (!signal.aborted) setState("disconnected");
     }
     void attach().catch((error) => {
       if (!signal.aborted) {
@@ -320,14 +245,15 @@ export function useRunStream(
       controller.abort();
       if (frame !== undefined) cancelAnimationFrame(frame);
     };
-  }, [client, workspace.id, runId, cache, generation, replay, resetEarlier]);
+  }, [client, workspace.id, runId, cache, generation, live]);
   return {
-    ...earlier,
     items,
     execution,
     state,
     gap,
     incomplete,
+    /** The earliest Items the display dropped over its item limit. */
+    dropped,
     error,
     reconnect: () => setGeneration((value) => value + 1),
   };

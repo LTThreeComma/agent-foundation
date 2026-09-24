@@ -5,8 +5,8 @@ type Definition = Schema["ToolsetDefinition"];
 type Tool = Definition["tools"][number];
 type Selection = Schema["ToolSelection"] | undefined;
 export type WebOperation = "search" | "scrape";
-export type WebProvider = Schema["WebProvider"];
-export type WebProviderMetadata = Schema["WebProviderMetadata"];
+export type WebProvider = Schema["Provider"];
+export type WebProviderMetadata = Schema["ProviderType"];
 
 export function eligibleWebProvider(
   provider: WebProvider,
@@ -18,9 +18,9 @@ export function eligibleWebProvider(
     definitions.some(
       (definition) =>
         definition.type === provider.type &&
-        (credentialMode(definition, provider.configuration) !== "required" ||
+        (credentialMode(definition, provider.config) !== "required" ||
           provider.credential_configured) &&
-        definition.operations.includes(operation),
+        !!definition.operations?.includes(operation),
     )
   );
 }

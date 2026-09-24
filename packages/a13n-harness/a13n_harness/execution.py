@@ -561,11 +561,18 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
         self.thread_id = self._previous_state.thread_id
         self.run_id = f"run-{uuid4().hex}"
         self._tool_recovery = (
-            prepare_tool_recovery(self._previous_state.message_history, tool_recovery)
-            if deferred_resume is None
+            prepare_tool_recovery(
+                self._previous_state.message_history,
+                tool_recovery,
+                deferred_resume,
+            )
+            if deferred_resume is None or deferred_resume.recovery
             else None
         )
-        self._deferred_resume = deferred_resume
+        self._accepted_deferred = deferred_resume
+        self._deferred_resume = (
+            deferred_resume if deferred_resume is not None and not deferred_resume.recovery else None
+        )
         self._run_reserved_capability_ids = run_reserved_capability_ids
         self._usage = usage if usage is not None else RunUsage()
         self._usage_limits = usage_limits
@@ -768,6 +775,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
             ),
             _toolset_instructions_override=bindings.toolset_instructions,
             model_context=bindings.model_context,
+            model_call_check=bindings.model_call_check,
             _inherited_model_cost=bindings._inherited_model_cost,
             plugins=plugin_context,
             subagents=self._executable.subagents,
@@ -1229,11 +1237,15 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
         if self._attempt_events is not None:
             self._attempt_events.cancel()
 
-    async def steer(self, input: RunInputValue) -> str:
-        """Deliver one user steering value through native Pydantic enqueue."""
+    async def steer(self, input: RunInputValue, *, input_id: str | None = None) -> str:
+        """Deliver one user steering value through native Pydantic enqueue.
+
+        `input_id` is the host's identity for the value; it is recorded on the delivered request, where
+        `steering_input_ids` reads it back from exported state.
+        """
         if not self._entered or self._closed or self._context is None:
             raise RunError("The run is not active.", code="run_not_active")
-        return await self._context._steering.steer(input)
+        return await self._context._steering.steer(input, input_id=input_id)
 
     async def export_state(self) -> HarnessState:
         """Export active state or the detached checkpoint retained before shutdown."""
@@ -1495,6 +1507,16 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def _normalize_interrupted_history(
+        self, messages: Sequence[ModelMessage], *, response_tracker: InterruptedResponseTracker
+    ) -> tuple[tuple[ModelMessage, ...], int]:
+        remaining = self._accepted_deferred.remaining(messages) if self._accepted_deferred is not None else None
+        return normalize_interrupted_history(
+            messages,
+            response_tracker=response_tracker,
+            close_tool_calls=remaining is None,
+        )
+
     async def _run_attempts(
         self,
         exchange: PluginRunExchange,
@@ -1589,7 +1611,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
                         else:
                             raw_messages = exc.all_messages()
                             raw_new_message_count = len(exc.new_messages())
-                        messages, _ = normalize_interrupted_history(
+                        messages, _ = await self._normalize_interrupted_history(
                             raw_messages,
                             response_tracker=response_tracker,
                         )
@@ -1611,7 +1633,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
                         return
                     except UsageLimitExceeded:
                         self._refresh_live_messages()
-                        messages, _ = normalize_interrupted_history(
+                        messages, _ = await self._normalize_interrupted_history(
                             self._latest_messages,
                             response_tracker=response_tracker,
                         )
@@ -1624,7 +1646,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
                         return
                     except Exception as error:
                         self._refresh_live_messages()
-                        messages, _ = normalize_interrupted_history(
+                        messages, _ = await self._normalize_interrupted_history(
                             self._latest_messages,
                             response_tracker=response_tracker,
                         )
@@ -1686,7 +1708,7 @@ class HarnessRunStream[OutputT](AsyncIterator[HarnessStreamEvent[OutputT]]):
                     self._latest_messages = tuple(cancelled.all_messages())
                 else:
                     self._refresh_live_messages()
-                self._latest_messages, _ = normalize_interrupted_history(
+                self._latest_messages, _ = await self._normalize_interrupted_history(
                     self._latest_messages, response_tracker=response_tracker
                 )
                 raise

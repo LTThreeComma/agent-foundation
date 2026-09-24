@@ -23,10 +23,8 @@ import { StatePill } from "../../shared/feedback";
 import { CopyButton } from "../../shared/identity";
 import { AgentAvatar } from "../agents/avatar";
 import { useAgent } from "../agents/queries";
-import { memoriesPath } from "../memory/api";
-import { useMemoryProviders } from "../memory/availability";
-import { isActiveRun } from "./api";
-import { useRun } from "./queries";
+import { isActiveRun, isConsoleSession } from "./api";
+import { useRun, useSession } from "./queries";
 import { useAnchoredLevel } from "./transcript/debug/view";
 import { useRunCollapseAll } from "./transcript/debug/collapse";
 import { useThreadRuns } from "./transcript/thread-runs";
@@ -39,26 +37,25 @@ import styles from "./conversations.module.css";
 export function SessionHeader({
   threads,
 }: {
-  threads: readonly Schema["ThreadResource"][];
+  threads: readonly Schema["ThreadView"][];
 }) {
   const { t } = useTranslation();
   const { sessionId = "", threadId = "", runId } = useParams();
   const { basePath, can } = useWorkspace();
   const thread = threads.find((entry) => entry.id === threadId);
   const root = threads.find(
-    (entry) => entry.role === "root" && entry.session_id === sessionId,
+    (entry) => entry.origin === "new" && entry.session_id === sessionId,
   );
-  const { level, switchLevel } = useAnchoredLevel(thread);
-  const { visible: memoryVisible } = useMemoryProviders();
+  const session = useSession(sessionId);
+  const { level, switchLevel } = useAnchoredLevel(thread, session.data);
   const run = useRun(runId);
   const valid = run.data?.session_id === sessionId;
-  const agent = useAgent(
-    valid && !run.data?.configuration_draft_id ? run.data?.agent_id : undefined,
-  );
+  const agent = useAgent(valid ? run.data?.agent_id : undefined);
   const { runs } = useThreadRuns(threadId);
   const collapse = useRunCollapseAll();
-  const debugPurpose = thread?.session_purpose === "debug";
-  const child = thread?.role === "child";
+  const debugSession = isConsoleSession(session.data);
+  // Any Thread that branched from another reads under the Session's root.
+  const child = !!thread && thread.origin !== "new";
   const active =
     valid &&
     !!run.data &&
@@ -96,7 +93,7 @@ export function SessionHeader({
           />
         </span>
         <span className={styles.subNote}>
-          {debugPurpose
+          {debugSession
             ? [
                 t("Debug session"),
                 runs.length
@@ -107,8 +104,8 @@ export function SessionHeader({
                 .join(" · ")
             : run.data
               ? t("Started by {{trigger}}", {
-                  trigger: t(`trigger.${run.data.trigger_type}`, {
-                    defaultValue: run.data.trigger_type,
+                  trigger: t(`trigger.${run.data.trigger}`, {
+                    defaultValue: run.data.trigger,
                   }),
                 })
               : ""}
@@ -165,22 +162,7 @@ export function SessionHeader({
                   : t("Collapse all runs")}
               </MenuItem>
             )}
-            {memoryVisible && thread && (
-              <MenuItem
-                render={
-                  <a
-                    href={memoriesPath(basePath, {
-                      scope: "thread",
-                      subject_id: thread.id,
-                    })}
-                  />
-                }
-              >
-                <ArrowSquareOutIcon size={14} aria-hidden="true" />
-                {t("Thread memories")}
-              </MenuItem>
-            )}
-            {can("trace.read") && (
+            {can("read") && (
               <MenuItem
                 render={
                   <Link to={`${basePath}/traces?session_id=${sessionId}`} />

@@ -1,84 +1,117 @@
 # Identity and access
 
-The default OSS service authenticates local users with browser sessions and applications with Workspace-bound API keys. It initializes one Organization and a `default` Workspace. Each request uses current roles and credential status.
+Every request acts as a **principal**: a user, who signs in with an email address and password, or a service account, which exists for applications. Principals receive **roles** through **grants** in an organization or a workspace, and authenticate with a login session or an API key.
 
-## Initialize the administrator
+## Organizations and workspaces
 
-Set `A13N_SERVICE_IAM_INITIAL_ADMIN_EMAIL` before starting a control or all-in-one process against an empty database. Set `A13N_SERVICE_IAM_PUBLIC_ORIGIN` to the browser-facing origin, such as `https://agents.example.com`. HTTP is accepted only on loopback for local development. Production sessions require HTTPS.
+An **organization** is the administration boundary. It holds its members and the resources it shares with all of its workspaces, such as organization-wide model providers and models. A **workspace** is the boundary for work: agents, sessions, connections, environments and most other resources belong to exactly one workspace.
 
-With SMTP configured, the administrator receives an invitation email. Otherwise, the service prints a single-use initialization link once to its protected startup logs. Open the link and choose a password containing 15-128 printable ASCII characters without spaces. Accepting a manually delivered link does not mark the email as verified.
+[Bootstrap](get-started.md#create-the-first-administrator) creates the first organization (key `default`), its first workspace (key `default`) and an administrator. There is no API to create further organizations. Organization administrators create workspaces in Console under **Organization settings → Workspaces**, or with `POST /api/v1/organizations/{organization_id}/workspaces` and a `{key, name}` body.
 
-Restarting the service does not issue another link. To replace a lost or expired pending link, run this command using the deployment's database and IAM configuration from a protected terminal:
+Administrators can rename an organization or workspace, change its key and set an icon (PNG, JPEG or WebP). Workspace keys are unique within their organization and organization keys are unique across the deployment; links that use an old key stop resolving. API paths accept a workspace ID or, among the workspaces you can read, its key.
+
+**Archiving** a workspace (`POST /api/v1/workspaces/{workspace_id}/archive`, organization administrators only) is permanent and revokes its pending invitations. An archived workspace stays readable, but every change is refused with `disabled`, except offboarding: deleting grants, retiring or disabling service accounts, and revoking API keys.
+
+## Roles
+
+| Role      | Verbs                   | Typical use                                                    |
+| --------- | ----------------------- | -------------------------------------------------------------- |
+| `viewer`  | read                    | Inspect configuration, conversations and results.              |
+| `runner`  | read, run               | Start and steer conversations with existing agents.            |
+| `builder` | read, run, write        | Create and change agents and resources.                        |
+| `admin`   | read, run, write, admin | Manage members, invitations, keys, service accounts and audit. |
+
+A grant gives a role at one scope:
+
+- An organization grant applies to the organization and to every workspace in it.
+- A workspace grant applies to that workspace. On resources the organization shares (organization-wide providers and models), a workspace grant allows only `read` and `run`: its holders use shared resources but cannot change them.
+
+A principal's permissions are the union of its grants in the organization. Resource views carry a `permissions` list with the verbs you currently hold there.
+
+## Members and grants
+
+Organization members are the principals holding a grant in the organization, plus the service accounts of its workspaces. Organization administrators list them with `GET /api/v1/organizations/{organization_id}/members` (filter with `kind=user` or `kind=service_account`).
+
+Administrators manage grants at each scope with `/api/v1/organizations/{organization_id}/grants` and `/api/v1/workspaces/{workspace_id}/grants`:
+
+- `POST` with `{principal_id, role}` grants a role to an existing member. A principal holds at most one grant per scope.
+- `PATCH …/grants/{grant_id}` with `{role}` replaces the grant: the response carries a new grant ID, and the old ID no longer resolves.
+- `DELETE …/grants/{grant_id}` removes it. A service account left without grants is retired.
+
+The last active organization administrator cannot be removed, demoted or disabled (`409 conflict`, reason `last_organization_admin`). Grant routes take no `If-Match`.
+
+## Invitations
+
+Invite people who do not yet belong to the organization, or give existing users a role in a new scope. In Console use **Invitations** in workspace or organization settings; through the API, `POST /api/v1/workspaces/{workspace_id}/invitations` (or the organization equivalent) with `{email, role}`.
+
+- Sending and resending an invitation need a login session, the same as [creating an API key](#api-keys): an API key is refused with `403 forbidden`, since it would mint a link that outlives the key itself.
+- With [SMTP configured](configuration.md#identity-and-mail), the invitation link is mailed (`delivery: "queued"`). Without it, the response carries the link once in `invitation_url` (`delivery: "manual"`); share it yourself.
+- The link opens Console's invitation page. A new user chooses a name and password; an existing user confirms with their own password. Accepting signs the person in and grants the invited role at that scope, replacing any grant they held there.
+- An invitation expires after `auth.invitation_seconds` (seven days by default). **Resend** issues a new link and restarts the expiry; **Revoke** withdraws it (an API key may revoke). Only one pending invitation per address and scope may exist.
+- Acceptance fails with `409 conflict` when the invitation was accepted, revoked or has expired, or when the inviter no longer administers that scope. Expired and revoked invitations are removed by a background sweep, after which their links return `404`.
+
+There is no self-service sign-up: accounts are created only by bootstrap and by accepting invitations.
+
+## Sign in and login sessions
+
+Console signs in with `POST /api/v1/auth/login` and `{email, password}`. The Service sets a `__Host-a13n_session` cookie (`Secure`, `HttpOnly`, `SameSite=Strict`) and returns a CSRF token. A session lasts `auth.session_seconds` (12 hours by default) from its last use. Login attempts are rate limited per client address and email.
+
+Requests authenticated by the cookie that change state must send the CSRF token in `X-CSRF-Token`, and a browser `Origin` must equal the Service's public URL. See [HTTP conventions](http.md#authentication).
+
+Under **Personal settings → Login sessions**, or `GET /api/v1/users/me/login-sessions`, you see your live sessions and can revoke any of them. `POST /api/v1/auth/logout` ends the current one, and `GET /api/v1/auth/session` re-reads it and its CSRF token; both need the session cookie itself and refuse an API key with `403 forbidden`.
+
+## Your account
+
+Account operations require a login session; API keys cannot perform them.
+
+- **Profile**: change your name, and your avatar (PNG, JPEG or WebP).
+- **Password**: changing it (`POST /api/v1/users/me/password` with the current password) ends your other login sessions. Passwords have at least 12 characters.
+- **Password reset**: **Forgot your password?** on the sign-in page mails a one-use link valid for `auth.link_seconds`. Resetting ends every login session. Reset requires SMTP.
+- **Email change**: submit the new address with your current password; the Service mails a confirmation link to the new address, and the change takes effect when it is opened. Confirming ends every login session. Email change requires SMTP.
+- **Disable**: `POST /api/v1/users/me/disable` with your current password disables your account, ends your other login sessions and revokes your outstanding password-reset and email-change links. Your grants and keys are kept but nothing authenticates as you; runs you started stop at their next authority check. Only an operator can re-enable you.
+
+Operations that check your current password share one rate limit per client address and account.
+
+## API keys
+
+An API key authenticates as its principal and is always **confined to one workspace**. It carries no permissions of its own: each request gets the principal's current grants, limited to that workspace (and to `read` and `run` on organization-shared resources). Changing or removing a grant changes every key of that principal immediately.
+
+Create a personal key in Console under **Workspace settings → My API keys**, or with `POST /api/v1/users/me/keys` and `{name, workspace_id, expires_at?}`. You need at least `read` in that workspace, and a login session: an API key never mints one, for itself or anyone else, since the new key could outlive the one that made it (`403 forbidden`). The response contains the secret (`a13n_…`) exactly once; the Service stores only its hash. Send the key as a bearer token:
 
 ```sh
-a13n-service iam reissue-bootstrap
+curl "$A13N_URL/api/v1/workspaces/ws_.../agents" -H "Authorization: Bearer $A13N_API_KEY"
 ```
 
-The command invalidates the old link. It cannot reopen completed initialization. Worker and connectivity roles do not initialize identity.
+List and revoke your keys under **My API keys** (`GET /api/v1/users/me/keys`, `DELETE /api/v1/users/me/keys/{key_id}`). Workspace administrators see and revoke every key confined to their workspace under **Member keys** (`/api/v1/workspaces/{workspace_id}/keys`). `last_used_at` shows recent use, updated at most once a minute.
 
-## Browser sessions
+## Service accounts
 
-Open [Console](console.md) at its `/login` page to sign in. `/api/v1/auth/login` is a JSON endpoint, not a browser page. Applications may POST `{ "email": "...", "password": "..." }` to that URL. Successful login and invitation acceptance set an `HttpOnly`, `Secure`, `SameSite=Lax` cookie and return safe User/session metadata plus `csrf_token`. Session expiry defaults to seven days and is configured by `A13N_SERVICE_IAM_SESSION_DAYS`. The cookie name is configured by `iam.session_cookie_name` / `A13N_SERVICE_IAM_SESSION_COOKIE_NAME` and defaults to `a13n_session`; use a stable, deployment-specific name when multiple loopback deployments must coexist in one browser profile.
+A service account is an identity for an application. It belongs to one workspace for its whole life, can only be granted roles there, and authenticates only with API keys. Workspace administrators manage them under **Workspace settings → Service accounts**, or with `/api/v1/workspaces/{workspace_id}/service-accounts`:
 
-Browser mutations require an `Origin` matching the configured public origin. Authenticated mutations also require `X-A13N-CSRF-Token`; retrieve it from the login response or `GET /api/v1/auth/csrf`. Send cookies with same-origin requests. Never send a bearer credential together with a session cookie.
+- `POST` with `{name, description, role}` creates the account and its workspace grant (`runner` by default).
+- `POST …/service-accounts/{account_id}/keys` with `{name, expires_at?}` issues a key; the secret is returned once. Issuing a key, like issuing your own, needs a login session, not just an API key.
+- `PATCH` changes the name, description or role, or sets `status` to `disabled` or `active`. A disabled account keeps its keys, but they stop authenticating.
+- `DELETE` retires the account: its grants are removed, its keys revoked and it is disabled. The record remains for audit history.
 
-A browser session defaults to Organization scope. `X-A13N-Workspace-ID` selects a narrower Workspace scope when working with Workspace-owned configuration. Workspace routes check their target against that selection. Use Organization scope for Organization administration.
+## Operator account control
 
-- `GET /api/v1/users/me` reads the current User.
-- `GET /api/v1/users/me/auth-sessions` lists sessions.
-- `DELETE /api/v1/users/me/auth-sessions/{id}` revokes one session.
-- `POST /api/v1/auth/logout` revokes the current session and clears its cookie.
-- `POST /api/v1/users/me/password` accepts `current_password` and `password`; it preserves the current session and revokes the others.
+Operators with access to the deployment can disable or re-enable any user, outside tenant authority:
 
-## Invite members
-
-An Organization Admin can POST to `/api/v1/organizations/{organization}/invitations` with an email and grants:
-
-```json
-{
-  "email": "teammate@example.com",
-  "grants": [
-    { "resource_type": "workspace", "resource_id": "ws_REPLACE", "role_key": "runner" }
-  ]
-}
+```sh
+a13n-service --config service.toml user disable --email person@example.com
+a13n-service --config service.toml user enable --email person@example.com
 ```
 
-A Workspace Admin can POST `{ "email": "...", "role": "runner" }` to `/api/v1/workspaces/{workspace}/invitations`. Acceptance also establishes Organization membership. Existing users must supply their existing password; invitations never overwrite that password or demote existing roles.
+Disabling stops every credential of the user; accepted runs stop at their next authority refresh. Enabling restores the account with the grants and keys it had. Both are audited with no actor and `details.authority = "operator"`.
 
-Delivery returns `sent`, `failed`, or `manual`. Manual delivery includes `invitation_url` once. SMTP failure retains the invitation; fix delivery and resend. Configure `A13N_SERVICE_IAM_SMTP_HOST`, `SMTP_PORT`, `SMTP_TLS` (`starttls` or `tls`), `SMTP_SENDER`, and optional paired `SMTP_USERNAME`/`SMTP_PASSWORD`, each with the `A13N_SERVICE_IAM_` prefix. Invitation expiry defaults to seven days and is configured by `A13N_SERVICE_IAM_INVITATION_DAYS`.
+## Audit
 
-Resend and revoke use `POST /api/v1/invitations/{id}/resend` or `/revoke` with `{ "expected_version": 1 }`. Read the current version from the invitation collection. Resend invalidates the previous token. Acceptance rechecks the inviter's current authority and every target grant.
+Changes to access and account security are recorded as immutable audit events: who acted (`actor_id`), the `action`, the target, the `outcome` (`ok`, `denied` or `failed`) and bounded details. Refused administrative changes are recorded as `denied`.
 
-Manage existing membership through the Organization or Workspace `role-bindings` collections. Read `/api/v1/role-bindings/{id}` for its ETag; PATCH its `role`, or DELETE it, with `If-Match`. Removing the final active Organization Admin is rejected.
+| Trail                                          | Where                                                                                         | Who                         |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------- |
+| Organization, including its workspaces         | **Organization settings → Audit**, `GET /api/v1/organizations/{organization_id}/audit-events` | Organization administrators |
+| One workspace                                  | **Workspace settings → Audit**, `GET /api/v1/workspaces/{workspace_id}/audit-events`          | Workspace administrators    |
+| Your own actions and events about your account | `GET /api/v1/users/me/audit-events`                                                           | You, with a login session   |
 
-## Browser OAuth callbacks
-
-Browser authorization uses the same Connection Authorization resource for Console users and application Service Accounts, with source-specific callback proof. An application can keep its own user identities and Connection mapping without creating Console users.
-
-Connector setup supplies a registered return URL, application state, and SHA-256 completion challenge. Composio returns through `/connection-authorizations/browser`; the Service bridge binds the round trip to that tab, then the application completes a short-lived receipt with the original principal and verifier.
-
-MCP authorization instead registers an allowlisted application `redirect_uri`. The provider returns directly to that application with OAuth state and a code or error. The application removes query material immediately and calls authenticated completion as the initiating principal; Service validates the callback, issuer, PKCE, authority, expiry, and one-time exchange. Console owns `/connections/callback` and completes with the signed-in User and CSRF token. Keep authorization in the same tab. Service omits query strings from access logs; configure application and ingress access logs to do the same. See [external tool authorization](external-tools.md#application-owned-users) for both flows and callback configuration.
-
-## Create application keys
-
-POST `{ "name": "my-application" }` to `/api/v1/workspaces/{workspace}/personal-api-keys` from an authenticated user session. The response contains safe `key` metadata and a `bearer` value shown once. Store the bearer securely and send it as `Authorization: Bearer <value>` on application requests without a browser cookie.
-
-The key is restricted to its `boundary_type: "workspace"` and `boundary_id`. It inherits its owner's current permissions. The default expiry is 90 days; supply an absolute `expires_at` timestamp or explicit `null` for no expiry. Read metadata at `/api/v1/api-keys/{id}` and revoke with `POST /api/v1/api-keys/{id}/revoke`.
-
-There is no key rotation endpoint. Create a replacement, move callers, and revoke the old key. Revocation is permanent; removing access permanently revokes affected personal keys.
-
-Workspace Admins can create a Service Account at `/api/v1/workspaces/{workspace}/service-accounts` with `name` and a `role` of `viewer`, `runner`, or `builder`. Create its keys at `/api/v1/service-accounts/{id}/api-keys`. Use these credentials for unattended application or ingress integration. A Service Account cannot administer identity or obtain a browser session.
-
-Service Account updates require `expected_version`, `name`, `description`, `status`, and `role`. Disablement blocks existing keys; re-enablement restores otherwise valid keys. Deletion requires `expected_version` and permanently revokes all keys.
-
-Collection endpoints accept `limit` (1-100) and `cursor`, and return `items` and `next_cursor`. Cursors are bound to the requesting principal and collection scope.
-
-Embedded distributions that supply `Components.request_authenticator` own authentication and initialization; the built-in local identity runtime is selected only when that override is absent.
-
-## Resource keys and browser links
-
-Organizations, Workspaces, and Agents have an immutable `id`, a display `name`, and an editable `key` for readable addresses. For example, an Agent can appear at `/workspace/research/agents/code-reviewer` in Console. Display names can repeat. A generated key uses the readable ASCII parts of the name; a collision adds four random hexadecimal characters. You can choose an explicit key when creating a resource or edit it later in its settings.
-
-Keys use lowercase letters, numbers, and single hyphens, up to 64 characters. Renaming the display label preserves the key. Changing the key preserves the resource and its history but invalidates its previous address; there are no redirects or aliases.
-
-Native API paths accept either IDs or current keys: `/api/v1/workspaces/research/agents/code-reviewer` addresses the same Agent as the equivalent path with its Workspace and Agent IDs. The credential still determines the allowed Organization or Workspace. API Key SDK callers can use `await client.workspaceHttp()` to bind that Workspace automatically, then call `/agents/{agent}` without supplying the Workspace again.
+Events are listed newest first with cursor paging.

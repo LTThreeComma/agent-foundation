@@ -66,6 +66,8 @@ The content default is `standard`. While tracing is off, that value is a dormant
 
 `none` means the Host does not opt into ordinary execution payloads. It is not a universal redaction boundary for fields emitted by upstream Pydantic AI instrumentation. Before enabling tracing, treat Agent descriptions, metadata, tool definitions and schema defaults, and upstream exception text as telemetry-visible. `standard` also cannot redact binary values nested inside arbitrary custom models or dataclasses.
 
+A Host that reads spans back from its collector and shows them to users can pass their content through `a13n_harness.observation.redact_json`. It returns a detached copy in which authority-bearing members such as `authorization`, `api_key`, `password`, `secret` and `token` are replaced, usage counts such as `input_tokens` remain, and `Bearer` credentials inside strings are replaced. The Harness applies the same rule to extension event payloads.
+
 ## Enable observation and select a collector through environment variables
 
 The default builder mode is `instrumentation="environment"`. It reads these Harness policy variables once and obtains the OpenTelemetry global providers already configured by the executable Host:
@@ -290,7 +292,7 @@ Public key: lf_pk_agent_foundation_local
 Secret key: lf_sk_agent_foundation_local
 ```
 
-`make langfuse-up` selects `dev/service/local.toml` by default; use `SERVICE_CONFIG=PATH` to select a different local project. It never loads the root `.env`. Service's `make dev` uses that same configuration and automatically wires trace export and querying.
+`make langfuse-up` uses the machine-shared stack and public test configuration in `dev/observability/langfuse.py`. It does not read Service settings or the root `.env`. Harness and Harness UI explicitly load their own development `.env` files. The Service exports and queries traces through its own `telemetry` settings; see [Service logging and traces](../a13n-service/configuration.md#logging-and-traces).
 
 For an **embedded Harness Host**, explicitly export the following trace-only profile instead. You may keep Host-specific values in a private `.env` and load it explicitly with `uv run --env-file .env ...`; `.env.harness.example` documents optional debugging settings. Harness UI uses its normal YAML configuration plus the process environment and does not implicitly load this file.
 

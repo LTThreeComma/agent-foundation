@@ -14,57 +14,60 @@ import { useMCPServers } from "../mcp/catalog";
 export function useConnectionDirectory(search: string) {
   const client = useClient(),
     cache = useQueryClient(),
-    { workspace, can } = useWorkspace();
+    { workspace, organization, can } = useWorkspace();
   const providers = useQuery({
     queryKey: ["connector-providers", "workspace", workspace.id, "picker"],
-    enabled: can("connector_provider.read") && can("connection.manage"),
+    enabled: can("write"),
     queryFn: ({ signal }) =>
       allPages((cursor) =>
-        connectorApi(client, { kind: "workspace", id: workspace.id }).providers(
-          signal,
-          cursor,
-        ),
+        connectorApi(client, organization.id, {
+          kind: "workspace",
+          id: workspace.id,
+        }).providers(signal, cursor),
       ),
   });
   const definitions = useQuery({
-    queryKey: ["connector-provider-types"],
-    enabled: can("connector_provider.read") && can("connection.manage"),
+    queryKey: ["provider-types", "connector"],
+    enabled: can("write"),
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/connector-provider-types", { signal })
+        .GET("/api/v1/provider-types/{kind}", {
+          params: { path: { kind: "connector" } },
+          signal,
+        })
         .then(data),
   });
-  const mcpServers = useMCPServers(search, can("connection.manage"));
+  const mcpServers = useMCPServers(search, can("write"));
   const active =
     providers.data?.filter((provider) => {
       const definition = definitions.data?.items.find(
         (item) => item.type === provider.type,
       );
       return (
-        provider.status === "active" &&
+        provider.enabled &&
         !!definition &&
-        (credentialMode(definition, provider.configuration) !== "required" ||
+        (credentialMode(definition, provider.config) !== "required" ||
           provider.credential_configured)
       );
     }) ?? [];
-  const key = (provider: Schema["ConnectorProvider"]) => [
+  const key = (provider: Schema["Provider"]) => [
     "connector-directory",
     workspace.id,
     provider.id,
-    provider.credential_generation,
+    provider.version,
     search,
   ];
   const read = (
-    provider: Schema["ConnectorProvider"],
+    provider: Schema["Provider"],
     options: { cursor?: string; refresh?: boolean } = {},
     signal?: AbortSignal,
   ) =>
     client.http
-      .POST(
-        "/api/v1/connector-providers/{connector_provider_id}/discover-connectors",
+      .GET(
+        "/api/v1/workspaces/{workspace_id}/connector-providers/{provider_id}/apps",
         {
           params: {
-            path: { connector_provider_id: provider.id },
+            path: { workspace_id: workspace.id, provider_id: provider.id },
             query: { query: search, limit: 50, ...options },
           },
           signal,
@@ -89,7 +92,7 @@ export function useConnectionDirectory(search: string) {
             provider,
             refresh ? { refresh: true } : { cursor: cursor ?? undefined },
           );
-          cache.setQueryData<Schema["ConnectorCollection"]>(
+          cache.setQueryData<Schema["ConnectorAppPage"]>(
             key(provider),
             (current) => {
               if (refresh || !current) return page;

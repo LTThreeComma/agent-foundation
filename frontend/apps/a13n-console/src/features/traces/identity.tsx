@@ -12,9 +12,9 @@ import styles from "./traces.module.css";
 
 /** Open telemetry types retain a neutral fallback; names refine generic spans only. */
 export function observationKind(
-  observation: Pick<Schema["Observation"], "type" | "name">,
+  observation: Pick<Schema["Span"], "kind" | "name">,
 ) {
-  const type = observation.type.toLowerCase();
+  const type = observation.kind.toLowerCase();
   if (["generation", "llm", "chat", "completion"].includes(type)) return "chat";
   if (type === "tool") return "tool";
   if (type === "agent") return "agent";
@@ -39,7 +39,7 @@ const icons = {
   span: StackIcon,
 };
 
-export function isFailed(observation: Schema["Observation"]) {
+export function isFailed(observation: Schema["Span"]) {
   return (
     observation.status === "error" ||
     ["error", "fatal", "critical"].includes(observation.level ?? "")
@@ -51,7 +51,7 @@ export function ObservationGlyph({
   observation,
   size = 15,
 }: {
-  observation: Pick<Schema["Observation"], "type" | "name">;
+  observation: Pick<Schema["Span"], "kind" | "name">;
   size?: number;
 }) {
   const Icon = icons[observationKind(observation)];
@@ -62,7 +62,7 @@ export function ObservationGlyph({
 export function ObservationIcon({
   observation,
 }: {
-  observation: Schema["Observation"];
+  observation: Schema["Span"];
 }) {
   return (
     <span

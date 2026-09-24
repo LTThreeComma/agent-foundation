@@ -37,7 +37,7 @@ Harness UI resolves its native a13n-envd version from the installed `a13n-envd-c
 
 a13n Service SDKs live in the independent `converge-ai-labs/a13n-sdk-{python,go,rust,typescript}` repositories. Optional local checkouts can live under ignored `sdk/{python,go,rust,typescript}` directories, but are not tracked entries, submodules, workspace members, or inputs to main-repository build, test, documentation, and release gates. The Rust SDK repository also owns the companion `a13n-service-cli` project and its independent release channel.
 
-Service owns the exported Native contract and shared protocol evidence under `proto/a13n-service/`. [Service SDK Design and Contract Distribution](a13n-service/37-service-sdks-and-clients.md) owns the shared SDK experience, resource-object responsibilities, convenience boundaries, and contract consumption rules. Each SDK repository owns its language-specific specification, concrete public API, implementation, SHA-pinned Service snapshot, generators, validation, and release automation. The main specification does not prescribe language-specific signatures, implementation structure, or CLI command design; applications retain business workflow ownership.
+Service owns the exported Native contract and shared protocol evidence under `proto/a13n-service/`, specified by the [Service API contract](a13n-service/10-api.md). Each SDK repository owns its language-specific specification, concrete public API, implementation, SHA-pinned Service snapshot, generators, validation, and release automation. The main specification does not prescribe language-specific signatures, implementation structure, or CLI command design; applications retain business workflow ownership.
 
 Projects under `examples/` may carry their own manifests and lock files when realistic packaging is part of the integration being demonstrated. They remain outside production package workspaces and release groups; example distribution names and artifacts are not platform packages.
 
@@ -112,11 +112,12 @@ Each consuming package owns its cross-release-group Python requirements in its `
 
 The current cross-group requirements are:
 
-| Consumer                     | Dependency               | Published requirement                 |
-| ---------------------------- | ------------------------ | ------------------------------------- |
-| Harness UI                   | Harness, Stream Protocol | `>=0.0.44,<0.1.0`, identical for both |
-| Harness UI, Harness          | `a13n-logging`           | `>=0.1.0,<0.2.0`                      |
-| Harness, Harness UI, Service | `a13n-envd-client`       | `>=0.0.6,<0.1.0`                      |
+| Consumer                     | Dependency               | Published requirement                |
+| ---------------------------- | ------------------------ | ------------------------------------ |
+| Harness UI                   | Harness, Stream Protocol | `>=0.1.0,<0.2.0`, identical for both |
+| Service                      | Harness, Stream Protocol | `>=0.1.0,<0.2.0`, identical for both |
+| Harness UI, Harness          | `a13n-logging`           | `>=0.1.0,<0.2.0`                     |
+| Harness, Harness UI, Service | `a13n-envd-client`       | `>=0.0.6,<0.1.0`                     |
 
 Independent release lines do not force consumer releases or lower-bound bumps for every dependency patch. Raise the minimum when the consumer needs newer APIs or behavior; a breaking compatibility change crosses the declared line and requires an explicit consumer update. These bounded requirements are reviewed compatibility policy, not a general semantic-versioning guarantee for all `0.x` releases. Python prerelease resolution follows standard package-manager rules.
 

@@ -11,7 +11,10 @@ const target = new URL("./src/service-client/schema.ts", import.meta.url);
 const ast = await openapiTS(source, {
   defaultNonNullable: false,
   transform(schema) {
-    if (schema.format === "binary")
+    if (
+      schema.format === "binary" ||
+      schema.contentMediaType === "application/octet-stream"
+    )
       return ts.factory.createTypeReferenceNode("Binary");
   },
 });

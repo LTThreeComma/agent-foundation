@@ -189,14 +189,19 @@ def test_modal_real_sdk_snapshot_resume(tmp_path, monkeypatch):
         try:
             await env.prepare()
             await env.operations.files.write_text("/data", "saved in native snapshot", mode="upsert")
-            state = EnvironmentState.model_validate_json(env.dump_state().model_dump_json())
+            running = EnvironmentState.model_validate_json(env.dump_state().model_dump_json())
             await env.close()
-            env = create(state)
+            env = create(running)
             await env.stop()
             state = EnvironmentState.model_validate_json(env.dump_state().model_dump_json())
             assert state.state["snapshot_id"]
             assert not (root / "data").exists()
             assert await env.reconcile() == "stopped"
+            await env.close()
+            # Continuing a stop whose state was lost, from the state before it, adopts the image it took.
+            env = create(running)
+            await env.stop()
+            assert env.dump_state().state == state.state
             await env.close()
             env = create(state)
             await env.prepare()

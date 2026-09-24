@@ -5,16 +5,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from anyio import Semaphore, create_task_group
 from jsonschema import Draft202012Validator
 from pydantic import JsonValue
 
 from a13n_harness.providers.connector.contracts import JsonObject
 
-from ..contracts import BeforeSharedSetup, ConnectorProviderError, DiscoveredConnector
+from ..contracts import BeforeSharedSetup, ConnectorProviderError, ConnectorTool, ConnectorToolPage, DiscoveredConnector
 from ..directory import DirectoryBudget, directory_items, is_credential_field
 from ..http import ConnectorHttpClient
 from ..validation import optional_string, path_segment, required_object, required_string
 from .configuration import COMPOSIO_ENDPOINT, ComposioSetup
+from .output_schema import corrected_output_schema
 
 TOOLKIT_VERSION = re.compile(r"^[0-9]{8}_[0-9]{2}$")
 SUPPORTED_SCHEMES = ("OAUTH2", "API_KEY", "BEARER_TOKEN", "BASIC")
@@ -80,14 +82,9 @@ class ComposioCatalog:
     async def prepare_setup(
         self, key: str, setup: JsonObject, before_shared_setup: BeforeSharedSetup | None
     ) -> AuthConfiguration:
-        configured = ComposioSetup.model_validate(setup)
         item = await self._toolkit(key)
         configurations = await self.configurations()
-        connector = connector_metadata(item, configurations)
-        if connector.unavailable_reason:
-            raise ConnectorProviderError("connector_setup_unavailable")
-        if not Draft202012Validator(connector.setup_schema).is_valid(setup):
-            raise ConnectorProviderError("invalid_setup_options")
+        configured = await self._validate_setup(key, setup, item, configurations)
         return await self.resolve_auth_config(
             key, configured.auth_config_id, before_shared_setup, configurations=configurations
         )
@@ -95,12 +92,9 @@ class ComposioCatalog:
     async def prepare_credentials(
         self, key: str, setup: JsonObject, credentials: JsonObject, before_shared_setup: BeforeSharedSetup | None
     ) -> AuthConfiguration:
-        configured = ComposioSetup.model_validate(setup)
         item = await self._toolkit(key)
         configurations = await self.configurations()
-        connector = connector_metadata(item, configurations)
-        if connector.unavailable_reason or not Draft202012Validator(connector.setup_schema).is_valid(setup):
-            raise ConnectorProviderError("invalid_setup_options")
+        configured = await self._validate_setup(key, setup, item, configurations)
         selected = next(
             (config for config in configurations if config.id == configured.auth_config_id and config.toolkit == key),
             None,
@@ -114,6 +108,26 @@ class ComposioCatalog:
         return await self.resolve_auth_config(
             key, configured.auth_config_id, before_shared_setup, configurations=configurations
         )
+
+    async def _validate_setup(
+        self, key: str, setup: JsonObject, item: JsonObject, configurations: tuple[AuthConfiguration, ...]
+    ) -> ComposioSetup:
+        configured = ComposioSetup.model_validate(setup)
+        connector = connector_metadata(item, configurations)
+        if connector.unavailable_reason:
+            raise ConnectorProviderError("connector_setup_unavailable")
+        version = required_object(required_object(connector.setup_schema["properties"])["toolkit_version"])
+        if version["const"] != configured.toolkit_version:
+            # Current metadata may advance; prove the saved version still has matching definitions.
+            page = await ComposioToolCatalog(
+                self._http, self._api_key, key, provider_version=configured.toolkit_version
+            ).discover_tools(cursor=None)
+            if not page.items:
+                raise ConnectorProviderError("incompatible_toolkit_version")
+            version["const"] = configured.toolkit_version
+        if not Draft202012Validator(connector.setup_schema).is_valid(setup):
+            raise ConnectorProviderError("invalid_setup_options")
+        return configured
 
     async def _toolkit(self, key: str) -> JsonObject:
         item = required_object(
@@ -362,3 +376,125 @@ def _credential_schema(item: JsonObject, scheme: str) -> JsonObject:
                 if group == "required":
                     required.append(name)
     return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
+
+
+class ComposioToolCatalog:
+    """Read a toolkit's definitions without an external account binding."""
+
+    def __init__(
+        self,
+        http: ConnectorHttpClient,
+        api_key: str,
+        connector_key: str,
+        *,
+        provider_version: str | None = None,
+    ) -> None:
+        self._http = http
+        self._api_key = api_key
+        self._connector_key = connector_key
+        if provider_version is not None and TOOLKIT_VERSION.fullmatch(provider_version) is None:
+            raise ConnectorProviderError("incompatible_toolkit_version")
+        self._catalog_version = provider_version
+
+    async def discover_tools(self, *, cursor: str | None) -> ConnectorToolPage:
+        if self._catalog_version is None:
+            toolkit = required_object(
+                await self._http.request(
+                    "GET",
+                    endpoint=COMPOSIO_ENDPOINT,
+                    path=f"/api/v3.1/toolkits/{path_segment(self._connector_key)}",
+                    api_key=self._api_key,
+                )
+            )
+            if required_string(toolkit, "slug", max_length=128) != self._connector_key:
+                raise ConnectorProviderError("provider_mismatch")
+            version = required_string(required_object(toolkit.get("meta")), "version", max_length=128)
+            if TOOLKIT_VERSION.fullmatch(version) is None:
+                raise ConnectorProviderError("incompatible_toolkit_version")
+            self._catalog_version = version
+        version = self._catalog_version
+        params = {
+            "toolkit_slug": self._connector_key,
+            f"toolkit_versions[{self._connector_key}]": version,
+            "limit": "100",
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+        value = required_object(
+            await self._http.request(
+                "GET",
+                endpoint=COMPOSIO_ENDPOINT,
+                path="/api/v3.1/tools",
+                api_key=self._api_key,
+                params=params,
+            )
+        )
+        items = value.get("items")
+        if not isinstance(items, list) or len(items) > 100:
+            raise ConnectorProviderError("invalid_provider_response")
+        entries = [required_object(item) for item in items]
+        keys = [required_string(item, "slug", max_length=128) for item in entries]
+        if len(keys) != len(set(keys)):
+            raise ConnectorProviderError("invalid_provider_response")
+        tools: dict[str, ConnectorTool] = {}
+        limit = Semaphore(32)
+
+        async def load(key: str, entry: JsonObject) -> None:
+            # Current directory pages already carry complete, versioned schemas.
+            # Sparse directory entries still need the individual detail endpoint.
+            if {"toolkit", "version", "input_parameters", "output_parameters"} <= entry.keys():
+                tools[key] = parse_detail(key, entry)
+            else:
+                async with limit:
+                    tools[key] = await detail_for(key)
+
+        async def detail_for(key: str) -> ConnectorTool:
+            detail = required_object(
+                await self._http.request(
+                    "GET",
+                    endpoint=COMPOSIO_ENDPOINT,
+                    path=f"/api/v3.1/tools/{path_segment(key)}",
+                    api_key=self._api_key,
+                    params={"version": version},
+                )
+            )
+            return parse_detail(key, detail)
+
+        def parse_detail(key: str, detail: JsonObject) -> ConnectorTool:
+            if (
+                required_string(detail, "slug", max_length=128) != key
+                or required_string(required_object(detail.get("toolkit")), "slug", max_length=128)
+                != self._connector_key
+                or required_string(detail, "version", max_length=128) != version
+            ):
+                raise ConnectorProviderError("incompatible_tool_version")
+            return _tool(detail)
+
+        try:
+            async with create_task_group() as group:
+                for key, entry in zip(keys, entries, strict=True):
+                    group.start_soon(load, key, entry)
+        except* (ConnectorProviderError, ValueError) as failures:
+            raise failures.exceptions[0] from None
+        return ConnectorToolPage(
+            items=tuple(tools[key] for key in keys),
+            next_cursor=optional_string(value.get("next_cursor")),
+            provider_version=version,
+        )
+
+
+def _tool(value: JsonObject) -> ConnectorTool:
+    key = required_string(value, "slug", max_length=128)
+    version = required_string(value, "version", max_length=128)
+    return ConnectorTool(
+        provider_version=version,
+        key=key,
+        description=optional_string(value.get("description"), max_length=16_384) or "",
+        input_schema=required_object(value.get("input_parameters")),
+        output_schema=(
+            corrected_output_schema(required_object(value["output_parameters"]), tool_key=key, version=version)
+            if value.get("output_parameters") is not None
+            else None
+        ),
+        annotations={},
+    )

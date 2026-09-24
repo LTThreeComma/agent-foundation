@@ -7,7 +7,7 @@ import {
 } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
-import { data, workspaceHeaders } from "../../shared/api";
+import { data } from "../../shared/api";
 import { downloadBlob } from "../../shared/download";
 import { ErrorToast } from "../../shared/feedback";
 
@@ -34,10 +34,15 @@ export function archiveQuery(
       new Uint8Array(
         data(
           await client.http.GET(
-            "/api/v1/skill-revisions/{skill_revision_id}/content",
+            "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/revisions/{revision_id}/content",
             {
-              params: { path: { skill_revision_id: revision.id } },
-              headers: workspaceHeaders(revision.workspace_id),
+              params: {
+                path: {
+                  workspace_id: revision.workspace_id,
+                  skill_id: revision.skill_id,
+                  revision_id: revision.id,
+                },
+              },
               parseAs: "arrayBuffer",
               signal,
             },

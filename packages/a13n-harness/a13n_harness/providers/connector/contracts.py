@@ -48,6 +48,8 @@ class SetupStarted(StrictModel):
     redirect_url: str | None = Field(default=None, max_length=4096, repr=False)
     expires_at: datetime | None = None
     completion_method: SetupCompletionMethod
+    # Provider-resolved identity predicates the Host checks against inspection.safe_metadata.
+    expected_metadata: dict[str, str]
 
 
 class ConnectionInspection(StrictModel):
@@ -182,7 +184,7 @@ class ConnectorProviderRuntime(Protocol):
 
     async def inspect_setup(self, *, setup_ref: str, context: SetupContext) -> ConnectionInspection | None: ...
 
-    def tool_catalog(self, connector_key: str) -> ToolCatalog: ...
+    def tool_catalog(self, connector_key: str, *, provider_version: str | None = None) -> ToolCatalog: ...
 
     def connect(self, binding: ConnectionBinding) -> ConnectorConnectionRuntime: ...
 

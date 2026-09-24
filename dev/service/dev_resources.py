@@ -1,252 +1,229 @@
-"""Optional, machine-private resources for the local Service Workspace."""
+"""Machine-private resources (real credentials) applied to a seeded checkout through the public API.
+
+`~/.a13n/dev-resources.toml` is shared by every checkout on the machine; see `dev-resources.example.toml`.
+Providers are shared with the whole organization, identified by name; models by key; templates by name in the
+default workspace. Each checkout records a digest per applied provider, so unchanged values are not resent.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
 import stat
 import tomllib
+from collections import Counter
 from pathlib import Path
+from typing import Literal
 
-from a13n_harness.providers.authentication import CredentialMode
-from a13n_service.connectivity.connectors.domain import CreateConnectorProviderRequest
-from a13n_service.credentials import credential_payload
-from a13n_service.environments.domain import CreateProviderRequest, CreateTemplateRequest
-from a13n_service.models.domain import CreateModelProviderRequest, CreateModelRequest
-from a13n_service.models.providers import built_in_model_provider_catalog, validate_model_api
-from a13n_service.models.service_common import ModelError
-from a13n_service.web.domain import CreateWebProviderRequest
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
-DEFAULT_PATH = Path.home() / ".a13n/dev-resources.toml"
-MAX_BYTES = 65_536
+from dev.service.api import Api, Json
+from dev.service.checkout import ADMIN_EMAIL, ADMIN_PASSWORD, Checkout, write_private
+
+DEFAULT_FILE = Path.home() / ".a13n/dev-resources.toml"
+MAX_BYTES = 65536
+
+type Values = dict[str, JsonValue]
 
 
-class DevelopmentModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class _Entry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    key: str
+
+class ModelEntry(_Entry):
+    key: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,127}$")
     name: str
     upstream_model: str
+    # The provider type's first model API when omitted.
     model_api: str | None = None
     enabled: bool = True
 
 
-class DevelopmentProvider(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ProviderEntry(_Entry):
     type: str
     name: str
-    credential: dict[str, object] | None = Field(default=None, repr=False)
-    configuration: dict[str, object] = Field(default_factory=dict)
-    models: tuple[DevelopmentModel, ...]
+    configuration: Values = Field(default_factory=dict)
+    # Omitted for credential-free types; a blank value skips the provider and what depends on it.
+    credential: dict[str, str] | None = Field(default=None, repr=False)
 
 
-class DevelopmentWebProvider(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class ModelProviderEntry(ProviderEntry):
+    models: tuple[ModelEntry, ...] = ()
 
+
+class ConnectorProviderEntry(_Entry):
     type: str
     name: str
-    credential: dict[str, SecretStr]
-    configuration: dict[str, object] = Field(default_factory=dict)
+    configuration: Values = Field(default_factory=dict)
+    credentials: dict[str, str] = Field(repr=False)
 
 
-class DevelopmentEnvironmentProvider(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    type: str
-    name: str
-    configuration: dict[str, object] = Field(default_factory=dict)
-    credential: dict[str, SecretStr] = Field(default_factory=dict)
-
-
-class DevelopmentEnvironmentTemplate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class TemplateEntry(_Entry):
     name: str
     provider: str
-    configuration: dict[str, object]
-    preparation: str = "on_run"
+    # The template's recipe, validated by the provider type's environment schema.
+    configuration: Values
     stop_after: int | None = None
     delete_after: int | None = None
 
 
-class DevelopmentConnectorProvider(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class Resources(_Entry):
+    version: Literal[1]
+    model_providers: tuple[ModelProviderEntry, ...] = ()
+    web_providers: tuple[ProviderEntry, ...] = ()
+    environment_providers: tuple[ProviderEntry, ...] = ()
+    environment_templates: tuple[TemplateEntry, ...] = ()
+    connector_providers: tuple[ConnectorProviderEntry, ...] = ()
 
-    type: str
-    name: str
-    configuration: dict[str, object] = Field(default_factory=dict)
-    credentials: dict[str, SecretStr]
-
-
-class DevelopmentResources(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    version: int
-    model_providers: tuple[DevelopmentProvider, ...] = ()
-    web_providers: tuple[DevelopmentWebProvider, ...] = ()
-    environment_providers: tuple[DevelopmentEnvironmentProvider, ...] = ()
-    environment_templates: tuple[DevelopmentEnvironmentTemplate, ...] = ()
-    connector_providers: tuple[DevelopmentConnectorProvider, ...] = ()
+    @model_validator(mode="after")
+    def templates_name_providers(self) -> Resources:
+        names = {entry.name for entry in self.environment_providers}
+        if any(template.provider not in names for template in self.environment_templates):
+            raise ValueError("every environment template names an environment provider of this file")
+        return self
 
 
-def _revealed(values: dict[str, SecretStr]) -> dict[str, str]:
-    return {key: value.get_secret_value() for key, value in values.items()}
-
-
-def _filled(values: dict[str, SecretStr]) -> bool:
-    return bool(values) and all(value.get_secret_value().strip() for value in values.values())
-
-
-def _model_credential(provider: DevelopmentProvider) -> dict[str, object] | None:
-    value = provider.credential
-    if not value or any(isinstance(item, str) and not item.strip() for item in value.values()):
-        return None
-    definition = built_in_model_provider_catalog().require(provider.type)
-    return credential_payload(definition.credential_model.model_validate(value))
-
-
-def _model_requires_credential(provider: DevelopmentProvider) -> bool:
-    definition = built_in_model_provider_catalog().require(provider.type)
-    configuration = definition.configuration_model.model_validate(provider.configuration)
-    return definition.authentication.resolve(configuration) is CredentialMode.required
-
-
-def _active(resources: DevelopmentResources) -> bool:
-    unavailable = {
-        provider.name.casefold()
-        for provider in resources.environment_providers
-        if provider.credential and not _filled(provider.credential)
-    }
-    return bool(
-        any(
-            _model_credential(provider) or not _model_requires_credential(provider)
-            for provider in resources.model_providers
-        )
-        or any(_filled(provider.credential) for provider in resources.web_providers)
-        or any(provider.name.casefold() not in unavailable for provider in resources.environment_providers)
-        or any(template.provider.casefold() not in unavailable for template in resources.environment_templates)
-        or any(_filled(provider.credentials) for provider in resources.connector_providers)
-    )
-
-
-def load_resources(path: Path = DEFAULT_PATH) -> DevelopmentResources | None:
-    """Read only an owned private regular file; never echo its contents in errors."""
+def load(path: Path = DEFAULT_FILE) -> Resources | None:
+    """Read the file only when it is a regular file private to this user; errors never echo its contents."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
         return None
-    except OSError as error:
-        raise ValueError(f"Cannot open private development resources file: {path}") from error
-    try:
-        metadata = os.fstat(fd)
+    except OSError:
+        raise ValueError(f"{path} must be a regular file, not a symlink") from None
+    with os.fdopen(fd, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
-            raise ValueError(f"Development resources file must be regular and mode 0600: {path}")
-        if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-            raise ValueError(f"Development resources file must be owned by this user: {path}")
-        if metadata.st_size > MAX_BYTES:
-            raise ValueError(f"Development resources file is too large: {path}")
-        with os.fdopen(fd, "rb") as stream:
-            fd = -1
-            content = stream.read(MAX_BYTES + 1)
-    finally:
-        if fd >= 0:
-            os.close(fd)
+            raise ValueError(f"{path} must be a regular file with mode 0600")
+        if metadata.st_uid != os.getuid():
+            raise ValueError(f"{path} must be owned by this user")
+        content = stream.read(MAX_BYTES + 1)
     if len(content) > MAX_BYTES:
-        raise ValueError(f"Development resources file is too large: {path}")
+        raise ValueError(f"{path} exceeds {MAX_BYTES} bytes")
     try:
-        resources = DevelopmentResources.model_validate(tomllib.loads(content.decode("utf-8")))
-    except (UnicodeError, tomllib.TOMLDecodeError, ValidationError):
-        raise ValueError(f"Invalid development resources file: {path}") from None
-    if resources.version != 1:
-        raise ValueError(f"Unsupported development resources version: {path}")
-    registry = built_in_model_provider_catalog()
-    names: set[str] = set()
-    keys: set[str] = set()
-    for provider in resources.model_providers:
-        name = provider.name.casefold()
-        if name in names:
-            raise ValueError(f"Duplicate development Model Provider name: {path}")
-        names.add(name)
-        try:
-            definition = registry.require(provider.type)
-            CreateModelProviderRequest.model_validate(
-                {
-                    "type": provider.type,
-                    "name": provider.name,
-                    "credential": _model_credential(provider),
-                    "configuration": provider.configuration,
-                }
-            )
-            for model in provider.models:
-                api = model.model_api or definition.supported_model_apis[0]
-                validate_model_api(registry.require(provider.type), api)
-                CreateModelRequest.model_validate(
-                    {
-                        "key": model.key,
-                        "name": model.name,
-                        "provider_id": "mprov_00000000000000000000",
-                        "upstream_model": model.upstream_model,
-                        "model_api": api,
-                    }
-                )
-                key = model.key.casefold()
-                if key in keys:
-                    raise ValueError("duplicate key")
-                keys.add(key)
-        except (ModelError, ValueError, ValidationError):
-            raise ValueError(f"Invalid development Model Provider or Model: {path}") from None
-    for section in (
-        resources.web_providers,
-        resources.environment_providers,
-        resources.environment_templates,
-        resources.connector_providers,
-    ):
-        seen: set[str] = set()
-        for item in section:
-            name = item.name.casefold()
-            if name in seen:
-                raise ValueError(f"Duplicate development resource name: {path}")
-            seen.add(name)
-    try:
-        for provider in resources.web_providers:
-            CreateWebProviderRequest.model_validate(
-                {
-                    "type": provider.type,
-                    "name": provider.name,
-                    "configuration": provider.configuration,
-                    "credential": _revealed(provider.credential),
-                }
-            )
-        for provider in resources.environment_providers:
-            CreateProviderRequest.model_validate(
-                {
-                    "type": provider.type,
-                    "name": provider.name,
-                    "configuration": provider.configuration,
-                    "credential": _revealed(provider.credential) or None,
-                }
-            )
-        for template in resources.environment_templates:
-            CreateTemplateRequest.model_validate(
-                {
-                    "name": template.name,
-                    "provider_id": "eprov_00000000000000000000",
-                    "configuration": template.configuration,
-                    "preparation": template.preparation,
-                    "retention": {"idle": {"stop_after": template.stop_after, "delete_after": template.delete_after}},
-                }
-            )
-        for provider in resources.connector_providers:
-            if _filled(provider.credentials):
-                CreateConnectorProviderRequest.model_validate(
-                    {
-                        "type": provider.type,
-                        "name": provider.name,
-                        "configuration": provider.configuration,
-                        "credentials": _revealed(provider.credentials),
-                    }
-                )
-    except (ValueError, ValidationError):
-        raise ValueError(f"Invalid development resource: {path}") from None
-    return resources
+        return Resources.model_validate(tomllib.loads(content.decode()))
+    except (UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise ValueError(f"{path} is not valid TOML: {type(error).__name__}") from None
+    except ValidationError as error:
+        # Pydantic keeps rejected input out of `loc` and `msg`, so credentials are never echoed.
+        problems = "; ".join(f"{'.'.join(map(str, item['loc'])) or 'file'}: {item['msg']}" for item in error.errors())
+        raise ValueError(f"{path} is invalid: {problems}") from None
+
+
+def filled(credential: dict[str, str] | None) -> bool:
+    return credential is None or all(value.strip() for value in credential.values())
+
+
+def _provider_body(entry: ProviderEntry | ConnectorProviderEntry) -> Json:
+    credential = entry.credentials if isinstance(entry, ConnectorProviderEntry) else entry.credential
+    return {"type": entry.type, "name": entry.name, "config": entry.configuration, "credential": credential}
+
+
+class Applied:
+    """Digests of provider bodies already applied, per checkout; the file holds no credential."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.digests: dict[str, str] = json.loads(path.read_text()) if path.exists() else {}
+
+    @staticmethod
+    def digest(body: Json) -> str:
+        return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+    def save(self) -> None:
+        write_private(self.path, json.dumps(self.digests, indent=2, sort_keys=True) + "\n")
+
+
+def apply_to(checkout: Checkout, path: Path = DEFAULT_FILE) -> str | None:
+    """Apply the private file to a seeded checkout's running Service; a summary, or None when nothing applies."""
+    if not checkout.seed_report.exists() or (resources := load(path)) is None:
+        return None
+    with Api(checkout.service_url) as api:
+        api.login(ADMIN_EMAIL, ADMIN_PASSWORD)
+        counts = apply(api, resources, Applied(checkout.state / "dev-resources.json"))
+    return ", ".join(f"{count} {kind}" for kind, count in counts.items() if count) or "no entry has a filled credential"
+
+
+def apply(api: Api, resources: Resources, applied: Applied) -> Counter[str]:
+    """Create or update every entry whose credential is filled; returns how many of each kind are in place."""
+    # By key: the seeded state holds several workspaces, listed in ID order.
+    workspace = api.get("/api/v1/workspaces/default")
+    org, ws = f"/api/v1/organizations/{workspace['organization_id']}", f"/api/v1/workspaces/{workspace['id']}"
+    counts: Counter[str] = Counter()
+    model_apis = {item["type"]: item["model_apis"] for item in api.items("/api/v1/provider-types/model")}
+    models = {model["key"]: model for model in api.items(f"{org}/models")}
+    for entry in resources.model_providers:
+        if filled(entry.credential):
+            provider = _apply_provider(api, org, "model-providers", _provider_body(entry), applied)
+            for model in entry.models:
+                _apply_model(api, org, provider, model, model_apis[entry.type][0], models.get(model.key))
+            counts.update({"model providers": 1, "models": len(entry.models)})
+    for entry in resources.web_providers:
+        if filled(entry.credential):
+            _apply_provider(api, org, "web-providers", _provider_body(entry), applied)
+            counts["web providers"] += 1
+    environment_providers = {
+        entry.name: _apply_provider(api, org, "environment-providers", _provider_body(entry), applied)
+        for entry in resources.environment_providers
+        if filled(entry.credential)
+    }
+    counts["environment providers"] += len(environment_providers)
+    templates = {template["name"]: template for template in api.items(f"{ws}/environment-templates")}
+    for entry in resources.environment_templates:
+        if provider := environment_providers.get(entry.provider):
+            _apply_template(api, ws, provider, entry, templates.get(entry.name))
+            counts["environment templates"] += 1
+    for entry in resources.connector_providers:
+        if filled(entry.credentials):
+            _apply_provider(api, org, "connector-providers", _provider_body(entry), applied)
+            counts["connector providers"] += 1
+    return counts
+
+
+def _apply_model(api: Api, org: str, provider: Json, entry: ModelEntry, default_api: str, current: Json | None) -> None:
+    config = {"model_name": entry.upstream_model, "model_api": entry.model_api or default_api}
+    if current is None:
+        body = {"workspace_id": None, "provider_id": provider["id"], "key": entry.key, "name": entry.name}
+        current = api.post(f"{org}/models", {**body, "config": config})
+    elif current["provider_id"] != provider["id"]:
+        raise ValueError(f"Model key {entry.key} belongs to another provider")
+    applied = (current["name"], current["enabled"], {key: current["config"][key] for key in config})
+    if applied != (entry.name, entry.enabled, config):
+        api.patch(
+            f"{org}/models/{current['id']}", current, {"name": entry.name, "config": config, "enabled": entry.enabled}
+        )
+
+
+def _apply_template(api: Api, ws: str, provider: Json, entry: TemplateEntry, current: Json | None) -> None:
+    lifetimes = {"stop_after_seconds": entry.stop_after, "delete_after_seconds": entry.delete_after}
+    config = {"recipe": entry.configuration, **{key: value for key, value in lifetimes.items() if value is not None}}
+    desired = {"name": entry.name, "provider_id": provider["id"], "config": config}
+    if current is None:
+        api.post(f"{ws}/environment-templates", {"key": _key(entry.name), **desired})
+    elif current["provider_id"] != provider["id"] or any(current["config"][key] != config[key] for key in config):
+        api.patch(f"{ws}/environment-templates/{current['id']}", current, desired)
+
+
+def _apply_provider(api: Api, org: str, kind: str, body: Json, applied: Applied) -> Json:
+    """The organization-wide provider named in `body`, created or updated to match it."""
+    current = next(
+        (item for item in api.items(f"{org}/{kind}") if item["workspace_id"] is None and item["name"] == body["name"]),
+        None,
+    )
+    marker, digest = f"{kind}:{body['name']}", Applied.digest(body)
+    if current is None:
+        current = api.post(f"{org}/{kind}", {"workspace_id": None, **body})
+    elif current["type"] != body["type"]:
+        raise ValueError(f"The existing {kind} {body['name']} has type {current['type']}, not {body['type']}")
+    elif applied.digests.get(marker) != digest:
+        update = {"config": body["config"], "credential": body["credential"], "enabled": True}
+        current = api.patch(f"{org}/{kind}/{current['id']}", current, update)
+    applied.digests[marker] = digest
+    applied.save()
+    return current
+
+
+def _key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:128] or "template"

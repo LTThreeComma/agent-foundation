@@ -12,7 +12,7 @@ export function useMCPServers(search = "", enabled = true) {
       allPages((cursor) =>
         client.http
           .GET("/api/v1/mcp-servers", {
-            params: { query: { query: search, limit: 200, cursor } },
+            params: { query: { query: search, limit: 100, cursor } },
             signal,
           })
           .then(data),

@@ -120,7 +120,7 @@ bindings = RunBindings.embedded(
 
 The run provider has higher precedence than all default environment model keys. Use it for a Host-owned model resolver, custom credentials, an existing provider client, or specialized analysis behavior. It does not change native capability declarations.
 
-`AgentMediaUnderstandingProvider` is also public for code-first construction with explicit Pydantic AI `Model` instances or model strings.
+`AgentMediaUnderstandingProvider` is also public for code-first construction with explicit Pydantic AI `Model` instances or model strings. A Host that resolved a `Model` instance from its own model ID passes that ID per kind in `model_ids`; the kind's understanding requests carry it as their `ModelCall.model_id` and the selected model ID of their pricing input, so the Host can admit, attribute and price them as that model.
 
 ## Usage and failures
 

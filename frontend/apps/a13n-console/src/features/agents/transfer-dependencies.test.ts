@@ -6,6 +6,8 @@ import {
   inspectAgentDependencies,
 } from "./transfer-dependencies";
 
+const signal = new AbortController().signal;
+
 function clientFor(read: (url: URL) => object) {
   const fetch = vi.fn<typeof globalThis.fetch>(
     async (input, init) =>
@@ -34,25 +36,46 @@ it("checks every catalog page and retains an unavailable pinned version", async 
       };
     if (url.pathname.endsWith("/skills"))
       return { items: [{ id: "sk_local", key: "sources", name: "Sources" }] };
-    if (url.pathname.endsWith("/revisions")) return { items: [{ version: 1 }] };
+    if (url.pathname.endsWith("/revisions"))
+      return { items: [{ id: "skr_other", number: 1 }] };
     if (url.searchParams.has("cursor"))
       return {
-        items: [{ id: "conn_available", name: "Local", status: "ready" }],
+        items: [
+          {
+            id: "conn_available",
+            name: "Local",
+            status: "ready",
+            enabled: true,
+          },
+        ],
       };
     return {
-      items: [{ id: "conn_disabled", name: "Disabled", status: "disabled" }],
+      items: [
+        {
+          id: "conn_disabled",
+          name: "Disabled",
+          status: "ready",
+          enabled: false,
+        },
+      ],
       next_cursor: "next",
     };
   });
-  const checks = await inspectAgentDependencies(client, "ws_target", {
-    ...initialConfig("Research"),
-    model: { model_key: "research" },
-    skills: [{ skill_key: "sources", version: 3 }],
-    connection_tools: [
-      { connection_id: "conn_available" },
-      { connection_id: "conn_missing" },
-    ],
-  });
+  const checks = await inspectAgentDependencies(
+    client,
+    "org_target",
+    "ws_target",
+    {
+      ...initialConfig(),
+      model: { model_id: "mdl_local" },
+      skills: [{ skill_id: "sk_local", revision_id: "skr_pinned" }],
+      connection_tools: [
+        { connection_id: "conn_available" },
+        { connection_id: "conn_missing" },
+      ],
+    },
+    signal,
+  );
   expect(checks.map((item) => item.available)).toEqual([
     true,
     false,
@@ -68,12 +91,9 @@ it("checks every catalog page and retains an unavailable pinned version", async 
       new URL(new Request(request).url).pathname.endsWith("/connections"),
     ),
   ).toHaveLength(2);
-  expect(
-    fetch.mock.calls.every(
-      ([request]) =>
-        new Request(request).headers.get("X-A13N-Workspace-ID") === "ws_target",
-    ),
-  ).toBe(true);
+  const models = new URL(new Request(fetch.mock.calls[0]![0]).url);
+  expect(models.pathname).toBe("/api/v1/organizations/org_target/models");
+  expect(models.searchParams.get("workspace_id")).toBe("ws_target");
 });
 
 it("only queries dependency kinds actually selected by the configuration", async () => {
@@ -82,15 +102,18 @@ it("only queries dependency kinds actually selected by the configuration", async
       { id: "mdl_local", key: "research", name: "Research", enabled: true },
     ],
   }));
-  const checks = await inspectAgentDependencies(client, "ws_target", {
-    ...initialConfig("Research"),
-    model: { model_key: "research" },
-  });
+  const checks = await inspectAgentDependencies(
+    client,
+    "org_target",
+    "ws_target",
+    { ...initialConfig(), model: { model_id: "mdl_local" } },
+    signal,
+  );
   expect(checks[0]?.available).toBe(true);
   expect(fetch).toHaveBeenCalledOnce();
 });
 
-it("preserves historical dedicated-environment revisions that remain visible", async () => {
+it("checks dedicated child environments against the same template catalog", async () => {
   const { client, fetch } = clientFor((url) => {
     if (url.pathname.endsWith("/models"))
       return {
@@ -99,46 +122,34 @@ it("preserves historical dedicated-environment revisions that remain visible", a
         ],
       };
     if (url.pathname.endsWith("/agents"))
-      return {
-        items: [
-          { id: "ap_child", key: "helper", name: "Helper", enabled: true },
-        ],
-      };
-    if (url.pathname.endsWith("/environment-templates"))
-      return {
-        items: [
-          {
-            id: "et_local",
-            name: "Sandbox",
-            version: 2,
-            default_revision_id: "etr_new",
-          },
-        ],
-      };
-    return { id: "etr_old", template_id: "et_local", version: 1 };
+      return { items: [{ id: "ap_child", key: "helper", name: "Helper" }] };
+    return {
+      items: [{ id: "et_local", name: "Sandbox", enabled: true }],
+    };
   });
-  const checks = await inspectAgentDependencies(client, "ws_target", {
-    ...initialConfig("Research"),
-    model: { model_key: "research" },
-    default_environment_template_id: "et_local",
-    subagents: {
-      helper: {
-        agent_id: "ap_child",
-        environment: { mode: "dedicated", template_revision_id: "etr_old" },
+  const checks = await inspectAgentDependencies(
+    client,
+    "org_target",
+    "ws_target",
+    {
+      ...initialConfig(),
+      model: { model_id: "mdl_local" },
+      default_environment_template_id: "et_local",
+      subagents: {
+        helper: {
+          agent_id: "ap_child",
+          environment: { mode: "dedicated", template_id: "et_local" },
+        },
       },
     },
-  });
+    signal,
+  );
   expect(checks.every((item) => item.available)).toBe(true);
   expect(
     checks
-      .find((item) => item.path === "default_environment_template_id")
+      .find((item) => item.path === "subagents.helper.environment.template_id")
       ?.options.map((item) => item.value),
   ).toEqual(["et_local"]);
-  expect(
-    checks
-      .find((item) => item.path.endsWith("template_revision_id"))
-      ?.options.map((item) => item.value),
-  ).toEqual(["etr_new", "etr_old"]);
   expect(
     fetch.mock.calls.filter(([request]) =>
       new URL(new Request(request).url).pathname.endsWith(
@@ -156,24 +167,21 @@ it("blocks an unavailable root template and remaps only its identity", async () 
           { id: "mdl_local", key: "research", name: "Research", enabled: true },
         ],
       };
-    return {
-      items: [
-        {
-          id: "et_local",
-          name: "Sandbox",
-          version: 2,
-          default_revision_id: "etr_local",
-        },
-      ],
-    };
+    return { items: [{ id: "et_local", name: "Sandbox", enabled: true }] };
   });
   const config = {
-    ...initialConfig("Research"),
-    model: { model_key: "research" },
+    ...initialConfig(),
+    model: { model_id: "mdl_local" },
     default_environment_template_id: "et_source",
     retries: { tools: 2, output: 1 },
   };
-  const checks = await inspectAgentDependencies(client, "ws_target", config);
+  const checks = await inspectAgentDependencies(
+    client,
+    "org_target",
+    "ws_target",
+    config,
+    signal,
+  );
   const root = checks.find(
     (item) => item.path === "default_environment_template_id",
   );
@@ -217,20 +225,26 @@ it("checks search and scrape against the shared Web Provider catalog", async () 
       };
     throw new Error(`Unexpected catalog: ${url.pathname}`);
   });
-  const checks = await inspectAgentDependencies(client, "ws_target", {
-    ...initialConfig("Research"),
-    model: { model_key: "research" },
-    toolsets: {
-      web: {
-        enabled: true,
-        tools: {
-          search: { config: { provider_id: "wprov_ready" } },
-          scrape: { config: { provider_id: "wprov_disabled" } },
-          fetch: { enabled: true },
+  const checks = await inspectAgentDependencies(
+    client,
+    "org_target",
+    "ws_target",
+    {
+      ...initialConfig(),
+      model: { model_id: "mdl_local" },
+      toolsets: {
+        web: {
+          enabled: true,
+          tools: {
+            search: { config: { provider_id: "wprov_ready" } },
+            scrape: { config: { provider_id: "wprov_disabled" } },
+            fetch: { enabled: true },
+          },
         },
       },
     },
-  });
+    signal,
+  );
   expect(checks.map(({ available }) => available)).toEqual([true, true, false]);
   expect(checks[2]?.options.map(({ value }) => value)).toEqual(["wprov_ready"]);
   expect(
@@ -240,66 +254,15 @@ it("checks search and scrape against the shared Web Provider catalog", async () 
   ).toHaveLength(1);
 });
 
-it("checks and remaps memory providers without replacing behavior options", async () => {
-  const { client } = clientFor((url) =>
-    url.pathname.endsWith("/models")
-      ? {
-          items: [
-            {
-              id: "mdl_local",
-              key: "research",
-              name: "Research",
-              enabled: true,
-            },
-          ],
-        }
-      : {
-          items: [
-            {
-              id: "memprov_ready",
-              name: "Team",
-              type: "custom.memory",
-              enabled: true,
-              credential_configured: true,
-            },
-            {
-              id: "memprov_disabled",
-              name: "Old",
-              type: "custom.memory",
-              enabled: false,
-              credential_configured: true,
-            },
-          ],
-        },
-  );
+it("lists every selected media model and remaps one kind at a time", () => {
   const config = {
-    ...initialConfig("Research"),
-    model: { model_key: "research" },
-    memory: {
-      provider_id: "memprov_missing",
-      scope: "agent" as const,
-      auto_recall: false,
-      recall_limit: 7,
+    ...initialConfig(),
+    model: { model_id: "mdl_primary" },
+    media_understanding: {
+      image: "mdl_vision",
+      video: null,
+      audio: "mdl_speech",
     },
-  };
-  const checks = await inspectAgentDependencies(client, "ws_target", config);
-  const memory = checks.find((item) => item.path === "memory.provider_id");
-  expect(memory?.available).toBe(false);
-  expect(memory?.options.map((item) => item.value)).toEqual(["memprov_ready"]);
-  const replaced = agentDependencies(config)
-    .find((item) => item.kind === "memory")!
-    .replace("memprov_ready");
-  expect(replaced.memory).toEqual({
-    ...config.memory,
-    provider_id: "memprov_ready",
-  });
-});
-
-it("lists every selected media model key and remaps one kind at a time", () => {
-  const config = {
-    ...initialConfig("Media"),
-    model: { model_key: "primary" },
-    media_understanding: { image: "vision", video: null, audio: "speech" },
   };
   const refs = agentDependencies(config);
   expect(
@@ -308,18 +271,52 @@ it("lists every selected media model key and remaps one kind at a time", () => {
     expect.objectContaining({
       path: "media_understanding.image",
       kind: "model",
-      value: "vision",
+      value: "mdl_vision",
     }),
     expect.objectContaining({
       path: "media_understanding.audio",
       kind: "model",
-      value: "speech",
+      value: "mdl_speech",
     }),
   ]);
   const image = refs.find((ref) => ref.path === "media_understanding.image")!;
-  expect(image.replace("eyes").media_understanding).toEqual({
-    image: "eyes",
+  expect(image.replace("mdl_eyes").media_understanding).toEqual({
+    image: "mdl_eyes",
     video: null,
-    audio: "speech",
+    audio: "mdl_speech",
   });
+});
+
+it("checks the reviewer and media models against the workspace's enabled models", async () => {
+  const { client, fetch } = clientFor(() => ({
+    items: [
+      { id: "mdl_primary", key: "primary", name: "Primary", enabled: true },
+      { id: "mdl_vision", key: "vision", name: "Vision", enabled: true },
+      { id: "mdl_judge", key: "judge", name: "Judge", enabled: false },
+    ],
+  }));
+  const checks = await inspectAgentDependencies(
+    client,
+    "org_target",
+    "ws_target",
+    {
+      ...initialConfig(),
+      model: { model_id: "mdl_primary" },
+      media_understanding: { image: "mdl_vision", audio: "mdl_missing" },
+      reviewer: { model: "mdl_judge" },
+    },
+    signal,
+  );
+  expect(checks.map(({ path, available }) => ({ path, available }))).toEqual([
+    { path: "model.model_id", available: true },
+    { path: "media_understanding.image", available: true },
+    { path: "media_understanding.audio", available: false },
+    { path: "reviewer.model", available: false },
+  ]);
+  expect(checks[3]?.options.map((option) => option.value)).toEqual([
+    "mdl_primary",
+    "mdl_vision",
+  ]);
+  // One model catalog read serves every model reference.
+  expect(fetch).toHaveBeenCalledOnce();
 });

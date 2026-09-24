@@ -38,11 +38,13 @@ make install
 
 The frontend pnpm workspace lives under `frontend/`: applications in `frontend/apps/` and shared UI source in `frontend/packages/`. `frontend/package.json` pins pnpm; install that version before running `make install`. Service SDK development uses the separate repositories' own setup instructions.
 
-Local Service development uses the explicit, public test configuration in `dev/service/local.toml`. `make dev` prepares local PostgreSQL, Redis and Langfuse, applies migrations, and launches Service and Console; no `.env` or manual trace credentials are required. See [the local Service guide](dev/service/README.md) for startup, storage ownership, reset baselines, and fictional login credentials. Service does not automatically load `.env`; environment variables remain available as explicit deployment overrides. `dev/harness/.env.example` and `dev/harness-ui/.env.example` provide separate Langfuse-first development profiles with commented Logfire alternatives. `make harness-dev`, `make cli`, `make webui`, and `make harness-ui-smoke` automatically copy a missing `.env` from its sibling `.env.example`, leaving existing private files unchanged even when templates are newer. Use `make env-init` to prepare both files without starting an application. `HARNESS_ENV` and `HARNESS_UI_ENV` select alternate files; a missing alternate file requires its own sibling `<path>.example` rather than silently falling back to the repository defaults. See the [Harness](dev/harness/README.md) and [Harness UI](dev/harness-ui/README.md) development guides. `.env.harness.example` remains optional reference material for other embedded Harness workflows. Existing examples and live-test targets load private environment files only at their explicit launcher boundaries.
+`make dev` runs this checkout's Service, scripted model and Console on its own PostgreSQL and Redis and prints the Console URL and local sign-in; `make dev-reset STATE=seeded` adds representative content. See [the local Service guide](dev/service/README.md) for commands, isolation, seeding and private development resources. Service does not automatically load `.env`; deployments override settings with `A13N_` sectioned variables, which local development keeps away from its Service. Local traces go to the machine-shared Langfuse (`make langfuse-up`) whenever it runs.
+
+`dev/harness/.env.example` and `dev/harness-ui/.env.example` provide separate Langfuse-first development profiles with commented Logfire alternatives. `make harness-dev`, `make cli`, `make webui`, and `make harness-ui-smoke` automatically copy a missing `.env` from its sibling `.env.example`, leaving existing private files unchanged even when templates are newer. Use `make env-init` to prepare both files without starting an application. `HARNESS_ENV` and `HARNESS_UI_ENV` select alternate files; a missing alternate file requires its own sibling `<path>.example` rather than silently falling back to the repository defaults. See the [Harness](dev/harness/README.md) and [Harness UI](dev/harness-ui/README.md) development guides. `.env.harness.example` remains optional reference material for other embedded Harness workflows. Existing examples and live-test targets load private environment files only at their explicit launcher boundaries.
 
 The repository selects Python 3.13 through `.python-version`. Python packages are uv workspace members under `packages/`; Rust crates under `crates/` are validated by the same top-level merge gate.
 
-For concurrent Service worktrees, the development resolver assigns stable checkout-specific loopback ports and isolated stores while reusing one machine-owned Langfuse stack. Use `make dev-status` to discover URLs; do not assume committed template ports. The [local Service guide](dev/service/README.md) owns lifecycle and recovery details.
+For concurrent Service worktrees, the development resolver assigns stable checkout-specific loopback ports, a Console host name and isolated stores while reusing one machine-owned Langfuse stack. Use `make dev-status` to discover URLs; do not assume fixed ports. The [local Service guide](dev/service/README.md) owns lifecycle and recovery details.
 
 ## Engineering Standards
 
@@ -53,7 +55,7 @@ Apply [Code Quality and Design](DEVELOPMENT.md#code-quality-and-design) when imp
 - database sessions never span streams, agent runs, external calls, waits, or background-task boundaries;
 - streaming FastAPI routes complete database-backed authentication and initial reads before constructing the response;
 - logging, process lifespan, role selection, image construction, and graceful shutdown use shared service infrastructure;
-- `a13n-service` uses one artifact for all-in-one, control, worker, and connector deployment roles.
+- `a13n-service` uses one artifact for all-in-one, control and worker deployment roles.
 
 Keep transport handling, application orchestration, domain behavior, and infrastructure adapters separated. Update the accepted design in `spec/` when a change alters ownership, lifecycle, compatibility, security, or deployment semantics; do not use the development guide to introduce product architecture implicitly.
 
@@ -73,16 +75,16 @@ Use the Makefile as the stable development interface:
 | -------------------------------- | ------------------------------------------------------------------ |
 | `make help`                      | List available commands                                            |
 | `make install`                   | Synchronize locked workspace and application dependencies          |
-| `make setup`                     | Prepare this checkout's stores, shared Langfuse and Service schema |
-| `make dev`                       | Upgrade the schema and start Service and Console in the background |
-| `make dev-foreground`            | Force Service and Console to remain attached to this terminal      |
-| `make dev-stop`                  | Stop Service and Console started by a detached `make dev`          |
+| `make setup`                     | Prepare this checkout's stores, schema and local administrator     |
+| `make dev`                       | Prepare and start the model, Service and Console in the background |
+| `make dev-foreground`            | Run the same applications attached to this terminal                |
+| `make dev-stop`                  | Stop this checkout's running applications                          |
 | `make service-dev`               | Run only local Service and the scripted development model          |
 | `make dev-reset STATE=empty`     | Rebuild owned Service storage with no business data                |
 | `make dev-reset STATE=seeded`    | Rebuild owned Service storage with fictional resources and history |
-| `make dev-state-check`           | Validate state tools with disposable local infrastructure          |
+| `make dev-state-check`           | Check local development tools; seed a disposable instance          |
 | `make dev-status`                | Report this checkout's identity, ports and listener state as JSON  |
-| `make dev-env-list`              | List worktrees and their local test environments                   |
+| `make dev-env-list`              | List this machine's checkouts and their local instances            |
 | `make dev-down`                  | Stop this checkout's infrastructure; preserve data and Langfuse    |
 | `make env-init`                  | Initialize missing Harness development `.env` files                |
 | `make cli`                       | Run Harness UI with Git-ignored config/data in `var/harness-ui/`   |
@@ -138,7 +140,7 @@ Use `make format` for formatting alone; `make check` applies the same formatters
 
 The Markdown hook runs `uv run --locked mdformat`, sharing the repository's Python environment and locked formatter plugins with direct Make checks. Keep `uv` on PATH; activating `.venv` or wrapping `git commit` in `uv run` is unnecessary. Formatter dependencies belong in `pyproject.toml` and `uv.lock`, not a separate hook environment. The shared `.mdformat.toml` exclusion requires Python 3.13 or newer.
 
-`a13n-service` integration tests use fixture-owned Testcontainers. Application `A13N_SERVICE_*` variables never select test infrastructure. Loopback SSE and fixture-owned S3 clients bypass ambient proxies.
+`a13n-service` integration tests use fixture-owned Testcontainers. Application `A13N_*` variables never select test infrastructure. Loopback SSE and fixture-owned S3 clients bypass ambient proxies.
 
 Testcontainers is pinned to 4.13.1 because 4.15.0 can read Ryuk port mappings before Docker publishes them; upgrades must verify mapped-port startup with Ryuk enabled. Unreturned SQL connections, unhandled thread exceptions, and unraisable exceptions fail the test gate.
 
@@ -148,7 +150,7 @@ UI Tests runs the Linux suite with seven file-grouped workers on an eight-core r
 
 a13n-envd CI runs protocol verification and the native daemon platform matrix in parallel after path classification. The `a13n-envd checks` job requires every selected protocol, client, and daemon check to succeed; unselected checks may be skipped.
 
-Live Tests CI runs 34 reviewed Service/Harness smoke journeys in three parallel matrix jobs, each with job-owned PostgreSQL, Redis and RustFS services. Core uses two pytest workers with independent labs; Queue/IAM and Management each use one. Cases within each pytest worker reuse its lab and run serially; fault and native Environment matrices remain manual. Use `make live-test-ci suite=<name>` to run a reviewed selection, `make live-test-ci-environment-build` to prepare native Environment inputs, and `make live-test-check` to validate fixture support without live infrastructure. The default `docker` mode owns disposable infrastructure containers; explicit `external` mode connects to prepared test services and creates isolated databases and buckets. The [live-test guide](dev/live_tests/README.md#ci-smoke-suite) owns the automatic selection, infrastructure configuration, opt-ins, exclusions and expected capability skips.
+Live Tests CI builds the native Docker execution image and runs every Service live journey with `--require-all`, so a journey whose dependency is missing fails instead of skipping; it then reports the collected, executed and skipped journeys. Each journey starts its own Control and two Workers through the installed CLI against disposable PostgreSQL, Redis and object stores. Run `make live-test` locally with Docker, `make docker-provider-live-test` for the native Docker environment journey, and `make live-test-check` to check fixtures, configuration and journey selection without Docker. The [live-test guide](dev/live_tests/README.md) owns the journeys and their dependencies.
 
 Select directories, files, or pytest node IDs with `PYTHON_TEST_DIRS`. Paths in the same package run in one pytest process; packages run separately in first-selected order, stopping on failure. Without a selection, all workspace suites run. Use `PYTHON_TEST_WORKERS` to override concurrency, including `0` for a small serial reproduction:
 
@@ -214,7 +216,7 @@ a13n Service releases use `release/a13n-service-v<version>`. The workflow versio
 
 a13n-envd releases use `release/a13n-envd-v<version>`. The workflow versions the Cargo workspace, `a13n-envd-client`, and their lock files with one canonical release identity. It builds the Python wheel and source distribution concurrently with Linux GNU and macOS tar archives plus Windows x64 and ARM64 ZIP archives. After every distribution and the crate package validate, the workflow creates the GitHub Release with the Python distributions, native archives, and `SHA256SUMS`, before publishing `a13n-envd-client` to PyPI with `PYPI_TOKEN` from the `agent-envd-client-pypi` environment. Crate publication uses `CARGO_REGISTRY_TOKEN` from `agent-envd-crates-io` and is independent of client publication. The sandbox image publishes only after both registry jobs succeed. Release retries use the published version to skip existing releases; they do not compare rebuilt native or crate bytes. Standalone installers own archive SHA verification using the published `SHA256SUMS` file. A visible GitHub Release proves native assets are available, not that registry or image publication completed. Successful completion of the overall workflow is the all-channel completion signal. Linux binaries target the current GitHub-hosted Ubuntu/glibc baseline; use the sandbox image when a fixed userspace is required.
 
-Service SDKs and the remote CLI release from their independent repositories, not from tags in this repository. Follow the owning repository's contributor and release guides linked from [Service SDKs](docs/a13n-service/sdks.md).
+Service SDKs and the remote CLI release from their independent repositories, not from tags in this repository. Follow the owning repository's contributor and release guides; the [Service overview](docs/a13n-service/index.md) links to them.
 
 An RC publishes the same registry and downloadable artifact set as its corresponding stable channel and creates a GitHub prerelease. A stable release creates a normal GitHub Release. Pushing the component tag also generates its changelog automatically from Git history: only commits affecting that component's paths are included, with one entry per first-parent merge or direct commit. [PR labels](#pr-labels) determine categories and exclusions, with a Conventional Commit fallback for historical unlabelled PRs and direct commits. Comparison bases come from the same channel and must be ancestors of the release tag: an RC uses an earlier RC for the same target, otherwise the preceding stable release; a stable release uses the preceding stable release. The Full Changelog link is explicitly a repository-wide comparison. Optional reviewed notes at `.github/release-notes/<component>/<version>.md` add highlights or upgrade instructions, without introducing a required release step. See [the release-notes guide](.github/release-notes/README.md) for scope details and read-only preview.
 
@@ -230,7 +232,7 @@ Do not create Alembic revision files manually or autogenerate against an existin
 make db-migrate msg="describe the schema change"
 ```
 
-The target starts the local PostgreSQL service when needed, rebuilds schema history in a disposable database, autogenerates and formats the revision, and removes the temporary database. Review the generated migration rather than treating a clean model diff as proof of safety. The complete model-import and verification flow is documented in [packages/a13n-service/README.md](packages/a13n-service/README.md#add-an-orm-model).
+The target starts the local PostgreSQL service when needed, rebuilds schema history in a disposable database, autogenerates and formats the revision, and removes the temporary database. Review the generated migration rather than treating a clean model diff as proof of safety. A new table belongs in its package's `tables.py`, declares its trigger rules there and is registered in the distribution's `tables` ([Service layout](spec/a13n-service/02-layout.md)); the migration environment renders those rules into the revision.
 
 A schema-change pull request must explain lock duration, scans or rewrites, rolling old/new compatibility, index strategy, bounded backfill, interruption and rerun behavior, and rollback or forward repair. Prefer additive expand-and-contract changes. The shared image auto-migrates `all` and `control` replicas under advisory locking; deployments with a dedicated migration job disable replica auto migration. Worker-only processes never migrate.
 

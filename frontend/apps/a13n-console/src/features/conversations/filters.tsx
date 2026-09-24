@@ -35,20 +35,18 @@ const statuses: Schema["RunStatus"][] = [
   "failed",
   "cancelled",
 ];
-const triggers = [
-  "user_input",
-  "feedback",
-  "queued_submission",
-  "inbound",
-  "async_subagent",
-  "async_subagent_resume",
-  "async_subagent_result",
+const triggers: Schema["Trigger"][] = [
+  "input",
+  "queued",
+  "resume",
+  "child_result",
+  "spawned",
 ];
 const keys = [
   "q",
   "agent_id",
   "status",
-  "trigger_type",
+  "trigger",
   "updated_after",
   "updated_before",
 ];
@@ -57,11 +55,18 @@ export function readSessionFilters(search: URLSearchParams): SessionFilters {
   return {
     q: search.get("q")?.trim() || undefined,
     agent_id: search.get("agent_id") || undefined,
-    status: search.getAll("status") as Schema["RunStatus"][],
-    trigger_type: search.getAll("trigger_type"),
+    status: known(search.getAll("status"), statuses),
+    trigger: known(search.getAll("trigger"), triggers),
     updated_after: search.get("updated_after") || undefined,
     updated_before: search.get("updated_before") || undefined,
   };
+}
+
+/** URL values restricted to the filter's known options. */
+function known<T extends string>(values: string[], options: T[]): T[] {
+  return values.filter((value): value is T =>
+    options.some((option) => option === value),
+  );
 }
 
 export function SessionFilterBar({
@@ -79,15 +84,15 @@ export function SessionFilterBar({
   useEffect(() => setQuery(committedQuery), [committedQuery]);
   const agents = useQuery({
     queryKey: ["session-filter-agents", workspace.id],
-    enabled: can("agent.read"),
+    enabled: can("read"),
     staleTime: 60_000,
     queryFn: ({ signal }) =>
       allPages((cursor) =>
         client.http
-          .GET("/api/v1/workspaces/{workspace}/agents", {
+          .GET("/api/v1/workspaces/{workspace_id}/agents", {
             params: {
-              path: { workspace: workspace.id },
-              query: { cursor, limit: 100, include_archived: true },
+              path: { workspace_id: workspace.id },
+              query: { cursor, limit: 100 },
             },
             signal,
           })
@@ -163,12 +168,12 @@ export function SessionFilterBar({
             />
             <MultiFilter
               label={t("Trigger")}
-              values={search.getAll("trigger_type")}
+              values={search.getAll("trigger")}
               options={triggers.map((value) => ({
                 value,
                 label: t(`trigger.${value}`),
               }))}
-              onChange={(values) => update({ trigger_type: values })}
+              onChange={(values) => update({ trigger: values })}
             />
             <UpdatedFilter
               after={search.get("updated_after")}

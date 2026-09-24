@@ -21,7 +21,7 @@ import {
 } from "../shared/api";
 
 export interface IdentityData {
-  user: ReturnType<typeof representation<Schema["User"]>>;
+  user: ReturnType<typeof representation<Schema["Profile"]>>;
   organizations: Schema["Organization"][];
 }
 
@@ -51,12 +51,12 @@ function useIdentity(client: Client, renew: () => void) {
   const query = useQuery<IdentityData>({
     queryKey: ["identity"],
     queryFn: async ({ signal }) => {
-      const [user, csrf, organizations] = await Promise.all([
+      const [user, session, organizations] = await Promise.all([
         client.http.GET("/api/v1/users/me", { signal }).then(representation),
-        client.http.GET("/api/v1/auth/csrf", { signal }).then(data),
+        client.http.GET("/api/v1/auth/session", { signal }).then(data),
         client.http.GET("/api/v1/organizations", { signal }).then(data),
       ]);
-      client.setCsrfToken(csrf.csrf_token);
+      client.setCsrfToken(session.csrf_token);
       return { user, organizations: organizations.items };
     },
   });

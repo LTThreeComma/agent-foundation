@@ -14,18 +14,18 @@ import { ProviderForm } from "./provider-form";
 
 export function Providers({ scope }: { scope: ModelScope }) {
   const client = useClient(),
-    { organization, organizationAdmin, can } = useAccess(),
+    { organization, organizationCan, can } = useAccess(),
     page = useCursor();
-  const rows = useResourceRows<Schema["ModelProvider"]>();
+  const rows = useResourceRows<Schema["Provider"]>();
   const { selected } = rows;
-  const api = modelApi(client, scope);
+  const api = modelApi(client, organization.id, scope);
   const query = useQuery({
     queryKey: ["model-providers", scope.kind, scope.id, page.cursor],
     queryFn: ({ signal }) => api.providers(signal, page.cursor),
   });
   const definitions = useModelProviderDefinitions();
   const manage =
-    scope.kind === "organization" ? organizationAdmin : can("models.manage");
+    scope.kind === "organization" ? organizationCan("write") : can("write");
   const add = manage ? <AddProvider scope={scope} /> : undefined;
   return (
     <>
@@ -50,7 +50,7 @@ export function Providers({ scope }: { scope: ModelScope }) {
         nextCursor={query.data?.next_cursor}
         action={add}
         canActivateRow={(item) =>
-          item.workspace_id ? manage : organizationAdmin
+          item.workspace_id ? manage : organizationCan("write")
         }
         onRowActivate={rows.activate}
         row={(item) => ({
@@ -66,7 +66,7 @@ export function Providers({ scope }: { scope: ModelScope }) {
               definitions.data?.items.find(
                 (definition) => definition.type === item.type,
               ),
-              item.configuration,
+              item.config,
             ) !== "required"
               ? "not_required"
               : item.credential_configured
@@ -88,15 +88,16 @@ export function EditProvider({
   finalFocus,
 }: {
   scope: ModelScope;
-  provider: Schema["ModelProvider"];
+  provider: Schema["Provider"];
   controlledOpen?: boolean;
   onClose?: () => void;
   finalFocus?: React.RefObject<HTMLElement | null>;
 }) {
   const client = useClient(),
+    { organization } = useAccess(),
     [generation, setGeneration] = useState(0);
   const state = useResourceEditorState({ controlledOpen, onClose, finalFocus });
-  const api = modelApi(client, scope);
+  const api = modelApi(client, organization.id, scope);
   const definitions = useModelProviderDefinitions();
   const resource = useQuery({
     queryKey: ["model-provider", scope.kind, scope.id, provider.id],

@@ -9,7 +9,7 @@ export type FileNode = {
   children?: FileNode[];
 };
 
-export function fileTree(files: Schema["SkillPackageFile"][]): FileNode[] {
+export function fileTree(files: Schema["SkillFile"][]): FileNode[] {
   const root: FileNode[] = [];
   for (const file of files) {
     let siblings = root;
@@ -42,16 +42,19 @@ export function fileTree(files: Schema["SkillPackageFile"][]): FileNode[] {
   return root;
 }
 
+/** Manifest paths are below `root`, the archive directory that holds SKILL.md. */
 export function readTextFile(
   archive: Uint8Array,
-  file: Schema["SkillPackageFile"],
+  root: string,
+  file: Schema["SkillFile"],
 ): string | null {
-  if (file.size_bytes > previewLimit) return null;
+  if (file.size > previewLimit) return null;
+  const name = root + file.path;
   const bytes = unzipSync(archive, {
     filter: (entry) =>
-      entry.name === file.path && entry.originalSize <= previewLimit,
-  })[file.path];
-  if (!bytes || bytes.length !== file.size_bytes)
+      entry.name === name && entry.originalSize <= previewLimit,
+  })[name];
+  if (!bytes || bytes.length !== file.size)
     throw new Error("The package file does not match its manifest.");
   if (bytes.includes(0)) return null;
   try {

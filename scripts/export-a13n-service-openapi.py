@@ -1,28 +1,18 @@
-"""Export the Native HTTP and existing streaming wire models without opening process resources."""
+"""Export the Service HTTP contract and thread stream frames without opening process resources."""
 
 import argparse
 import json
 from pathlib import Path
 
-from a13n_service.app import create_app
-from a13n_service.gateway.router import ClientFrame
-from a13n_service.run_stream.domain import RunStreamEvent
-from a13n_service.settings import Settings
-from pydantic import TypeAdapter
+from a13n_service.app import build_app
+from a13n_service.runs.stream import frames_schema
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / "proto/a13n-service"
 
 
 def documents() -> dict[str, dict]:
-    schema = create_app(Settings()).openapi()
-    schema["paths"] = {path: value for path, value in schema["paths"].items() if path.startswith("/api/v1/")}
-    schema["info"]["version"] = "1"
-    return {
-        "openapi.json": schema,
-        "notification-client.schema.json": TypeAdapter(ClientFrame).json_schema(),
-        "run-stream-event.schema.json": RunStreamEvent.model_json_schema(),
-    }
+    return {"openapi.json": build_app().openapi(), "thread-stream.schema.json": frames_schema()}
 
 
 def main() -> None:

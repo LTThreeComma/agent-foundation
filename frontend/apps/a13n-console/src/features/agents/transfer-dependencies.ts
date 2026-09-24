@@ -1,22 +1,19 @@
-import { ApiError, type Client } from "../../service-client";
-import { allPages, data, workspaceHeaders } from "../../shared/api";
+import type { Client } from "../../service-client";
+import { allPages, data } from "../../shared/api";
+import { connectionState } from "../connections/api";
+import { environmentTemplates } from "../environments/api";
+import { modelApi } from "../models/api";
+import { webProviderApi } from "../web/api";
 import type { AgentConfig } from "./configuration";
 
 type DependencyKind =
-  | "model"
-  | "reviewer"
-  | "skill"
-  | "connection"
-  | "agent"
-  | "environment_template"
-  | "environment_revision"
-  | "web"
-  | "memory";
+  "model" | "skill" | "connection" | "agent" | "environment_template" | "web";
 export interface AgentDependency {
   path: string;
   kind: DependencyKind;
   value: string;
-  version?: number | null;
+  /** The pinned revision of a skill or subagent, which belongs to `value` only. */
+  revision?: string | null;
   replace: (value: string) => AgentConfig;
 }
 export interface DependencyOption {
@@ -28,27 +25,34 @@ export interface DependencyCheck {
   path: string;
   options: DependencyOption[];
   available: boolean;
+  /** The pinned revision's number, once found. */
+  version?: number;
   issue?: string;
+}
+
+/** Choosing another resource drops a pin on a revision of the previous one. */
+function pin(current: string, value: string, revision?: string | null) {
+  return value === current ? revision : null;
 }
 
 export function agentDependencies(config: AgentConfig): AgentDependency[] {
   const refs: AgentDependency[] = [
     {
-      path: "model.model_key",
+      path: "model.model_id",
       kind: "model",
-      value: config.model.model_key,
+      value: config.model.model_id,
       replace: (value) => ({
         ...config,
-        model: { ...config.model, model_key: value },
+        model: { ...config.model, model_id: value },
       }),
     },
   ];
-  for (const [kind, key] of Object.entries(config.media_understanding ?? {}))
-    if (key)
+  for (const [kind, id] of Object.entries(config.media_understanding ?? {}))
+    if (id)
       refs.push({
         path: `media_understanding.${kind}`,
         kind: "model",
-        value: key,
+        value: id,
         replace: (value) => ({
           ...config,
           media_understanding: { ...config.media_understanding, [kind]: value },
@@ -68,7 +72,7 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
   if (reviewer)
     refs.push({
       path: "reviewer.model",
-      kind: "reviewer",
+      kind: "model",
       value: reviewer.model,
       replace: (value) => ({
         ...config,
@@ -77,14 +81,20 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
     });
   for (const [index, skill] of (config.skills ?? []).entries())
     refs.push({
-      path: `skills.${index}.skill_key`,
+      path: `skills.${index}.skill_id`,
       kind: "skill",
-      value: skill.skill_key,
-      version: skill.version,
+      value: skill.skill_id,
+      revision: skill.revision_id,
       replace: (value) => ({
         ...config,
         skills: config.skills?.map((item, i) =>
-          i === index ? { ...item, skill_key: value } : item,
+          i === index
+            ? {
+                ...item,
+                skill_id: value,
+                revision_id: pin(item.skill_id, value, item.revision_id),
+              }
+            : item,
         ),
       }),
     });
@@ -105,63 +115,36 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
       path: `subagents.${name}.agent_id`,
       kind: "agent",
       value: child.agent_id,
-      version: child.version,
+      revision: child.revision_id,
       replace: (value) => ({
         ...config,
         subagents: {
           ...config.subagents,
-          [name]: { ...child, agent_id: value },
+          [name]: {
+            ...child,
+            agent_id: value,
+            revision_id: pin(child.agent_id, value, child.revision_id),
+          },
         },
       }),
     });
     const environment = child.environment;
-    if (environment?.template_revision_id)
+    if (environment?.template_id)
       refs.push({
-        path: `subagents.${name}.environment.template_revision_id`,
-        kind: "environment_revision",
-        value: environment.template_revision_id,
+        path: `subagents.${name}.environment.template_id`,
+        kind: "environment_template",
+        value: environment.template_id,
         replace: (value) => ({
           ...config,
           subagents: {
             ...config.subagents,
             [name]: {
               ...child,
-              environment: { ...environment, template_revision_id: value },
+              environment: { ...environment, template_id: value },
             },
           },
         }),
       });
-  }
-  const memory = config.memory;
-  if (memory && "provider_id" in memory)
-    refs.push({
-      path: "memory.provider_id",
-      kind: "memory",
-      value: memory.provider_id,
-      replace: (value) => ({
-        ...config,
-        memory: { ...memory, provider_id: value },
-      }),
-    });
-  if (memory && "entries" in memory) {
-    memory.entries.forEach((entry, index) => {
-      if ("provider_id" in entry.backend)
-        refs.push({
-          path: `memory.entries.${index}.backend.provider_id`,
-          kind: "memory",
-          value: entry.backend.provider_id,
-          replace: (provider_id) => ({
-            ...config,
-            memory: {
-              entries: memory.entries.map((current, i) =>
-                i === index
-                  ? { ...current, backend: { provider_id } }
-                  : current,
-              ),
-            },
-          }),
-        });
-    });
   }
   const web = config.toolsets?.web;
   for (const operation of ["search", "scrape"] as const) {
@@ -195,43 +178,23 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
 
 export async function inspectAgentDependencies(
   client: Client,
-  workspace: string,
+  organizationId: string,
+  workspaceId: string,
   config: AgentConfig,
-  signal?: AbortSignal,
+  signal: AbortSignal,
 ): Promise<DependencyCheck[]> {
   const refs = agentDependencies(config);
-  const path = { workspace };
-  const headers = workspaceHeaders(workspace);
-  function fetchEnvironmentTemplates() {
-    return allPages((cursor) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace}/environment-templates", {
-          params: { path, query: { cursor, limit: 100 } },
-          headers,
-          signal,
-        })
-        .then(data),
-    );
-  }
-  let environmentTemplates:
-    ReturnType<typeof fetchEnvironmentTemplates> | undefined;
+  const path = { workspace_id: workspaceId };
+  const scope = { kind: "workspace" as const, id: workspaceId };
   async function choices(kind: DependencyKind): Promise<DependencyOption[]> {
     switch (kind) {
-      case "model":
-      case "reviewer": {
-        const items = await allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace}/models", {
-              params: { path, query: { cursor, limit: 100, enabled: true } },
-              headers,
-              signal,
-            })
-            .then(data),
-        );
+      case "model": {
+        const api = modelApi(client, organizationId, scope);
+        const items = await allPages((cursor) => api.models(signal, cursor));
         return items
           .filter((item) => item.enabled)
           .map((item) => ({
-            value: kind === "model" ? item.key : item.id,
+            value: item.id,
             label: `${item.name} · ${item.key}`,
             id: item.id,
           }));
@@ -239,17 +202,16 @@ export async function inspectAgentDependencies(
       case "skill": {
         const items = await allPages((cursor) =>
           client.http
-            .GET("/api/v1/workspaces/{workspace}/skills", {
+            .GET("/api/v1/workspaces/{workspace_id}/skills", {
               params: { path, query: { cursor, limit: 100 } },
-              headers,
               signal,
             })
             .then(data),
         );
         return items
-          .filter((item) => !item.deleted_at)
+          .filter((item) => !item.archived_at)
           .map((item) => ({
-            value: item.key,
+            value: item.id,
             label: `${item.name} · ${item.key}`,
             id: item.id,
           }));
@@ -257,15 +219,14 @@ export async function inspectAgentDependencies(
       case "connection": {
         const items = await allPages((cursor) =>
           client.http
-            .GET("/api/v1/workspaces/{workspace}/connections", {
+            .GET("/api/v1/workspaces/{workspace_id}/connections", {
               params: { path, query: { cursor, limit: 100 } },
-              headers,
               signal,
             })
             .then(data),
         );
         return items
-          .filter((item) => item.status === "ready")
+          .filter((item) => connectionState(item) === "ready")
           .map((item) => ({
             value: item.id,
             label: `${item.name} · ${item.id}`,
@@ -275,64 +236,31 @@ export async function inspectAgentDependencies(
       case "agent": {
         const items = await allPages((cursor) =>
           client.http
-            .GET("/api/v1/workspaces/{workspace}/agents", {
+            .GET("/api/v1/workspaces/{workspace_id}/agents", {
               params: { path, query: { cursor, limit: 100 } },
-              headers,
               signal,
             })
             .then(data),
         );
         return items
-          .filter((item) => item.enabled && !item.archived_at)
+          .filter((item) => !item.archived_at)
           .map((item) => ({
             value: item.id,
             label: `${item.name} · ${item.key}`,
             id: item.id,
           }));
       }
-      case "environment_template":
-      case "environment_revision": {
-        const items = await (environmentTemplates ??=
-          fetchEnvironmentTemplates());
-        return items
-          .filter((item) => !item.archived_at)
-          .map((item) => ({
-            value:
-              kind === "environment_template"
-                ? item.id
-                : item.default_revision_id,
-            label: item.name,
-            id: item.id,
-          }));
-      }
-      case "memory": {
+      case "environment_template": {
         const items = await allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace}/memory-providers", {
-              params: { path, query: { cursor, limit: 100 } },
-              headers,
-              signal,
-            })
-            .then(data),
+          environmentTemplates(client, workspaceId, signal, cursor),
         );
         return items
-          .filter((item) => item.enabled && item.credential_configured)
-          .map((item) => ({
-            value: item.id,
-            label: `${item.name} · ${item.type}`,
-            id: item.id,
-          }));
+          .filter((item) => item.enabled)
+          .map((item) => ({ value: item.id, label: item.name, id: item.id }));
       }
       case "web": {
-        const items = await allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace}/web-providers", {
-              params: { path, query: { cursor, limit: 100 } },
-              headers,
-              signal,
-            })
-            .then(data),
-        );
+        const api = webProviderApi(client, organizationId, scope);
+        const items = await allPages((cursor) => api.providers(signal, cursor));
         return items
           .filter((item) => item.enabled && item.credential_configured)
           .map((item) => ({
@@ -348,39 +276,8 @@ export async function inspectAgentDependencies(
     if (!catalogs.has(kind)) catalogs.set(kind, choices(kind));
   return Promise.all(
     refs.map(async (ref): Promise<DependencyCheck> => {
-      const options = [...(await catalogs.get(ref.kind)!)];
-      let selected = options.find((option) => option.value === ref.value);
-      if (ref.kind === "environment_revision" && !selected) {
-        try {
-          const revision = data(
-            await client.http.GET(
-              "/api/v1/environment-template-revisions/{revision_id}",
-              {
-                params: { path: { revision_id: ref.value } },
-                headers,
-                signal,
-              },
-            ),
-          );
-          const template = options.find(
-            (option) => option.id === revision.template_id,
-          );
-          if (template) {
-            selected = {
-              ...template,
-              value: ref.value,
-              label: `${template.label.split(" · ")[0]} · v${revision.version}`,
-            };
-            options.push(selected);
-          }
-        } catch (error) {
-          if (
-            !(error instanceof ApiError) ||
-            ![403, 404].includes(error.status)
-          )
-            throw error;
-        }
-      }
+      const options = await catalogs.get(ref.kind)!;
+      const selected = options.find((option) => option.value === ref.value);
       if (!selected)
         return {
           path: ref.path,
@@ -388,41 +285,42 @@ export async function inspectAgentDependencies(
           available: false,
           issue: "Dependency unavailable. Choose a resource in this workspace.",
         };
-      if (
-        ref.version != null &&
-        (ref.kind === "skill" || ref.kind === "agent")
-      ) {
+      if (ref.revision && (ref.kind === "skill" || ref.kind === "agent")) {
         const id = selected.id;
         const revisions =
           ref.kind === "skill"
             ? await allPages((cursor) =>
                 client.http
-                  .GET("/api/v1/skills/{skill_id}/revisions", {
-                    params: {
-                      path: { skill_id: id },
-                      query: { cursor, limit: 100 },
+                  .GET(
+                    "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/revisions",
+                    {
+                      params: {
+                        path: { workspace_id: workspaceId, skill_id: id },
+                        query: { cursor, limit: 100 },
+                      },
+                      signal,
                     },
-                    headers,
-                    signal,
-                  })
+                  )
                   .then(data),
               )
             : await allPages((cursor) =>
                 client.http
                   .GET(
-                    "/api/v1/workspaces/{workspace}/agents/{agent}/revisions",
+                    "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions",
                     {
                       params: {
-                        path: { workspace, agent: id },
+                        path: { workspace_id: workspaceId, agent_id: id },
                         query: { cursor, limit: 100 },
                       },
-                      headers,
                       signal,
                     },
                   )
                   .then(data),
               );
-        if (!revisions.some((revision) => revision.version === ref.version))
+        const pinned = revisions.find(
+          (revision) => revision.id === ref.revision,
+        );
+        if (!pinned)
           return {
             path: ref.path,
             options,
@@ -430,6 +328,12 @@ export async function inspectAgentDependencies(
             issue:
               "Pinned version unavailable. Edit the YAML version or choose another resource.",
           };
+        return {
+          path: ref.path,
+          options,
+          available: true,
+          version: pinned.number,
+        };
       }
       return { path: ref.path, options, available: true };
     }),

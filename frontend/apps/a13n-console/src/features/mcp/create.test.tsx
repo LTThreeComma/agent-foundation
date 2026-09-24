@@ -26,27 +26,20 @@ const presets = {
     key: "airtable",
     name: "Airtable",
     description: "Bases and records",
-    endpoint_url: "https://mcp.airtable.com/mcp",
-    auth_mode: "oauth",
+    url: "https://mcp.airtable.com/mcp",
+    auth: "oauth",
     documentation_url: "https://example.com/airtable/setup",
-  },
-  "google-compute-engine": {
-    key: "google-compute-engine",
-    name: "Google Compute Engine",
-    description: "Manage compute infrastructure",
-    endpoint_url: "https://compute.googleapis.com/mcp",
-    auth_mode: "static_headers",
-    static_header_names: ["Authorization", "x-goog-user-project"],
+    requirements: "Sign in with an account that can access the requested data.",
   },
   jentic: {
     key: "jentic",
     name: "Jentic",
     description: "Secure API access",
-    endpoint_url: "https://api.jentic.com/mcp",
-    auth_mode: "static_headers",
-    static_header_names: ["x-jentic-api-key"],
+    url: "https://api.jentic.com/mcp",
+    auth: "headers",
+    header_names: ["x-jentic-api-key", "x-jentic-agent"],
   },
-} satisfies Record<string, Schema["MCPServer"]>;
+} satisfies Record<string, Schema["McpServer"]>;
 
 it("shows preset authentication as a read-only value with a setup link", () => {
   const preset = presets.airtable;
@@ -64,10 +57,66 @@ it("shows preset authentication as a read-only value with a setup link", () => {
 
   expect(screen.queryByRole("combobox", { name: "Authentication" })).toBeNull();
   expect(screen.queryByRole("textbox", { name: "Authentication" })).toBeNull();
-  expect(screen.getByText(`auth.${preset.auth_mode}`)).toBeTruthy();
+  expect(screen.getByText(`auth.${preset.auth}`)).toBeTruthy();
+  expect(
+    (
+      screen.getByRole("textbox", {
+        name: "Connection name",
+      }) as HTMLInputElement
+    ).value,
+  ).toBe(preset.name);
+  expect(screen.getByText(preset.requirements)).toBeTruthy();
   const guide = screen.getByRole("link", { name: "Setup guide" });
   expect(guide.getAttribute("href")).toBe(preset.documentation_url);
   expect(guide.getAttribute("target")).toBe("_blank");
+  cache.clear();
+});
+
+it("prefills preset header names and sends their values only as the credential", async () => {
+  const preset = presets.jentic;
+  const created = { id: "conn_test", workspace_id: "ws_test", version: 1 };
+  http.POST.mockImplementation(async (path: string) => ({
+    data: path.endsWith("/test")
+      ? { status: "succeeded", message: null, tools: [] }
+      : created,
+    response: new Response(),
+  }));
+  const cache = new QueryClient({
+    defaultOptions: { mutations: { retry: false } },
+  });
+  const onSuccess = vi.fn();
+  render(
+    <QueryClientProvider client={cache}>
+      <CreateMCP
+        onCancel={vi.fn()}
+        preset={preset}
+        onStarted={vi.fn()}
+        onSuccess={onSuccess}
+      />
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  for (const [index, name] of preset.header_names.entries()) {
+    expect(
+      (screen.getByLabelText(`Header name ${index + 1}`) as HTMLInputElement)
+        .value,
+    ).toBe(name);
+    await user.type(
+      screen.getByLabelText(`Header value ${index + 1}`),
+      `value-${index}`,
+    );
+  }
+  await user.click(screen.getByRole("button", { name: "Connect" }));
+  await waitFor(() => expect(onSuccess).toHaveBeenCalledWith(created));
+  expect(http.POST.mock.calls[0][1].body).toEqual({
+    type: "mcp",
+    name: preset.name,
+    config: { url: preset.url, headers: preset.header_names },
+    auth: "headers",
+    credential: {
+      headers: { "x-jentic-api-key": "value-0", "x-jentic-agent": "value-1" },
+    },
+  });
   cache.clear();
 });
 
@@ -85,78 +134,109 @@ it("keeps authentication selectable for custom MCP connections", () => {
   cache.clear();
 });
 
-it.each(["google-compute-engine", "jentic"] as const)(
-  "%s prefills header names and sends values only through the credential endpoint",
-  async (presetId) => {
-    const preset = presets[presetId];
-    const headers = preset.static_header_names!;
-    const initial = {
-      id: "mcp_test",
-      version: 1,
-      credential_configured: false,
-    };
-    const configured = { ...initial, version: 2, credential_configured: true };
-    const ready = { ...configured, version: 3, status: "ready" };
-    http.GET.mockResolvedValue({ data: configured, response: new Response() });
-    http.POST.mockImplementation(async (path: string) => ({
-      data: path.endsWith("/authorizations")
-        ? { id: "authz_test", status: "completed" }
-        : path.endsWith("/check")
-          ? ready
-          : initial,
-      response: new Response(),
-    }));
-    const cache = new QueryClient({
-      defaultOptions: { mutations: { retry: false } },
-    });
-    const onSuccess = vi.fn();
-    render(
-      <QueryClientProvider client={cache}>
-        <CreateMCP
-          onCancel={vi.fn()}
-          preset={preset}
-          onStarted={vi.fn()}
-          onSuccess={onSuccess}
-        />
-      </QueryClientProvider>,
-    );
-    const user = userEvent.setup();
-    const values: Record<string, string> = {};
-    for (const [index, name] of headers.entries()) {
-      expect(
-        (screen.getByLabelText(`Header name ${index + 1}`) as HTMLInputElement)
-          .value,
-      ).toBe(name);
-      const value =
-        name === "Authorization" ? "Bearer test-token" : `value-${index}`;
-      values[name.toLowerCase()] = value;
-      await user.type(
-        screen.getByLabelText(`Header value ${index + 1}`),
-        value,
-      );
-    }
-    await user.click(screen.getByRole("button", { name: "Connect" }));
-    await waitFor(() => expect(onSuccess).toHaveBeenCalledWith(ready));
-    const create = http.POST.mock.calls.find(([path]) =>
-      path.includes("/workspaces/"),
-    )!;
-    expect(create[1].body).toEqual({
-      name: preset.name,
-      source: {
-        kind: "mcp",
-        endpoint_url: preset.endpoint_url,
-        auth_mode: "static_headers",
-        static_header_names: headers.map((name) => name.toLowerCase()),
+it("names headers in the configuration and sends their values only as the write-only credential", async () => {
+  const created = {
+    id: "conn_test",
+    workspace_id: "ws_test",
+    version: 1,
+    credential_configured: true,
+    status: "ready",
+  };
+  http.POST.mockImplementation(async (path: string) => ({
+    data: path.endsWith("/test")
+      ? { status: "succeeded", message: null, tools: [] }
+      : created,
+    response: new Response(),
+  }));
+  const cache = new QueryClient({
+    defaultOptions: { mutations: { retry: false } },
+  });
+  const onSuccess = vi.fn();
+  render(
+    <QueryClientProvider client={cache}>
+      <CreateMCP
+        onCancel={vi.fn()}
+        endpoint="https://api.jentic.com/mcp"
+        onStarted={vi.fn()}
+        onSuccess={onSuccess}
+      />
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.type(
+    screen.getByRole("textbox", { name: "Connection name" }),
+    "Jentic",
+  );
+  await user.click(screen.getByRole("combobox", { name: "Authentication" }));
+  await user.click(await screen.findByRole("option", { name: "auth.headers" }));
+  await user.type(screen.getByLabelText("Header name 1"), "X-Jentic-API-Key");
+  await user.type(screen.getByLabelText("Header value 1"), "value-1");
+  await user.click(screen.getByRole("button", { name: "Connect" }));
+  await waitFor(() => expect(onSuccess).toHaveBeenCalledWith(created));
+  expect(http.POST.mock.calls[0]).toEqual([
+    "/api/v1/workspaces/{workspace_id}/connections",
+    {
+      params: { path: { workspace_id: "ws_test" } },
+      body: {
+        type: "mcp",
+        name: "Jentic",
+        config: {
+          url: "https://api.jentic.com/mcp",
+          headers: ["x-jentic-api-key"],
+        },
+        auth: "headers",
+        credential: { headers: { "x-jentic-api-key": "value-1" } },
       },
-    });
-    const credentials = http.POST.mock.calls.find(([path]) =>
-      path.endsWith("/authorizations"),
-    )!;
-    expect(credentials[1].body).toEqual({
-      expected_version: 1,
-      method: "credentials",
-      credentials: values,
-    });
-    cache.clear();
-  },
-);
+    },
+  ]);
+  expect(http.POST.mock.calls[1]).toEqual([
+    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/test",
+    {
+      params: { path: { workspace_id: "ws_test", connection_id: "conn_test" } },
+    },
+  ]);
+  cache.clear();
+});
+
+it("keeps the created connection and reports why its tools could not be listed", async () => {
+  http.POST.mockImplementation(async (path: string) => ({
+    data: path.endsWith("/test")
+      ? {
+          status: "failed",
+          message: "The server did not answer in time",
+          tools: [],
+        }
+      : { id: "conn_test", workspace_id: "ws_test", version: 1 },
+    response: new Response(),
+  }));
+  const cache = new QueryClient({
+    defaultOptions: { mutations: { retry: false } },
+  });
+  const onSuccess = vi.fn();
+  render(
+    <QueryClientProvider client={cache}>
+      <CreateMCP
+        onCancel={vi.fn()}
+        endpoint="https://mcp.example/mcp"
+        onStarted={vi.fn()}
+        onSuccess={onSuccess}
+      />
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.type(
+    screen.getByRole("textbox", { name: "Connection name" }),
+    "Example",
+  );
+  await user.click(screen.getByRole("combobox", { name: "Authentication" }));
+  await user.click(await screen.findByRole("option", { name: "auth.none" }));
+  await user.click(screen.getByRole("button", { name: "Connect" }));
+  await screen.findByText("The server did not answer in time");
+  await user.click(screen.getByRole("button", { name: "Continue connection" }));
+  await waitFor(() => expect(http.POST).toHaveBeenCalledTimes(3));
+  expect(
+    http.POST.mock.calls.filter(([path]) => path.endsWith("/connections")),
+  ).toHaveLength(1);
+  expect(onSuccess).not.toHaveBeenCalled();
+  cache.clear();
+});

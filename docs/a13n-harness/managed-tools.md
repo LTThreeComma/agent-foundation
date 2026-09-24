@@ -97,7 +97,7 @@ permissions = ToolPermissionsCapability(
 )
 ```
 
-A custom reviewer can return provider usage receipts in `ToolReviewResult.usage` or preserve proven receipts in `ToolReviewError`. The shared gate records them in the existing ledger with source `tool.review` and tool/call IDs for all tools, including shell. Completed `HarnessExtensionEvent(kind="tool")` events with `payload.type="tool_review_result"` expose the redacted result, including risk/reason and usage, plus a separate runtime-computed `decision`. Errors expose a safe code and effective decision with `result=null`. Do not account the event receipts a second time. Missing reviewers produce neither a review call nor a result event.
+The default model reviewer's request is recorded like the Agent's own model requests: a model usage record with source `tool.review` and the tool/call IDs, priced by the Agent's model-cost policy under the reviewer's `model`. A custom reviewer can return provider usage receipts in `ToolReviewResult.usage` or preserve proven receipts in `ToolReviewError`. The shared gate records them in the existing ledger with source `tool.review` and tool/call IDs for all tools, including shell. Completed `HarnessExtensionEvent(kind="tool")` events with `payload.type="tool_review_result"` expose the redacted result, including risk/reason and usage, plus a separate runtime-computed `decision`. Errors expose a safe code and effective decision with `result=null`. Do not account the event receipts a second time. Missing reviewers produce neither a review call nor a result event.
 
 ### Read human approval provenance
 

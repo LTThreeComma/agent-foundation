@@ -9,7 +9,6 @@ const http = vi.hoisted(() => ({
   GET: vi.fn(),
   POST: vi.fn(),
   PATCH: vi.fn(),
-  DELETE: vi.fn(),
 }));
 vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
 vi.mock("../../layout/workspace", () => ({
@@ -40,14 +39,12 @@ it("submits a renamed Connection from the bottom action row", async () => {
     id: "connection_test",
     workspace_id: "ws_test",
     name: "Test connection",
+    type: "mcp",
     status: "ready",
+    enabled: true,
     version: 2,
-    safe_metadata: {},
-    source: {
-      kind: "mcp",
-      auth_mode: "none",
-      endpoint_url: "https://mcp.example",
-    },
+    auth: "none",
+    config: { url: "https://mcp.example" },
     credential_configured: false,
   };
   cache.setQueryData(["connections", "ws_test", resource.id], resource);
@@ -71,19 +68,21 @@ it("submits a renamed Connection from the bottom action row", async () => {
   await user.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() =>
     expect(http.PATCH).toHaveBeenCalledWith(
-      "/api/v1/connections/{connection_id}",
-      expect.objectContaining({
-        body: { name: "Renamed", expected_version: 2 },
-      }),
+      "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
+      {
+        params: {
+          path: { workspace_id: "ws_test", connection_id: "connection_test" },
+        },
+        headers: { "If-Match": '"connection_test:2"' },
+        body: { name: "Renamed" },
+      },
     ),
   );
   cache.clear();
 });
 
 for (const kind of ["connector", "mcp"] as const) {
-  for (const action of kind === "connector"
-    ? ["Enable", "Revoke", "Delete"]
-    : ["Enable", "Delete"]) {
+  for (const action of ["Enable", "Revoke"]) {
     it(`${kind} ${action} follows a refreshed resource version without remounting`, async () => {
       const user = userEvent.setup();
       const cache = new QueryClient({
@@ -93,13 +92,21 @@ for (const kind of ["connector", "mcp"] as const) {
         id: "connection_test",
         workspace_id: "ws_test",
         name: "Test connection",
-        status: "disabled",
+        status: "ready",
+        enabled: false,
         version: 2,
-        safe_metadata: {},
-        source:
-          kind === "connector"
-            ? { kind, provider_id: "cnr_test", connector_key: "github" }
-            : { kind, auth_mode: "none", endpoint_url: "https://mcp.example" },
+        ...(kind === "connector"
+          ? {
+              type: "composio",
+              auth: "account",
+              connector_provider_id: "cprov_test",
+              config: { app: "github", actions: ["GITHUB_GET_REPO"] },
+            }
+          : {
+              type: "mcp",
+              auth: "bearer",
+              config: { url: "https://mcp.example" },
+            }),
         credential_configured: false,
       };
       const queryKey = ["connections", "ws_test", resource.id];
@@ -108,33 +115,23 @@ for (const kind of ["connector", "mcp"] as const) {
         data: { ...resource, version: 3 },
         response: new Response(),
       });
+      const updated = { ...resource, version: 4, failure: null };
+      http.PATCH.mockResolvedValue({
+        data: { ...updated, enabled: true },
+        response: new Response(),
+      });
       http.POST.mockResolvedValue({
-        data: { ...resource, version: 4 },
+        data: { ...updated, remote_revocation: "skipped" },
         response: new Response(),
       });
-      http.DELETE.mockResolvedValue({
-        data: {
-          connection_id: resource.id,
-          local_status: "deleted",
-          remote_status: "not_required",
-        },
-        response: new Response(),
-      });
+      const onCleanup = vi.fn();
       render(
         <QueryClientProvider client={cache}>
-          {kind === "connector" ? (
-            <ConnectionDetails
-              connectionId={resource.id}
-              onClose={vi.fn()}
-              onCleanup={vi.fn()}
-            />
-          ) : (
-            <ConnectionDetails
-              connectionId={resource.id}
-              onClose={vi.fn()}
-              onCleanup={vi.fn()}
-            />
-          )}
+          <ConnectionDetails
+            connectionId={resource.id}
+            onClose={vi.fn()}
+            onCleanup={onCleanup}
+          />
         </QueryClientProvider>,
       );
       await screen.findByRole("button", { name: "Connection actions" });
@@ -165,23 +162,109 @@ for (const kind of ["connector", "mcp"] as const) {
               : `${action} connection`,
         }),
       );
-      await waitFor(() => {
-        if (action === "Delete")
-          expect(http.DELETE).toHaveBeenCalledWith(
-            "/api/v1/connections/{connection_id}",
-            expect.objectContaining({
-              params: expect.objectContaining({
-                query: { expected_version: 3 },
-              }),
-            }),
-          );
-        else
+      const request = {
+        params: {
+          path: { workspace_id: "ws_test", connection_id: resource.id },
+        },
+        headers: { "If-Match": '"connection_test:3"' },
+      };
+      if (action === "Revoke") {
+        await waitFor(() =>
           expect(http.POST).toHaveBeenCalledWith(
-            `/api/v1/connections/{connection_id}/${action === "Revoke" ? "connector/revoke" : "enable"}`,
-            expect.objectContaining({ body: { expected_version: 3 } }),
-          );
-      });
+            "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/revoke",
+            request,
+          ),
+        );
+        expect(onCleanup).toHaveBeenCalledWith("skipped");
+      } else
+        // Availability is a field of the connection, changed like its name.
+        await waitFor(() =>
+          expect(http.PATCH).toHaveBeenCalledWith(
+            "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
+            { ...request, body: { enabled: true } },
+          ),
+        );
       cache.clear();
     });
   }
 }
+
+it("offers no revoke for a connection without a credential", async () => {
+  const user = userEvent.setup();
+  const cache = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  const resource = {
+    id: "connection_test",
+    workspace_id: "ws_test",
+    name: "Test connection",
+    type: "mcp",
+    status: "ready",
+    enabled: true,
+    version: 2,
+    auth: "none",
+    config: { url: "https://mcp.example" },
+    credential_configured: false,
+    last_test: null,
+  };
+  cache.setQueryData(["connections", "ws_test", resource.id], resource);
+  render(
+    <QueryClientProvider client={cache}>
+      <ConnectionDetails
+        connectionId={resource.id}
+        onClose={vi.fn()}
+        onCleanup={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  expect(
+    await screen.findByText("No check has run for this connection."),
+  ).not.toBeNull();
+  await user.click(screen.getByRole("button", { name: "Connection actions" }));
+  expect(
+    await screen.findByRole("menuitem", { name: "Disable" }),
+  ).not.toBeNull();
+  expect(screen.queryByRole("menuitem", { name: "Revoke" })).toBeNull();
+  cache.clear();
+});
+
+it("shows the persisted outcome of the last check", async () => {
+  const cache = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  const resource = {
+    id: "connection_test",
+    workspace_id: "ws_test",
+    name: "Test connection",
+    type: "mcp",
+    status: "ready",
+    enabled: true,
+    version: 2,
+    auth: "none",
+    config: { url: "https://mcp.example" },
+    credential_configured: false,
+    last_test: {
+      connection_version: 2,
+      status: "failed",
+      message: "The server did not answer in time",
+      tested_at: "2026-09-12T00:00:00Z",
+    },
+  };
+  cache.setQueryData(["connections", "ws_test", resource.id], resource);
+  render(
+    <QueryClientProvider client={cache}>
+      <ConnectionDetails
+        connectionId={resource.id}
+        onClose={vi.fn()}
+        onCleanup={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  expect(
+    await screen.findByText("The server did not answer in time"),
+  ).not.toBeNull();
+  expect(
+    document.querySelector('[data-state="failed"]')?.textContent,
+  ).toBeTruthy();
+  cache.clear();
+});

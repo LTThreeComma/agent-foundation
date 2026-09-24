@@ -27,6 +27,7 @@ def test_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[list
         for name in ("test_one.py", "test_two.py"):
             (directory / name).touch()
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("A13N_TEST_LOCK", str(tmp_path / "test.lock"))
     calls: list[list[str]] = []
 
     def run(command, *, check):

@@ -213,7 +213,8 @@ class VercelEnvironment(NativeEnvironment[VercelEnvironmentConfiguration, NamedT
         response = await self.inspect()
         if response is None or response.session.status == "stopped":
             return
-        await self.transport().request("POST", f"/v2/sandboxes/sessions/{response.session.id}/stop")
+        # Vercel refuses a POST without a JSON body as an unsupported media type.
+        await self.transport().request("POST", f"/v2/sandboxes/sessions/{response.session.id}/stop", body={})
         async with asyncio.timeout(self.config.request_timeout_seconds):
             while True:
                 response = await self.inspect()

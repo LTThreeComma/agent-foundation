@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
+import { useAccess } from "../../layout/workspace";
 import { type Schema } from "../../shared/api";
 import {
   useSuggestedName,
@@ -11,12 +12,14 @@ import {
 import { useCredentialSection } from "../../shared/use-credential-section";
 import { credentialDescription, credentialLabel } from "../providers";
 import { modelApi, type ModelScope } from "./api";
-import { initialHeaders, serializeHeaders } from "./provider-headers";
+import {
+  initialHeaders,
+  newHeaders,
+  serializeHeaders,
+} from "./provider-headers";
 
 /** Named by the credential schema each definition declares, never by vendor. */
-export function credentialFieldFor(
-  definition?: Schema["ModelProviderMetadata"],
-) {
+export function credentialFieldFor(definition?: Schema["ProviderType"]) {
   return {
     label: credentialLabel(definition?.credential_schema),
     description: credentialDescription(definition?.credential_schema),
@@ -33,17 +36,18 @@ export function useProviderDraft({
   onCreated,
 }: {
   scope: ModelScope;
-  resource?: { value: Schema["ModelProvider"]; etag?: string };
-  definitions: Schema["ModelProviderMetadata"][];
+  resource?: { value: Schema["Provider"]; etag?: string };
+  definitions: Schema["ProviderType"][];
   initialType?: string;
   close: () => void;
-  onCreated?: (provider: Schema["ModelProvider"], modelApi?: string) => void;
+  onCreated?: (provider: Schema["Provider"], modelApi?: string) => void;
 }) {
   const [original] = useState(resource),
     { t } = useTranslation(),
     client = useClient(),
+    { organization } = useAccess(),
     cache = useQueryClient(),
-    api = modelApi(client, scope);
+    api = modelApi(client, organization.id, scope);
   const [type, setType] = useState(
       original?.value.type ??
         initialType ??
@@ -55,7 +59,7 @@ export function useProviderDraft({
     { name, setName, suggestName } = useSuggestedName(original?.value.name),
     [suggestedApi, setSuggestedApi] = useState<string>(),
     [configuration, setConfiguration] = useState<Record<string, unknown>>(
-      original?.value.configuration ?? {},
+      original?.value.config ?? {},
     ),
     [headers, setHeaders] = useState(() => initialHeaders(original?.value)),
     [advancedOpen, setAdvancedOpen] = useState(false),
@@ -71,10 +75,6 @@ export function useProviderDraft({
     gcTime: 0,
     mutationFn: async () => {
       if (!definition) throw new Error(t("Choose a provider type."));
-      const extraHeaders = serializeHeaders(
-        headers,
-        original?.value.header_names ?? [],
-      );
       const config = withSchemaValues(
         definition.configuration_schema,
         configuration,
@@ -84,17 +84,24 @@ export function useProviderDraft({
       if (credential) validateSettings(section.schema, credential);
       const body = {
         name,
-        configuration: config,
-        extra_headers: extraHeaders,
+        config,
         enabled,
         ...(credential === undefined ? {} : { credential }),
       };
-      if (!original) return api.createProvider({ ...body, type });
+      if (!original)
+        return api.createProvider({
+          ...body,
+          type,
+          extra_headers: newHeaders(headers),
+        });
       if (!original.etag)
         throw new Error(
           t("Version information is unavailable. Reload this page."),
         );
-      return api.updateProvider(original.value.id, original.etag, body);
+      return api.updateProvider(original.value.id, original.etag, {
+        ...body,
+        extra_headers: serializeHeaders(headers, original.value.header_names),
+      });
     },
     onError: () => setAdvancedOpen(true),
     onSuccess: (provider) => {
@@ -134,8 +141,7 @@ export function useProviderDraft({
     JSON.stringify(headers) !==
       JSON.stringify(initialHeaders(original.value)) ||
     section.removing ||
-    JSON.stringify(configuration) !==
-      JSON.stringify(original.value.configuration);
+    JSON.stringify(configuration) !== JSON.stringify(original.value.config);
   return {
     api,
     close,

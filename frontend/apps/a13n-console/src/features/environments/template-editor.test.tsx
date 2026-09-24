@@ -1,11 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  cleanup,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { TemplateEditor } from "./template-editor";
@@ -60,17 +54,21 @@ it("keeps a failed template list query out of the create dialog", async () => {
 it("keeps settings drafts across tabs and saves against the original version", async () => {
   const template = {
     id: "et_test",
+    workspace_id: "ws_test",
+    key: "original",
     name: "Original template",
     description: "Original description",
-    default_revision_id: "etr_test",
     version: 1,
-    archived_at: null,
+    enabled: true,
   };
-  state.GET.mockImplementation(async (path: string) => ({
-    data: path.includes("template-revisions") ? {} : template,
+  state.GET.mockImplementation(async () => ({
+    data: template,
     response: new Response(null, { headers: { ETag: '"version-1"' } }),
   }));
-  state.PATCH.mockResolvedValue({ data: template });
+  state.PATCH.mockResolvedValue({
+    data: { ...template, version: 2, enabled: false },
+    response: new Response(null, { headers: { ETag: '"version-2"' } }),
+  });
   const close = vi.fn();
   const user = userEvent.setup();
   render(
@@ -104,97 +102,25 @@ it("keeps settings drafts across tabs and saves against the original version", a
   expect(
     screen.getByRole<HTMLInputElement>("textbox", { name: "Name" }).value,
   ).toBe("Unsaved draft");
+  await user.click(screen.getByRole("switch", { name: "Archived" }));
   await user.click(screen.getByRole("button", { name: "Save changes" }));
+  const path = { workspace_id: "ws_test", template_id: template.id };
   await waitFor(() =>
     expect(state.PATCH).toHaveBeenCalledWith(
-      "/api/v1/environment-templates/{template_id}",
+      "/api/v1/workspaces/{workspace_id}/environment-templates/{template_id}",
       {
-        params: {
-          path: { template_id: template.id },
-          header: { "If-Match": '"version-1"' },
-        },
+        params: { path },
+        headers: { "If-Match": '"version-1"' },
+        // Archiving is the same change as the rename: one PATCH disables it.
         body: {
           name: "Unsaved draft",
           description: template.description,
-          archived: false,
+          enabled: false,
         },
       },
     ),
   );
+  expect(state.PATCH).toHaveBeenCalledOnce();
+  expect(state.POST).not.toHaveBeenCalled();
   await waitFor(() => expect(close).toHaveBeenCalledOnce());
-});
-
-it("sets an earlier revision as the default with the template ETag", async () => {
-  const template = {
-    id: "et_test",
-    name: "Sandbox",
-    description: null,
-    default_revision_id: "etr_v2",
-    version: 2,
-    archived_at: null,
-  };
-  const revisions = [
-    { id: "etr_v2", version: 2, created_at: "2026-09-09T00:00:00Z" },
-    { id: "etr_v1", version: 1, created_at: "2026-09-08T00:00:00Z" },
-  ];
-  state.GET.mockImplementation(async (path: string) => ({
-    data: path.endsWith("/revisions")
-      ? { items: revisions, next_cursor: null }
-      : path.includes("template-revisions")
-        ? {}
-        : { ...template },
-    response: new Response(null, { headers: { ETag: '"version-2"' } }),
-  }));
-  state.POST.mockImplementation(async () => {
-    template.default_revision_id = "etr_v1";
-    return { data: { ...template } };
-  });
-  const user = userEvent.setup();
-  render(
-    <QueryClientProvider
-      client={
-        new QueryClient({
-          defaultOptions: { queries: { retry: false, gcTime: 0 } },
-        })
-      }
-    >
-      <TemplateEditor
-        scope={{ kind: "workspace", id: "ws_test" }}
-        templateId={template.id}
-        controlledOpen
-        onClose={vi.fn()}
-      />
-    </QueryClientProvider>,
-  );
-  const row = (version: string) =>
-    within(screen.getByText(version).closest("div")!);
-  await user.click(await screen.findByRole("tab", { name: "Versions" }));
-  await screen.findByText("Version 2");
-  expect(row("Version 2").getByText("Default version")).toBeTruthy();
-  await user.click(
-    row("Version 1").getByRole("button", { name: "Set as default" }),
-  );
-  const confirm = await screen.findByRole("dialog", { name: "Set as default" });
-  await user.click(
-    within(confirm).getByRole("button", { name: "Set as default" }),
-  );
-  await waitFor(() =>
-    expect(state.POST).toHaveBeenCalledWith(
-      "/api/v1/environment-templates/{template_id}/revisions/{revision_id}/default",
-      {
-        params: {
-          path: { template_id: template.id, revision_id: "etr_v1" },
-          header: { "If-Match": '"version-2"' },
-        },
-      },
-    ),
-  );
-  await user.click(await screen.findByRole("tab", { name: "Versions" }));
-  await screen.findByText("Version 1");
-  await waitFor(() =>
-    expect(row("Version 1").getByText("Default version")).toBeTruthy(),
-  );
-  expect(
-    row("Version 2").getByRole("button", { name: "Set as default" }),
-  ).toBeTruthy();
 });

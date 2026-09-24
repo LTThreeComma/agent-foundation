@@ -55,63 +55,60 @@ function mount(element: React.ReactNode, entry = "/") {
 function response(value: unknown) {
   return { data: value, response: new Response() };
 }
-function observation(
-  id: string,
-  parent: string | null = null,
-): Schema["Observation"] {
+function observation(id: string, parent: string | null = null): Schema["Span"] {
   return {
+    trace_id: "trace-1",
     id,
     parent_id: parent,
-    type: "agent",
+    kind: "agent",
     name: id,
     started_at: "2026-09-11T00:00:00Z",
     ended_at: null,
-    status: null,
-    level: "error",
+    status: "error",
     status_message: "Diagnostic reason",
-    model: { requested: "model-alias", response: "model-version" },
+    level: "error",
+    model: "model-version",
     usage: { input: 0, total: 3506 },
     cost_usd: null,
-    input: { media_type: "application/json", value: null },
+    input: null,
     output: null,
     attributes: { diagnostic: true },
     resource_attributes: { "service.name": "service" },
-    scope: { name: "library", version: "1", attributes: {} },
+    scope: { name: "library", version: "1" },
     events: [],
     links: [],
+    source_url: null,
   };
 }
-function trace(): Schema["Trace"] {
+/** A trace root: it carries the correlation the Service stamps on every span. */
+function trace(): Schema["Span"] {
   return {
-    id: "trace-1",
-    provider: "langfuse",
-    root: observation("root"),
+    ...observation("root"),
     source_url: "https://trace.example/trace-1",
-    correlation: {
-      organization_id: "org",
-      workspace_id: "ws_test",
-      session_id: "session",
-      thread_id: "thread",
-      run_id: "run",
-      run_attempt_id: "attempt",
-      agent_id: "agent",
+    attributes: {
+      "a13n.observation.metadata.organization_id": "org",
+      "a13n.observation.metadata.workspace_id": "ws_test",
+      "a13n.observation.metadata.session_id": "session",
+      "a13n.observation.metadata.service_run_id": "run",
+      "a13n.observation.metadata.run_attempt_id": "attempt",
+      "a13n.observation.session.id": "thread",
     },
   };
 }
-const descriptor = {
-  provider: "langfuse",
-  enabled: true,
-  search_in: ["input", "output"],
-  history_from: null,
+const descriptor: Schema["TraceBackend"] = {
+  type: "langfuse",
+  queryable_since: null,
 };
+const isBackend = (path: string) => path.endsWith("/trace-backend");
+const isSpans = (path: string) => path.endsWith("/spans");
 
 it("searches identifiers automatically and preserves empty-page continuation", async () => {
   const user = userEvent.setup();
   http.GET.mockImplementation(async (path, options) =>
-    path.endsWith("observations")
+    isSpans(path)
       ? response({ items: [], next_cursor: null })
       : response(
-          path.endsWith("trace-query")
+          isBackend(path)
             ? descriptor
             : options.params.query.cursor
               ? { items: [trace()], next_cursor: null }
@@ -175,10 +172,10 @@ it("searches identifiers automatically and preserves empty-page continuation", a
 it("applies metadata key=value filters from the popover", async () => {
   const user = userEvent.setup();
   http.GET.mockImplementation(async (path, options) =>
-    path.endsWith("observations")
+    isSpans(path)
       ? response({ items: [], next_cursor: null })
       : response(
-          path.endsWith("trace-query")
+          isBackend(path)
             ? descriptor
             : { items: [trace()], next_cursor: null },
         ),
@@ -210,7 +207,7 @@ it("applies metadata key=value filters from the popover", async () => {
         params: expect.objectContaining({
           query: expect.objectContaining({
             limit: 25,
-            metadata: ["scenario=review", "synthetic=true"],
+            attribute: ["scenario:review", "synthetic:true"],
           }),
         }),
       }),
@@ -224,7 +221,7 @@ it("applies metadata key=value filters from the popover", async () => {
         params: expect.objectContaining({
           query: expect.objectContaining({
             limit: 25,
-            metadata: ["synthetic=true"],
+            attribute: ["synthetic:true"],
           }),
         }),
       }),
@@ -233,9 +230,7 @@ it("applies metadata key=value filters from the popover", async () => {
 });
 
 it("does not call the backend data routes when query is disabled", async () => {
-  http.GET.mockResolvedValue(
-    response({ ...descriptor, enabled: false, search_in: [] }),
-  );
+  http.GET.mockResolvedValue(response({ type: null, queryable_since: null }));
   mount(<TracesPage />);
   await screen.findByText("Trace query disabled");
   expect(http.GET).toHaveBeenCalledTimes(1);
@@ -243,19 +238,61 @@ it("does not call the backend data routes when query is disabled", async () => {
 
 it("distinguishes a configured but unavailable backend", async () => {
   http.GET.mockImplementation(async (path) => {
-    if (path.endsWith("trace-query")) return response(descriptor);
-    throw new ApiError(503, "trace_query_unavailable", "Unavailable", {}, null);
+    if (isBackend(path)) return response(descriptor);
+    throw new ApiError(503, "unavailable", "Unavailable", {}, null);
   });
   mount(<TracesPage />);
   await screen.findByText("Trace query unavailable");
   expect(screen.queryByText("Trace query disabled")).toBeNull();
 });
 
+it.each([
+  ["session_id", "sess_linked"],
+  ["thread_id", "thread_linked"],
+  ["run_id", "run_linked"],
+])("opens filtered by a linked %s", async (filter, id) => {
+  http.GET.mockImplementation(async (path) =>
+    response(isBackend(path) ? descriptor : { items: [], next_cursor: null }),
+  );
+  mount(<TracesPage />, `/?${filter}=${id}`);
+  await screen.findByText("No traces in this range");
+  expect(
+    screen.getByRole("searchbox", { name: "Search by ID" }),
+  ).toHaveProperty("value", id);
+  expect(http.GET).toHaveBeenCalledWith(
+    "/api/v1/workspaces/{workspace_id}/traces",
+    expect.objectContaining({
+      params: expect.objectContaining({
+        query: expect.objectContaining({
+          session_id: undefined,
+          thread_id: undefined,
+          run_id: undefined,
+          [filter]: id,
+        }),
+      }),
+    }),
+  );
+});
+
+it("names the backend and how far back it finds traces", async () => {
+  http.GET.mockImplementation(async (path) =>
+    response(
+      isBackend(path)
+        ? { type: "logfire", queryable_since: "2026-08-24T00:00:00Z" }
+        : { items: [], next_cursor: null },
+    ),
+  );
+  mount(<TracesPage />);
+  const chip = await screen.findByTitle(/^Queryable since /);
+  expect(chip.textContent).toBe("by Logfire");
+});
+
 it("loads separate observation pages, deduplicates the root, and retains pagination after an empty page and retry", async () => {
   const user = userEvent.setup();
   let fail = true;
   http.GET.mockImplementation(async (path, options) => {
-    if (!path.endsWith("observations")) return response(trace());
+    if (isBackend(path)) return response(descriptor);
+    if (!isSpans(path)) return response(trace());
     const cursor = options.params.query.cursor;
     if (!cursor)
       return response({
@@ -309,36 +346,37 @@ it("loads separate observation pages, deduplicates the root, and retains paginat
   await user.click(screen.getByRole("treeitem", { name: /^child/ }));
   const panel = within(await screen.findByRole("complementary"));
   expect(panel.getByText("Diagnostic reason")).toBeTruthy();
-  expect(panel.getByText("Requested model")).toBeTruthy();
-  expect(panel.getByText("model-alias")).toBeTruthy();
-  expect(panel.getByText("model-version")).toBeTruthy();
+  expect(panel.getByText("Model")).toBeTruthy();
+  expect(panel.getAllByText(/model-version/).length).toBeGreaterThan(0);
   expect(panel.getByText("Error")).toBeTruthy();
+  expect(panel.getByText("error")).toBeTruthy();
   expect(panel.getByText("Telemetry status")).toBeTruthy();
   expect(panel.getAllByText(UNKNOWN).length).toBeGreaterThan(0);
-  expect(
-    panel.getByRole("button", { name: "Resource attributes" }),
-  ).toBeTruthy();
+  for (const name of ["Resource attributes", "Scope", "Events", "Links"])
+    expect(panel.getByRole("button", { name })).toBeTruthy();
 });
 
 it.each(["langfuse", "logfire"] as const)(
   "keeps Run navigation local and names the external %s destination",
-  async (provider) => {
+  async (type) => {
     http.GET.mockImplementation(async (path) =>
       response(
-        path.endsWith("observations")
-          ? { items: [], next_cursor: null }
-          : { ...trace(), provider },
+        isBackend(path)
+          ? { ...descriptor, type }
+          : isSpans(path)
+            ? { items: [], next_cursor: null }
+            : trace(),
       ),
     );
     mount(<TraceDetail traceId="trace-1" />);
-    const run = await screen.findByRole("link", { name: "View run" });
+    const backend = await screen.findByRole("link", {
+      name: `View in ${type === "langfuse" ? "Langfuse" : "Logfire"}`,
+    });
+    const run = screen.getByRole("link", { name: "View run" });
     expect(run.getAttribute("href")).toBe(
       "/workspaces/test/sessions/session/threads/thread/runs/run?view=debug",
     );
     expect(run.getAttribute("target")).toBeNull();
-    const backend = screen.getByRole("link", {
-      name: `View in ${provider === "langfuse" ? "Langfuse" : "Logfire"}`,
-    });
     expect(backend.getAttribute("href")).toBe(trace().source_url);
     expect(backend.getAttribute("target")).toBe("_blank");
     expect(backend.getAttribute("rel")).toBe("noopener noreferrer");
@@ -357,21 +395,75 @@ it.each([null, "javascript:alert(1)", "https://user:password@trace.example"])(
   async (source_url) => {
     http.GET.mockImplementation(async (path) =>
       response(
-        path.endsWith("observations")
-          ? { items: [], next_cursor: null }
-          : { ...trace(), source_url },
+        isBackend(path)
+          ? descriptor
+          : isSpans(path)
+            ? { items: [], next_cursor: null }
+            : { ...trace(), source_url },
       ),
     );
     mount(<TraceDetail traceId="trace-1" />);
     await screen.findByRole("link", { name: "View run" });
+    await waitFor(() =>
+      expect(http.GET).toHaveBeenCalledWith(
+        "/api/v1/workspaces/{workspace_id}/trace-backend",
+        expect.anything(),
+      ),
+    );
     expect(screen.queryByRole("link", { name: /View in/ })).toBeNull();
   },
 );
 
+it("derives the correlation from the root without reading the run", async () => {
+  const user = userEvent.setup();
+  http.GET.mockImplementation(async (path) =>
+    response(
+      isBackend(path)
+        ? descriptor
+        : isSpans(path)
+          ? { items: [], next_cursor: null }
+          : trace(),
+    ),
+  );
+  mount(<TraceDetail traceId="trace-1" />);
+  await screen.findByRole("link", { name: "View run" });
+  await user.click(screen.getByRole("tab", { name: "Metadata" }));
+  await user.click(screen.getByRole("button", { name: "Correlation" }));
+  for (const [key, value] of [
+    ["session_id", "session"],
+    ["thread_id", "thread"],
+    ["run_id", "run"],
+  ]) {
+    const row = screen.getByText(key).parentElement;
+    expect(row && within(row).getByText(value)).toBeTruthy();
+  }
+  expect(
+    http.GET.mock.calls.some(([path]) => String(path).includes("/runs/")),
+  ).toBe(false);
+});
+
+it("offers no run link when the root does not name the run's session", async () => {
+  const root = trace();
+  delete root.attributes["a13n.observation.metadata.session_id"];
+  http.GET.mockImplementation(async (path) =>
+    response(
+      isBackend(path)
+        ? descriptor
+        : isSpans(path)
+          ? { items: [], next_cursor: null }
+          : root,
+    ),
+  );
+  mount(<TraceDetail traceId="trace-1" />);
+  await screen.findByRole("link", { name: "View in Langfuse" });
+  expect(screen.queryByRole("link", { name: "View run" })).toBeNull();
+});
+
 it("hides cached detail after observation authorization is revoked", async () => {
   const user = userEvent.setup();
   http.GET.mockImplementation(async (path, options) => {
-    if (!path.endsWith("observations")) return response(trace());
+    if (isBackend(path)) return response(descriptor);
+    if (!isSpans(path)) return response(trace());
     if (options.params.query.cursor)
       throw new ApiError(404, "trace_not_found", "Trace not found", {}, null);
     return response({
@@ -391,10 +483,11 @@ it("hides cached detail after observation authorization is revoked", async () =>
 
 it("shows a loaded cost subtotal until pagination succeeds, without counting the root twice", async () => {
   const user = userEvent.setup();
-  const root = { ...observation("root"), cost_usd: "0.1" };
+  const root = { ...trace(), cost_usd: "0.1" };
   let fail = true;
   http.GET.mockImplementation(async (path, options) => {
-    if (!path.endsWith("observations")) return response({ ...trace(), root });
+    if (isBackend(path)) return response(descriptor);
+    if (!isSpans(path)) return response(root);
     if (!options.params.query.cursor)
       return response({
         items: [root, { ...observation("chat", "root"), cost_usd: "0.2" }],
@@ -429,21 +522,17 @@ it("shows a loaded cost subtotal until pagination succeeds, without counting the
 
 it("shows seconds, normalized levels and paginated aggregate cost in the list", async () => {
   const root = {
-    ...observation("root"),
+    ...trace(),
     level: "default",
     cost_usd: "0.1",
     ended_at: "2026-09-11T00:00:02.5Z",
-    input: {
-      media_type: null,
-      value: { content: [{ type: "text", text: "Input preview" }] },
-    },
-    output: { media_type: null, value: "Output preview" },
+    input: { content: [{ type: "text", text: "Input preview" }] },
+    output: "Output preview",
   };
   http.GET.mockImplementation(async (path, options) => {
-    if (path.endsWith("trace-query")) return response(descriptor);
-    if (!path.endsWith("observations"))
-      return response({ items: [{ ...trace(), root }], next_cursor: null });
-    expect(options.params.query).toMatchObject({ view: "compact", limit: 100 });
+    if (isBackend(path)) return response(descriptor);
+    if (!isSpans(path)) return response({ items: [root], next_cursor: null });
+    expect(options.params.query).toMatchObject({ limit: 100 });
     if (!options.params.query.cursor)
       return response({
         items: [root, { ...observation("chat"), cost_usd: "0.2" }],
@@ -473,25 +562,25 @@ it("shows seconds, normalized levels and paginated aggregate cost in the list", 
   expect(screen.queryByText("Severity")).toBeNull();
   expect(screen.queryByText(/USD|Unavailable/)).toBeNull();
   expect(http.GET).toHaveBeenCalledWith(
-    "/api/v1/workspaces/{workspace}/traces",
+    "/api/v1/workspaces/{workspace_id}/traces",
     expect.objectContaining({
       params: expect.objectContaining({
-        query: expect.objectContaining({ view: "compact", limit: 25 }),
+        query: expect.objectContaining({ limit: 25 }),
       }),
     }),
   );
+  expect(
+    http.GET.mock.calls.some(([path]) => String(path).includes("/runs/")),
+  ).toBe(false);
 });
 
 it("does not expose root-only or partial list costs when a later page fails or repeats", async () => {
-  const root = { ...observation("root"), input: null, cost_usd: "9" };
+  const root = { ...trace(), cost_usd: "9" };
   http.GET.mockImplementation(async (path, options) => {
-    if (path.endsWith("trace-query")) return response(descriptor);
-    if (!path.endsWith("observations"))
+    if (isBackend(path)) return response(descriptor);
+    if (!isSpans(path))
       return response({
-        items: [
-          { ...trace(), root },
-          { ...trace(), id: "repeated", root },
-        ],
+        items: [root, { ...root, id: "repeated-root", trace_id: "repeated" }],
         next_cursor: null,
       });
     if (options.params.path.trace_id === "repeated")
@@ -508,15 +597,13 @@ it("does not expose root-only or partial list costs when a later page fails or r
     expect(cells[3].textContent).toBe(UNKNOWN);
     expect(cells[4].textContent).toBe(UNKNOWN);
   }
-  expect(
-    http.GET.mock.calls.filter(([path]) => path.endsWith("observations")),
-  ).toHaveLength(4);
+  expect(http.GET.mock.calls.filter(([path]) => isSpans(path))).toHaveLength(4);
 });
 
 it("hides the list after a cost read reports revoked access", async () => {
   http.GET.mockImplementation(async (path) => {
-    if (path.endsWith("trace-query")) return response(descriptor);
-    if (path.endsWith("observations"))
+    if (isBackend(path)) return response(descriptor);
+    if (isSpans(path))
       throw new ApiError(404, "trace_not_found", "Trace not found", {}, null);
     return response({ items: [trace()], next_cursor: null });
   });
@@ -528,12 +615,13 @@ it("hides the list after a cost read reports revoked access", async () => {
 it("bounds list cost concurrency and stops pending reads when leaving the list", async () => {
   const pending: { signal: AbortSignal; finish: () => void }[] = [];
   http.GET.mockImplementation(async (path, options) => {
-    if (path.endsWith("trace-query")) return response(descriptor);
-    if (!path.endsWith("observations"))
+    if (isBackend(path)) return response(descriptor);
+    if (!isSpans(path))
       return response({
         items: Array.from({ length: 6 }, (_, index) => ({
           ...trace(),
-          id: `trace-${index}`,
+          id: `root-${index}`,
+          trace_id: `trace-${index}`,
         })),
         next_cursor: null,
       });
@@ -555,8 +643,8 @@ it("bounds list cost concurrency and stops pending reads when leaving the list",
 it("caps advancing cost pagination without exposing a partial total", async () => {
   let reads = 0;
   http.GET.mockImplementation(async (path) => {
-    if (path.endsWith("trace-query")) return response(descriptor);
-    if (!path.endsWith("observations"))
+    if (isBackend(path)) return response(descriptor);
+    if (!isSpans(path))
       return response({ items: [trace()], next_cursor: null });
     reads++;
     return response({
@@ -575,12 +663,14 @@ it("caps advancing cost pagination without exposing a partial total", async () =
 
 it("uses seconds in the detail overview, timeline and observation dialog", async () => {
   const user = userEvent.setup();
-  const root = { ...observation("root"), ended_at: "2026-09-11T00:00:02.5Z" };
+  const root = { ...trace(), ended_at: "2026-09-11T00:00:02.5Z" };
   http.GET.mockImplementation(async (path) =>
     response(
-      path.endsWith("observations")
-        ? { items: [root], next_cursor: null }
-        : { ...trace(), root },
+      isBackend(path)
+        ? descriptor
+        : isSpans(path)
+          ? { items: [root], next_cursor: null }
+          : root,
     ),
   );
   mount(<TraceDetail traceId="trace-1" />);
@@ -599,12 +689,13 @@ it("uses seconds in the detail overview, timeline and observation dialog", async
 it("immediately hides revoked content without waiting for unrelated cost reads or starting more pages", async () => {
   const pending: (() => void)[] = [];
   http.GET.mockImplementation(async (path, options) => {
-    if (path.endsWith("trace-query")) return response(descriptor);
-    if (!path.endsWith("observations"))
+    if (isBackend(path)) return response(descriptor);
+    if (!isSpans(path))
       return response({
         items: Array.from({ length: 5 }, (_, index) => ({
           ...trace(),
-          id: `trace-${index}`,
+          id: `root-${index}`,
+          trace_id: `trace-${index}`,
         })),
         next_cursor: null,
       });
@@ -622,21 +713,21 @@ it("immediately hides revoked content without waiting for unrelated cost reads o
     pending.forEach((resolve) => resolve());
   }
   await waitFor(() => expect(cache.isFetching()).toBe(0));
-  expect(
-    http.GET.mock.calls.filter(([path]) => path.endsWith("observations")),
-  ).toHaveLength(4);
+  expect(http.GET.mock.calls.filter(([path]) => isSpans(path))).toHaveLength(4);
 });
 
 it("sorts aggregate costs rather than root costs and keeps the order after pagination", async () => {
   const user = userEvent.setup();
   const makeTrace = (id: string, cost: string | null) => ({
     ...trace(),
-    id,
-    root: { ...observation(id), cost_usd: cost },
+    id: `${id}-span`,
+    trace_id: id,
+    name: id,
+    cost_usd: cost,
   });
   http.GET.mockImplementation(async (path, options) => {
-    if (path.endsWith("trace-query")) return response(descriptor);
-    if (path.endsWith("observations"))
+    if (isBackend(path)) return response(descriptor);
+    if (isSpans(path))
       return response({
         items: [
           {
@@ -683,26 +774,19 @@ it("opens the root content tab without substituting child output", async () => {
   const user = userEvent.setup();
   http.GET.mockImplementation(async (path) =>
     response(
-      path.endsWith("observations")
-        ? {
-            items: [
-              {
-                ...observation("child", "root"),
-                output: {
-                  media_type: "text/plain",
-                  value: "Child only output",
+      isBackend(path)
+        ? descriptor
+        : isSpans(path)
+          ? {
+              items: [
+                {
+                  ...observation("child", "root"),
+                  output: "Child only output",
                 },
-              },
-            ],
-            next_cursor: null,
-          }
-        : {
-            ...trace(),
-            root: {
-              ...observation("root"),
-              input: { media_type: "text/plain", value: "Root input" },
-            },
-          },
+              ],
+              next_cursor: null,
+            }
+          : { ...trace(), input: "Root input" },
     ),
   );
   mount(<TraceDetail traceId="trace-1" />, "/?tab=content");

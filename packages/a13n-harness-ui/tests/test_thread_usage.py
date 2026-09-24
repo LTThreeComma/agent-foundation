@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -36,6 +37,7 @@ def _thread(name: str, parent: str | None = None) -> ThreadRecord:
 
 def _model(index: int, *, run: str = "run-root", child: bool = False, cost: Decimal | None = None) -> ModelUsageRecord:
     return ModelUsageRecord(
+        call_id="call_fixture",
         record_id=f"usage-{run}-{index}",
         run_id=run,
         response_ordinal=index,
@@ -81,6 +83,7 @@ def _report(*records: ModelUsageRecord | ProviderUsageRecord) -> HarnessEvent:
         sequence=1,
         occurred_at=_NOW,
         event=HarnessExtensionEvent(
+            schema_version="1",
             kind="usage",
             payload=UsageReportPayload(
                 report_id="usage-report",
@@ -287,6 +290,7 @@ async def test_legacy_and_auxiliary_records_reaggregate_without_repricing_or_con
     async with open_database(tmp_path / "metadata.sqlite3", settings) as database:
         legacy = _model(0).model_dump(mode="json")
         for field in (
+            "call_id",
             "source",
             "tool_id",
             "tool_call_id",
@@ -311,6 +315,7 @@ async def test_legacy_and_auxiliary_records_reaggregate_without_repricing_or_con
                 )
             )
         repository = ThreadUsageRepository(database.sessions)
+        assert await repository.latest_root_request(thread_id="thread-root") == ModelUsageRecord.model_validate(legacy)
         primary = _model(1, cost=Decimal("0.1")).model_copy(update={"model_name": "switched-model"})
         media = _model(2, cost=Decimal("0.2")).model_copy(
             update={
@@ -375,3 +380,79 @@ async def test_auxiliary_group_overflow_preserves_all_scope_totals(tmp_path: Pat
         assert sum(row.descendants.model_requests for row in view.model_scopes) == 70
         assert view.combined.model_requests == 140
         assert await repository.latest_root_request(thread_id="thread-root") is None
+
+
+@pytest.mark.parametrize("call_id", [None, "call_dispatch"])
+async def test_current_usage_identity_survives_transport_live_and_storage(tmp_path, call_id):
+    from a13n_harness_ui.live import LiveEvent, model_usage
+    from a13n_stream_protocol import HarnessAguiObserver
+
+    record = _model(0).model_copy(update={"call_id": call_id})
+    raw = record.model_dump(mode="json")
+    report = _report(record)
+    extension = report.event.model_copy(
+        update={"schema_version": "1", "payload": {**report.event.payload, "records": [raw]}}
+    )
+    report = replace(report, event=extension)
+    transport = HarnessAguiObserver().observe(report)
+    assert len(transport) == 1
+    wire = transport[0].model_dump(mode="json")
+    assert wire["value"]["event"]["schema_version"] == "1"
+    assert wire["value"]["event"]["payload"]["records"] == [raw]
+    live = LiveEvent(
+        epoch="epoch",
+        sequence=1,
+        run_kind="root",
+        root_thread_id="thread-root",
+        thread_id="thread-root",
+        run_id="run-root",
+        event_type="CUSTOM",
+        payload=wire,
+        payload_omitted=False,
+    )
+    assert model_usage(live) == (record,)
+    settings = StorageSettings(data_root=tmp_path)
+    async with open_database(tmp_path / "metadata.sqlite3", settings) as database:
+        async with transaction(database.sessions) as session:
+            session.add(_thread("thread-root"))
+        repository = ThreadUsageRepository(database.sessions)
+        await repository.observe(thread_id="thread-root", item=report)
+        assert await repository.latest_root_request(thread_id="thread-root") == record
+
+
+async def test_usage_without_call_id_survives_transport_live_and_storage(tmp_path):
+    from a13n_harness_ui.live import LiveEvent, model_usage
+    from a13n_stream_protocol import HarnessAguiObserver
+
+    record = _model(0).model_copy(update={"call_id": None})
+    raw = record.model_dump(mode="json")
+    raw.pop("call_id")
+    report = _report(record)
+    extension = report.event.model_copy(
+        update={
+            "schema_version": "1",
+            "payload": {**report.event.payload, "records": [raw]},
+        }
+    )
+    report = replace(report, event=extension)
+    assert HarnessAguiObserver().observe(report)
+    live = LiveEvent(
+        epoch="epoch",
+        sequence=1,
+        run_kind="root",
+        root_thread_id="thread-root",
+        thread_id="thread-root",
+        run_id="run-root",
+        event_type="CUSTOM",
+        payload={"value": {"event": extension.model_dump(mode="json")}},
+        payload_omitted=False,
+    )
+    assert model_usage(live) == (record,)
+    settings = StorageSettings(data_root=tmp_path)
+    async with open_database(tmp_path / "metadata.sqlite3", settings) as database:
+        async with transaction(database.sessions) as session:
+            session.add(_thread("thread-root"))
+        repository = ThreadUsageRepository(database.sessions)
+        await repository.observe(thread_id="thread-root", item=report)
+        assert await repository.latest_root_request(thread_id="thread-root") == record
+        assert (await repository.snapshot(thread_id="thread-root")).combined.model_requests == 1

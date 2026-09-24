@@ -4,11 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import pytest
+from a13n_harness import AgentSpec, HarnessBuilder
 from a13n_harness.environment import (
     FileQueryRequest,
     FileTextSearchRequest,
 )
 from a13n_harness.providers.environment.files import FileOperator
+from pydantic_ai.models.function import FunctionModel
 
 
 @pytest.fixture
@@ -85,3 +87,13 @@ class FileSearchConformance:
 @pytest.fixture
 def file_search_conformance() -> FileSearchConformance:
     return FileSearchConformance()
+
+
+@pytest.fixture
+async def reviewer_context():
+    async def unused_model(messages, info):
+        yield "unused"
+
+    executable = HarnessBuilder().build(AgentSpec(), output_type=str, model=FunctionModel(stream_function=unused_model))
+    async with executable.stream("context fixture") as stream:
+        yield stream.context

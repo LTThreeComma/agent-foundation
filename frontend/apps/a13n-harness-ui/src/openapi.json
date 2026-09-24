@@ -16156,7 +16156,8 @@
         "enum": [
           "image_understanding",
           "video_understanding",
-          "audio_understanding"
+          "audio_understanding",
+          "document_understanding"
         ],
         "title": "ModelCapability",
         "description": "Harness-owned capabilities of the active Agent model."

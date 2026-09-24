@@ -65,12 +65,14 @@ Service allocates four suffix lengths. The table specifies capacity assumptions,
 
 The shared Service allocator owns these prefix assignments; callers cannot choose a shorter length:
 
-| Suffix length | Allocated prefixes                                                                                                                                                                                                                                             |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 20            | `acct`, `ap`, `cconn`, `cnr`, `envp`, `envtpl`, `hsub`, `mcpc`, `mdl`, `memprov`, `mprov`, `org`, `sa`, `sk`, `usr`, `ws`                                                                                                                                      |
-| 24            | `a2actx`, `aguitb`, `apr`, `ast`, `bind`, `env`, `envrev`, `hsubr`, `img`, `inv`, `rb`, `sess`, `session`, `skr`, `sku`, `tgt`                                                                                                                                 |
-| 28            | `a2amsg`, `a2apush`, `a2atask`, `aguirb`, `crr`, `envop`, `ibat`, `inb`, `qsub`, `rat`, `run`                                                                                                                                                                  |
-| 32            | `ase`, `aud`, `audit`, `comment`, `csa`, `dlv`, `ect`, `effect`, `envowner`, `iadm`, `idem`, `key`, `lev`, `lsp`, `message`, `mos`, `mut`, `ntf`, `obx`, `opg`, `prt`, `reply`, `svc`, `thread`, `tool`, `wrk`; every other valid kind defaults to this length |
+| Suffix length | Allocated prefixes                                                                                                                                           |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 20            | `ap`, `conn`, `cprov`, `envtpl`, `eprov`, `mdl`, `mprov`, `org`, `sa`, `sk`, `usr`, `wprov`, `ws`                                                            |
+| 24            | `apr`, `ast`, `env`, `inv`, `rb`, `sess`, `skr`                                                                                                              |
+| 28            | `inb`, `rat`, `run`                                                                                                                                          |
+| 32            | `ase`, `audit`, `connop`, `ctl`, `ect`, `envoper`, `key`, `obx`, `prt`, `req`, `sec`, `sub`, `thread`, `wrk`; every other valid kind defaults to this length |
+
+Prefixes allocated by the historical Service remain retired and are never reassigned: `a2actx`, `a2amsg`, `a2apush`, `a2atask`, `acct`, `aguirb`, `aguitb`, `aud`, `bind`, `cconn`, `comment`, `crr`, `csa`, `dlv`, `effect`, `envop`, `envowner`, `envrev`, `hsub`, `hsubr`, `iadm`, `ibat`, `idem`, `img`, `lev`, `lsp`, `mcpc`, `memprov`, `message`, `mos`, `mut`, `ntf`, `opg`, `qsub`, `reply`, `session`, `sku`, `svc`, `tgt` and `tool`.
 
 Kinds used for claims, worker incarnations, publication generations, or authentication workflows retain at least 128 random bits regardless of their expected volume. New kinds start at 32 characters until their owner assigns a smaller tier against an explicit lifetime volume budget. A deployment expected to exceed a tier's budget must review allocation length before that growth; cleanup does not reset the budget. These probabilities apply per prefix, not to the aggregate probability across all kinds.
 
@@ -86,21 +88,21 @@ Compact model-facing references such as `process-1`, `task-2`, or a scoped subag
 
 ## Resource Revisions and Concurrency
 
-A revisioned Foundation resource has one stable object ID, one positive integer `version` beginning at `1`, and one `default_revision_id`. Its immutable Revision carries the same resource ID and version. The default is the Revision that an unpinned selection resolves; it is not necessarily the highest version.
+A revisioned Foundation resource has one stable object ID, a mutable head and immutable Revisions. The head carries `version`, its representation version, and `default_revision_id`. Each Revision carries the resource ID and a positive `number` beginning at `1`. The default is the Revision that an unpinned selection resolves; it is not necessarily the highest number.
 
-- Creation atomically commits the resource head and Revision `1`.
-- A material content change appends one complete immutable Revision numbered `version + 1`, increments `version` once, and selects that Revision as the default in the same transaction, even when the default was an older Revision.
-- A canonical semantic no-op returns the default Revision and changes neither `version` nor the representation tag.
-- Selecting a retained Revision as the default repoints the head under its strong `ETag`; it appends no Revision and never changes `version`.
-- `(resource_id, version)` is unique, positive, monotonically increasing, and never reused.
+- Creation atomically commits the head and Revision `1`, which becomes the default.
+- Publishing appends one complete immutable Revision numbered one above the highest, conditioned on the head's strong `ETag`. The Revision becomes the default unless the publication asks otherwise.
+- A publication whose canonical content equals the current default Revision is a no-op: it returns that Revision and changes neither the head nor its `ETag`.
+- Selecting a retained Revision as the default repoints the head under its `ETag`; it appends no Revision.
+- `(resource_id, number)` is unique, positive, monotonically increasing, and never reused.
 - Durable work records an exact Revision ID or a complete owner-defined snapshot. It never resolves an unqualified `latest` during execution or recovery.
-- Absence is represented explicitly rather than by version `0`.
+- Absence is represented explicitly rather than by number `0`.
 
-Revision content contains every value whose change must affect durable selection, reconstruction, or historical interpretation. The resource head contains stable identity, user-facing metadata, administrative availability, archival or deletion facts, audit actors, timestamps, `version`, and `default_revision_id`; it does not duplicate mutable Revision content. A metadata-only mutation does not create a Revision or increment `version`.
+Revision content contains every value whose change must affect durable selection, reconstruction, or historical interpretation. The resource head contains stable identity, user-facing metadata, administrative availability, archival or deletion facts, audit actors, timestamps, `version`, and `default_revision_id`; it does not duplicate mutable Revision content. A metadata-only mutation creates no Revision.
 
-Revision publication uses `expected_version` against the resource head. Default selection, metadata-only, and intentionally non-revisioned resource mutations use a strong representation `ETag` and `If-Match`. The tag is concurrency evidence rather than an addressable version or revision. Idempotent replay is resolved before either precondition is evaluated.
+Every change to the head advances its `version`, and every conditional mutation, publication included, presents the strong `ETag` derived from it in `If-Match`. One mechanism therefore orders all mutations of a resource; the tag is concurrency evidence rather than an addressable version or revision. Idempotent replay is resolved before the precondition is evaluated.
 
-Foundation models use `version` for their primary version axis and do not expose a parallel `revision_number` or another generic scalar counter for the same fact. A model with multiple independent version axes qualifies the secondary names just enough to distinguish them. Mutable representations that do not need an addressable or domain-significant version use a strong ETag. Database migrations, protocols, artifacts, packages, and external systems retain their owner-defined compatibility or release semantics.
+A revisioned model has exactly two version axes: the head's `version` and the Revision `number`. Other Foundation models use `version` for their primary version axis and do not expose a parallel counter for the same fact. A model with multiple independent version axes qualifies the secondary names just enough to distinguish them. Mutable representations that do not need an addressable or domain-significant version use a strong ETag. Database migrations, protocols, artifacts, packages, and external systems retain their owner-defined compatibility or release semantics.
 
 Sequences, ordinals, offsets, generations, and fences retain their distinct meanings and are not renamed to versions merely because they are numeric. A generation change or fence advance does not create a new domain-object version unless the owning contract commits a corresponding material change.
 
@@ -158,7 +160,7 @@ Data that affects authority, execution behavior, compatibility, or recovery is r
 02. Foundation-owned object IDs encode no authority, ordering, ownership, or deployment information.
 03. External identities and compact scoped references preserve their owning formats and are never relabeled as Foundation-owned object IDs.
 04. A revisioned Foundation resource uses one stable ID, one current Revision ID, and positive integer versions beginning at `1`; the head and current Revision expose the same version.
-05. A mutation of a versioned model uses `expected_version`; metadata-only and intentionally non-versioned mutations use an owning strong `ETag` and introduce no parallel generic counter.
+05. A mutation of a versioned state model uses `expected_version`; a revisioned resource head, metadata-only and intentionally non-versioned mutations use an owning strong `ETag`; neither introduces a parallel generic counter.
 06. Durable work selects exact object versions, immutable revision identities, or an owner-defined execution snapshot rather than resolving `latest` during execution or recovery.
 07. Public interfaces favor concise domain language, while internal models make ambiguous meanings explicit through names and types.
 08. Identifier possession never replaces authentication, authorization, scope, or lifecycle validation.

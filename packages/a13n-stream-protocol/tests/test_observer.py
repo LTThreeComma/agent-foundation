@@ -1091,3 +1091,25 @@ def test_snapshot_ranges_are_detached_and_keep_a_fixed_boundary() -> None:
     assert all(
         event.delta != "mutated" for event in observer.snapshot(stop=stop) if isinstance(event, TextMessageContentEvent)
     )
+
+
+def test_steering_request_start_before_previous_part_end_preserves_message_identity() -> None:
+    observer = HarnessAguiObserver()
+    first = observer.observe(_event(0, PartStartEvent(index=0, part=TextPart("first"))))
+    observer.observe(
+        _event(
+            1,
+            HarnessExtensionEvent(kind="lifecycle", payload={"type": "model_request_started", "request_index": 1}),
+        )
+    )
+    ended = observer.observe(_event(2, PartEndEvent(index=0, part=TextPart("first"))))
+    second = observer.observe(_event(3, PartStartEvent(index=0, part=TextPart("second"))))
+    second_end = observer.observe(_event(4, PartEndEvent(index=0, part=TextPart("second"))))
+    assert isinstance(first[0], TextMessageStartEvent)
+    assert isinstance(second[0], TextMessageStartEvent)
+    assert [type(event) for event in ended] == [TextMessageEndEvent]
+    assert ended[0].message_id == first[0].message_id
+    assert second_end[0].message_id == second[0].message_id
+    assert first[0].message_id != second[0].message_id
+    starts = [event.message_id for event in observer.snapshot() if isinstance(event, TextMessageStartEvent)]
+    assert len(starts) == len(set(starts)) == 2

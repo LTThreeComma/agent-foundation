@@ -60,7 +60,13 @@ def is_sensitive_key(key: str) -> bool:
 
 
 def redact_json(value: JsonValue) -> JsonValue:
-    """Return a detached JSON value with common authority-bearing content removed."""
+    """Return a detached JSON value with common authority-bearing content removed.
+
+    Object members whose key names an authority, such as `authorization`, `api_key`, `password`, `secret` or
+    `token` (but not token counts such as `input_tokens`), become `"[REDACTED]"`, and every string has its
+    `Bearer <credential>` values replaced. This is the rule the Harness applies to extension event payloads;
+    Hosts apply it to trace content they read back from a collector.
+    """
     if isinstance(value, str):
         return redact_bearer(value)
     if isinstance(value, list):

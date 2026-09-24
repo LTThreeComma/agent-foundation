@@ -1,5 +1,5 @@
-import type { RunEvent } from "../../service-client";
 import { describe, expect, it } from "vitest";
+import type { RunEvent } from "./display";
 import {
   applyRunEvent,
   compareCursors,
@@ -16,8 +16,8 @@ function event(
     event: {
       event_id: `rse_${cursor}`,
       event_type,
-      run_id: "run_test",
-      thread_id: "thread_test",
+      run_attempt_id: null,
+      harness_run_id: null,
       item_id: "itm_message",
       occurred_at: "2026-09-08T00:00:00Z",
       payload,
@@ -37,9 +37,9 @@ describe("Run presentation checkpoints", () => {
         id: "itm_message",
         kind: "text_message",
         state: "interrupted",
-        parent_item_id: null,
         first_stream_id: "100-0",
         last_stream_id: "100-1",
+        started_at: "2026-09-08T00:00:00Z",
         content: { text: "Hello" },
       },
     ]);
@@ -73,9 +73,9 @@ describe("Run presentation checkpoints", () => {
         id: "itm_message",
         kind: "text_message",
         state: "interrupted",
-        parent_item_id: null,
         first_stream_id: "100-0",
         last_stream_id: "100-1",
+        started_at: "2026-09-08T00:00:00Z",
         content: {},
       },
     ]);
@@ -115,20 +115,19 @@ it("does not interrupt an Item already read beyond a replayed recovery event", (
       id: "new",
       kind: "text_message",
       state: "in_progress",
-      parent_item_id: null,
       first_stream_id: "6-0",
       last_stream_id: "8-0",
+      started_at: "2026-09-17T00:00:01Z",
       content: { text: "after recovery" },
     },
   ]);
   const recovered = applyRunEvent(items, {
     cursor: "5-0",
     event: {
-      schema_version: "1",
       event_id: "event_recovery",
       event_type: "run.recovery",
-      run_id: "run",
-      thread_id: "thread",
+      run_attempt_id: null,
+      harness_run_id: null,
       item_id: null,
       occurred_at: "2026-09-17T00:00:00Z",
       payload: {},
@@ -137,7 +136,7 @@ it("does not interrupt an Item already read beyond a replayed recovery event", (
   expect(recovered.get("new")?.state).toBe("in_progress");
 });
 
-it("times an Item from its first and terminal observation and never from a snapshot", () => {
+it("times an Item from its first and terminal events, and a committed Item from the display", () => {
   let items = applyRunEvent(
     new Map(),
     event("300-0", "agui.text_message_start", {
@@ -159,14 +158,30 @@ it("times an Item from its first and terminal observation and never from a snaps
       id: "itm_snapshot",
       kind: "text_message",
       state: "completed",
-      parent_item_id: null,
       first_stream_id: "100-0",
       last_stream_id: "100-1",
+      started_at: "2026-09-08T00:00:01Z",
+      ended_at: "2026-09-08T00:00:04Z",
       content: { text: "Hello" },
+    },
+    {
+      id: "itm_open",
+      kind: "text_message",
+      state: "interrupted",
+      first_stream_id: "100-2",
+      last_stream_id: "100-2",
+      started_at: "2026-09-08T00:00:05Z",
+      ended_at: null,
+      content: { text: "Cut" },
     },
   ]);
   expect(retained.get("itm_snapshot")).toMatchObject({
-    startedAt: null,
+    startedAt: "2026-09-08T00:00:01Z",
+    endedAt: "2026-09-08T00:00:04Z",
+  });
+  // An Item that never finished has no end, even once its Run has sealed.
+  expect(retained.get("itm_open")).toMatchObject({
+    startedAt: "2026-09-08T00:00:05Z",
     endedAt: null,
   });
 });

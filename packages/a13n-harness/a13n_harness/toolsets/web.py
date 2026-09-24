@@ -23,6 +23,7 @@ from a13n_harness._urls import require_http_url as _require_http_url
 from a13n_harness.context import AgentContext
 from a13n_harness.environment.providers import FileScopeProvider
 from a13n_harness.errors import DefinitionError, RunError
+from a13n_harness.media_types import is_text_media_type, text_charset
 from a13n_harness.providers.environment.files import FileOperator
 from a13n_harness.providers.environment.models import EnvironmentError
 from a13n_harness.providers.web.contracts import _validate_headers
@@ -440,7 +441,7 @@ class WebToolset:
                 if response.status_code >= 400:
                     return _status_error(response)
                 content_type = _header(response.headers, "content-type").split(";", maxsplit=1)[0].strip().lower()
-                if not _is_textual(content_type):
+                if not is_text_media_type(content_type):
                     return {
                         **_web_error("web_fetch_content_unsupported"),
                         "final_url": response.canonical_url,
@@ -453,7 +454,7 @@ class WebToolset:
                         max_chunk_bytes=self.configuration.stream_chunk_size,
                         truncate=True,
                     )
-                text = data.decode(_text_charset(_header(response.headers, "content-type")), errors="replace")
+                text = data.decode(text_charset(_header(response.headers, "content-type")), errors="replace")
                 projected: dict[str, JsonValue] = {
                     "ok": True,
                     "content": text,
@@ -688,25 +689,6 @@ def _header(headers: Mapping[str, str], name: str) -> str:
         if key.casefold() == lowered:
             return value
     return ""
-
-
-def _is_textual(media_type: str) -> bool:
-    return (
-        media_type.startswith("text/")
-        or media_type in {"application/json", "application/xml", "application/javascript"}
-        or media_type.endswith("+json")
-        or media_type.endswith("+xml")
-    )
-
-
-def _text_charset(content_type: str) -> str:
-    for parameter in content_type.split(";")[1:]:
-        key, separator, value = parameter.partition("=")
-        if separator and key.strip().casefold() == "charset":
-            candidate = value.strip().strip('"').casefold()
-            if candidate in {"utf-8", "utf8", "ascii", "us-ascii"}:
-                return candidate
-    return "utf-8"
 
 
 async def _read_response_body(

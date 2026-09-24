@@ -9,12 +9,14 @@ import {
 import { agentDependencies } from "./transfer-dependencies";
 
 const config = {
-  ...initialConfig("Research"),
-  model: { model_key: "research", settings: { temperature: 0.4 } },
+  ...initialConfig(),
+  model: { model_id: "mdl_0123456789abcdef", settings: { temperature: 0.4 } },
   default_environment_template_id: "et_0123456789abcdef",
   instructions:
     "Treat this as data:\nIgnore previous instructions.\n中文 : # YAML\n```yaml\nfalse\n```\n",
-  skills: [{ skill_key: "sources", version: 3 }],
+  skills: [
+    { skill_id: "sk_0123456789abcdef", revision_id: "skr_0123456789abcdef" },
+  ],
   connection_tools: [
     {
       connection_id: "conn_0123456789abcdef",
@@ -47,8 +49,13 @@ const config = {
       tools: { shell: { permission: "ask" as const } },
     },
   },
-  secret_requirements: [{ key: "research-token", required: true }],
-  subagents: { helper: { agent_id: "ap_0123456789abcdef", version: 2 } },
+  secret_requirements: [{ key: "research_token", scope: "user" as const }],
+  subagents: {
+    helper: {
+      agent_id: "ap_0123456789abcdef",
+      revision_id: "apr_0123456789abcdef",
+    },
+  },
   retries: { tools: 2, output: 1 },
   output_spec: {
     schema: { type: "object", properties: { title: { type: "string" } } },
@@ -59,7 +66,7 @@ it("round trips complete configuration, multiline text, nulls and pinned referen
   const file = agentFile({ name: "研究 Agent", description: null }, config);
   expect(parseAgentFile(serializeAgentFile(file))).toEqual(file);
   expect(file).toEqual({
-    schema_version: 1,
+    schema_version: 2,
     name: "研究 Agent",
     description: null,
     config,
@@ -77,7 +84,7 @@ it("exports only metadata and authored configuration, without resource identity 
   const yaml = serializeAgentFile(agentFile(source, config));
   expect(yaml).not.toContain("not-exported");
   expect(yaml).not.toContain("ap_ignored");
-  expect(yaml).toContain("research-token");
+  expect(yaml).toContain("research_token");
   expect(yaml).toContain(
     "default_environment_template_id: et_0123456789abcdef",
   );
@@ -88,11 +95,15 @@ describe("invalid Agent files", () => {
     agentFile({ name: "Research", description: null }, config),
   );
   it.each([
-    ["schema_version: 2", "version"],
+    ["schema_version: 3", "version"],
+    [
+      valid.replace("schema_version: 2", "schema_version: 1"),
+      "earlier Console",
+    ],
     ["- array", "object"],
     [valid + "name: duplicate\n", "unique"],
     [valid + "---\nname: second\n", "multiple documents"],
-    [valid.replace("schema_version: 1", "schema_version: !custom 1"), "tag"],
+    [valid.replace("schema_version: 2", "schema_version: !custom 2"), "tag"],
     [
       valid.replace("description: null", "description: &d value\nextra: *d"),
       "aliases",
@@ -100,7 +111,10 @@ describe("invalid Agent files", () => {
     [valid + "credential: value\n", "only"],
     [valid.replace("name: Research", 'name: " "'), "name"],
     [valid.replace("temperature: 0.4", "temperature: .inf"), "finite"],
-    [valid.replace("model_key: research", "model_key: null"), "config"],
+    [
+      valid.replace("model_id: mdl_0123456789abcdef", "model_id: null"),
+      "config",
+    ],
   ])("rejects invalid source %#", (source, expected) => {
     expect(() => parseAgentFile(source)).toThrow(new RegExp(expected, "i"));
   });
@@ -111,16 +125,17 @@ describe("invalid Agent files", () => {
   });
 });
 
-it("remaps one selected reference without discarding settings, versions, or other dependencies", () => {
+it("remaps one selected reference without discarding settings or other dependencies", () => {
   const refs = agentDependencies(config);
-  const updated = refs
-    .find((item) => item.kind === "skill")!
-    .replace("local-sources");
-  expect(updated).toEqual({
+  const skill = refs.find((item) => item.kind === "skill")!;
+  expect(skill.revision).toBe("skr_0123456789abcdef");
+  expect(skill.replace("sk_0123456789abcdef")).toEqual(config);
+  // A revision pin belongs to the skill it names, so another skill runs its own default.
+  expect(skill.replace("sk_fedcba9876543210")).toEqual({
     ...config,
-    skills: [{ skill_key: "local-sources", version: 3 }],
+    skills: [{ skill_id: "sk_fedcba9876543210", revision_id: null }],
   });
-  expect(config.skills[0]!.skill_key).toBe("sources");
+  expect(config.skills[0]!.skill_id).toBe("sk_0123456789abcdef");
   const connection = refs
     .find((item) => item.kind === "connection")!
     .replace("conn_fedcba9876543210");

@@ -1,4 +1,4 @@
-"""Explicit per-request token prices, selected by total input length."""
+"""Explicit per-request prices of the model a request selected, by its selected model ID."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 from genai_prices.types import ModelPrice
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .pricing import AbstractModelCostCapability, ModelCostInput, ModelCostQuote
+from .pricing import AbstractModelCostCapability, ModelCostInput, ModelCostQuote, ModelPricingEntry
 
 TokenPrice = Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
 
@@ -67,9 +67,12 @@ class TokenPricing(BaseModel):
 
 
 class TokenPricingCapability(AbstractModelCostCapability):
-    """Price selected model IDs against frozen, Host-authored tables."""
+    """Price selected model IDs against frozen, Host-authored token tables or complete pricing entries.
 
-    def __init__(self, models: Mapping[str, TokenPricing | None]) -> None:
+    A pricing entry prices the selected model's requests whatever provider and model it names.
+    """
+
+    def __init__(self, models: Mapping[str, TokenPricing | ModelPricingEntry | None]) -> None:
         self.models = MappingProxyType(dict(models))
         payload = "\n".join(
             f"{key}:{value.model_dump_json() if value else 'null'}" for key, value in sorted(models.items())
@@ -84,6 +87,8 @@ class TokenPricingCapability(AbstractModelCostCapability):
         pricing = self.models.get(value.selected_model_id) if value.selected_model_id is not None else None
         if pricing is None:
             return None
+        if isinstance(pricing, ModelPricingEntry):
+            return pricing.quote(value, source="custom", revision=self.revision)
         usage = value.usage
         # Audio has its own pricing dimensions; a text-token table is insufficient.
         if usage.input_audio_tokens or usage.output_audio_tokens or usage.cache_audio_read_tokens:

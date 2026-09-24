@@ -28,14 +28,14 @@ export function AttachDialog({
   disabled: boolean;
   structured: string;
   onStructuredChange: (value: string) => void;
-  onAttach: (attachment: Schema["BinaryContent"]) => void;
+  onAttach: (attachment: { part: Schema["UrlPart"]; label: string }) => void;
   onUpload: (file: File | undefined) => void;
   uploading: boolean;
   uploadedFile?: File;
 }) {
   const { t } = useTranslation();
   const { can } = useWorkspace();
-  const canUpload = can("asset.create");
+  const canUpload = can("run");
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<Mode>(canUpload ? "file" : "url");
   const [url, setUrl] = useState("");
@@ -101,7 +101,7 @@ export function AttachDialog({
               variant="outline"
               disabled={!/^https?:\/\//i.test(url)}
               onClick={() => {
-                onAttach({ type: "binary", source: { type: "url", url } });
+                onAttach({ part: { type: "url", url }, label: url });
                 setUrl("");
               }}
             >

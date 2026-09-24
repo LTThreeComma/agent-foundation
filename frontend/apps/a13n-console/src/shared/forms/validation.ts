@@ -11,10 +11,10 @@ ajv.addSchema({ components }, "service");
 export const validateAgentConfig = ajv.compile<Schema["AgentConfig-Input"]>({
   $ref: "service#/components/schemas/AgentConfig-Input",
 });
-export const validateRunOverride = ajv.compile<
-  Schema["AgentRunOverride-Input"]
->({ $ref: "service#/components/schemas/AgentRunOverride-Input" });
-export function runOverride(value: unknown): Schema["AgentRunOverride-Input"] {
+export const validateRunOverride = ajv.compile<Schema["AgentOverride-Input"]>({
+  $ref: "service#/components/schemas/AgentOverride-Input",
+});
+export function runOverride(value: unknown): Schema["AgentOverride-Input"] {
   if (!validateRunOverride(value))
     throw new Error(
       ajv.errorsText(validateRunOverride.errors, {
@@ -61,16 +61,6 @@ export function validateSettings(
     );
 }
 
-export const validateInputOverride = ajv.compile<Schema["InputOverride"]>({
-  $ref: "service#/components/schemas/InputOverride",
-});
-export function inputOverride(text: string): Schema["InputOverride"] | null {
-  if (!text.trim()) return null;
-  const value: unknown = JSON.parse(text);
-  if (!validateInputOverride(value))
-    throw new Error(ajv.errorsText(validateInputOverride.errors));
-  return value;
-}
 export function stringValues(
   value: Record<string, unknown>,
 ): Record<string, string> {

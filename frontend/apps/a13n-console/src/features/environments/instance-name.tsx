@@ -3,7 +3,7 @@ import { Button, FormField, Input } from "a13n-ui";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
-import { data, type Schema } from "../../shared/api";
+import { data, ifMatch, type Schema } from "../../shared/api";
 import { ErrorNotice } from "../../shared/feedback";
 import styles from "./environments.module.css";
 
@@ -17,7 +17,7 @@ export function EnvironmentNameEditor({
   reload,
   onCancel,
 }: {
-  environment: Pick<Schema["Environment"], "id" | "name">;
+  environment: Pick<Schema["EnvironmentView"], "id" | "name" | "workspace_id">;
   etag?: string;
   reload: () => Promise<void>;
   onCancel?: () => void;
@@ -34,13 +34,19 @@ export function EnvironmentNameEditor({
           t("Version information is unavailable. Reload this page."),
         );
       return client.http
-        .PATCH("/api/v1/environments/{environment_id}", {
-          params: {
-            path: { environment_id: basis.environment.id },
-            header: { "If-Match": basis.etag },
+        .PATCH(
+          "/api/v1/workspaces/{workspace_id}/environments/{environment_id}",
+          {
+            params: {
+              path: {
+                workspace_id: basis.environment.workspace_id,
+                environment_id: basis.environment.id,
+              },
+            },
+            headers: ifMatch(basis.etag),
+            body: { name },
           },
-          body: { name },
-        })
+        )
         .then(data);
     },
     onSuccess: async () => {

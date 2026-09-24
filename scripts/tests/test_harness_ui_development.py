@@ -338,7 +338,7 @@ async def test_copied_model_and_key_complete_a_real_app_turn(development: Path, 
     from a13n_harness_ui.app import open_harness_ui_app
     from a13n_harness_ui.surfaces import RootOperationStatus
 
-    from dev.service.model import model_process
+    from dev.fixtures.model import model_process
 
     home = Path.home()
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-from typing import cast
 
 import httpx2
 import pytest
-from a13n_harness import AgentContext, RunBindings
+from a13n_harness import RunBindings
 from a13n_harness._review_context import REVIEW_HISTORY_ID, ReviewHistory
 from a13n_harness.capabilities import AgentToolReviewer, ToolReviewAssessment, ToolReviewConfig, ToolReviewError
 from a13n_harness.providers.model import routes
@@ -60,7 +59,9 @@ def _answer(score, confidence=0.9):
     ],
 )
 @pytest.mark.parametrize("confidence", [0.01, 0.99])
-async def test_native_jev_score_maps_to_risk_without_text_or_confidence_policy(monkeypatch, score, risk, confidence):
+async def test_native_jev_score_maps_to_risk_without_text_or_confidence_policy(
+    reviewer_context, monkeypatch, score, risk, confidence
+):
     from a13n_harness.capabilities import ToolReviewRequest
 
     requests = []
@@ -88,7 +89,7 @@ async def test_native_jev_score_maps_to_risk_without_text_or_confidence_policy(m
                 parameters_schema={"type": "object"},
                 arguments={"command": "printf safe"},
             ),
-            context=cast(AgentContext, object()),
+            context=reviewer_context,
         )
     assert result.assessment == ToolReviewAssessment(risk=risk)
     assert len(requests) == 1
@@ -136,7 +137,7 @@ async def test_scored_review_preserves_permission_decisions_and_nullable_history
 
 
 @pytest.mark.parametrize("response", [httpx2.Response(500), httpx2.Response(200, json={"invalid": True})])
-async def test_jev_provider_failures_are_bounded_review_errors(monkeypatch, response):
+async def test_jev_provider_failures_are_bounded_review_errors(reviewer_context, monkeypatch, response):
     from a13n_harness.capabilities import ToolReviewRequest
 
     calls = []
@@ -152,7 +153,7 @@ async def test_jev_provider_failures_are_bounded_review_errors(monkeypatch, resp
                 ToolReviewRequest(
                     tool_id="tool", tool_call_id="call", tool_name="tool", parameters_schema={}, arguments={}
                 ),
-                context=cast(AgentContext, object()),
+                context=reviewer_context,
             )
     assert len(calls) == 1
 

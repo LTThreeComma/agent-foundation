@@ -9,7 +9,7 @@ import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../../auth/context";
 import { useWorkspace } from "../../../layout/workspace";
-import { data, workspaceHeaders } from "../../../shared/api";
+import { data } from "../../../shared/api";
 import { CopyButton } from "../../../shared/identity";
 import { downloadBlob } from "../../../shared/download";
 import { ErrorNotice } from "../../../shared/feedback";
@@ -39,39 +39,36 @@ export function AttachmentChip({
   );
 }
 
-export function AssetAttachment({
-  assetId,
-  filename,
-}: {
-  assetId: string;
-  filename?: string;
-}) {
+export function AssetAttachment({ assetId }: { assetId: string }) {
   const { t } = useTranslation(),
     client = useClient(),
     { workspace, can } = useWorkspace();
   const asset = useQuery({
     queryKey: ["asset", workspace.id, assetId],
-    enabled: can("asset.read"),
+    enabled: can("read"),
     staleTime: 60_000,
     retry: false,
     queryFn: ({ signal }) =>
       client.http
-        .GET("/api/v1/assets/{asset_id}", {
-          params: { path: { asset_id: assetId } },
-          headers: workspaceHeaders(workspace.id),
+        .GET("/api/v1/workspaces/{workspace_id}/assets/{asset_id}", {
+          params: { path: { workspace_id: workspace.id, asset_id: assetId } },
           signal,
         })
         .then(data),
   });
-  const name = asset.data?.filename || filename || assetId;
+  const name = asset.data?.name || assetId;
   const download = useMutation({
     mutationFn: async () => {
       const blob = data(
-        await client.http.GET("/api/v1/assets/{asset_id}/content", {
-          params: { path: { asset_id: assetId } },
-          headers: workspaceHeaders(workspace.id),
-          parseAs: "blob",
-        }),
+        await client.http.GET(
+          "/api/v1/workspaces/{workspace_id}/assets/{asset_id}/content",
+          {
+            params: {
+              path: { workspace_id: workspace.id, asset_id: assetId },
+            },
+            parseAs: "blob",
+          },
+        ),
       );
       downloadBlob(blob, name);
     },
@@ -83,7 +80,7 @@ export function AssetAttachment({
         label={name}
         secondary={
           asset.data
-            ? `${asset.data.media_type} · ${asset.data.size_bytes.toLocaleString()} B`
+            ? `${asset.data.content_type} · ${asset.data.size.toLocaleString()} B`
             : asset.isError
               ? t("File details unavailable")
               : undefined
@@ -91,13 +88,13 @@ export function AssetAttachment({
         actions={
           <>
             <CopyButton value={assetId} iconOnly copyLabel={t("Copy ID")} />
-            {can("asset.read") && (
+            {can("read") && (
               <Button
                 size="icon-xs"
                 variant="ghost"
                 aria-label={`${t("Download")} ${name}`}
                 title={`${t("Download")} ${name}`}
-                disabled={!!asset.data?.deleted_at}
+                disabled={!!asset.data?.retired_at}
                 loading={download.isPending}
                 onClick={() => download.mutate()}
               >

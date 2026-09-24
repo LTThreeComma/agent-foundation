@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, ExternalToolset
 
 from a13n_harness.context import AgentContext
+from a13n_harness.tools.identity import TOOL_IDENTITY_KEY, ToolIdentity, source_tool_id
 
 from ._instructions import InstructionExternalToolset
 
@@ -29,7 +30,11 @@ class ClientToolsToolset:
         for toolset in self._toolsets:
             definitions: list[ToolDefinition] = []
             for tool in toolset.tools:
-                metadata = deepcopy(tool.metadata)
+                metadata: dict[str, Any] = deepcopy(tool.metadata)
+                metadata[TOOL_IDENTITY_KEY] = ToolIdentity(
+                    source_tool_id(toolset.toolset_id, tool.name),
+                    "allow" if tool.permission == "inherit" else tool.permission,
+                )
                 metadata[CLIENT_TOOL_MARKER_KEY] = {
                     "declared_name": tool.name,
                     "toolset_id": toolset.toolset_id,

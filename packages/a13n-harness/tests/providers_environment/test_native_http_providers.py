@@ -54,6 +54,12 @@ class NativeCloud:
 
     async def request(self, request):
         self.calls.append((request.method, request.url.path))
+        if (
+            self.key == "vercel"
+            and request.method == "POST"
+            and request.headers.get("content-type") != "application/json"
+        ):
+            return httpx2.Response(415)
         if self.error:
             return httpx2.Response(self.error)
         if self.deleting and request.method == "GET":

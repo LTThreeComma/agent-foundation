@@ -13,7 +13,7 @@ it("tests saved configuration inline and hides its result while edits are unsave
   const user = userEvent.setup();
   const action = vi
     .fn()
-    .mockResolvedValue({ success: true, elapsed_ms: 12, message: "Connected" });
+    .mockResolvedValue({ success: true, message: "Connected" });
   const client = new QueryClient();
   const view = (dirty: boolean) => (
     <QueryClientProvider client={client}>

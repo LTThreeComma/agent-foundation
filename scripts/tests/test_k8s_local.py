@@ -1,73 +1,161 @@
-"""Credential persistence and bootstrap output must be safe across local reruns."""
+"""The chart must render valid Service deployments, and the kind launcher must keep credentials safe across reruns."""
 
 import base64
 import json
+import os
+import shutil
 import stat
 import subprocess
 
 import pytest
+import yaml
 
 from scripts import k8s_local as k8s
 
+CHART = k8s.ROOT / "deploy/kubernetes/a13n-service"
+helm = pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+
 
 def fresh():
-    return k8s.credentials({}, {}, retained=False, email="owner@example.com")
+    return k8s.credentials({}, {}, retained=False)
+
+
+def render(values: str) -> list[dict]:
+    output = subprocess.run(
+        ["helm", "template", "a13n", str(CHART), "-f", str(k8s.ROOT / f"deploy/kubernetes/values-{values}.yaml")],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return [document for document in yaml.safe_load_all(output) if document]
+
+
+@helm
+@pytest.mark.parametrize("values", ["local", "aws", "gcp"])
+def test_rendered_configuration_and_generated_secret_are_valid_settings(values, tmp_path, monkeypatch):
+    # Tooling CI installs only the root workspace; the full workspace validates against the real settings model.
+    settings_module = pytest.importorskip("a13n_service.settings")
+    crypto = pytest.importorskip("a13n_service.infra.crypto")
+    config = next(d for d in render(values) if d["kind"] == "ConfigMap")["data"]["service.toml"]
+    path = tmp_path / "service.toml"
+    path.write_text(config)
+    for name in [name for name in os.environ if name.startswith("A13N_")]:
+        monkeypatch.delenv(name)
+    for name, value in fresh()[k8s.SERVICE_SECRET].items():
+        monkeypatch.setenv(name, value)
+    settings = settings_module.load_settings(path)
+    crypto.KeyRing(active_key_id=settings.encryption.active_key_id, keys=settings.encryption.keys)
+    assert settings.database.auto_migrate is False
+    assert settings.objects.backend == ("local" if values == "local" else "s3")
+    assert settings.server.public_url == (
+        "http://127.0.0.1:8080" if values == "local" else "https://agents.example.com"
+    )
+
+
+@helm
+def test_roles_share_one_image_and_start_after_the_migration_job():
+    documents = render("local")
+    deployments = {d["metadata"]["name"]: d for d in documents if d["kind"] == "Deployment"}
+    job = next(d for d in documents if d["kind"] == "Job")
+    service = [deployments["a13n-a13n-control"], deployments["a13n-a13n-worker"], job]
+    pods = [d["spec"]["template"]["spec"] for d in service]
+    assert {c["image"] for pod in pods for c in pod["containers"] + pod.get("initContainers", [])} == {
+        "a13n-service:local"
+    }
+    assert all(pod["enableServiceLinks"] is False for pod in pods)
+    assert job["spec"]["template"]["spec"]["containers"][0]["args"][-1] == "migrate"
+    for role in ("control", "worker"):
+        pod = deployments[f"a13n-a13n-{role}"]["spec"]["template"]["spec"]
+        assert pod["containers"][0]["args"][-2:] == ["--role", role]
+        assert "migrate --check" in pod["initContainers"][0]["args"][0]
+    console = deployments["a13n-a13n-console"]["spec"]["template"]["spec"]["containers"][0]
+    assert console["env"] == [{"name": "A13N_SERVICE_UPSTREAM", "value": "http://a13n-a13n-control:8000"}]
+
+
+@helm
+def test_s3_objects_require_a_bucket():
+    result = subprocess.run(
+        ["helm", "template", "a13n", str(CHART), "--set", "objects.backend=s3"], capture_output=True, text=True
+    )
+    assert result.returncode != 0 and "objects.bucket is required" in result.stderr
 
 
 def test_first_start_generates_random_credentials():
     first, second = fresh(), fresh()
-    service = first["a13n-service-secrets"]
-    assert len(base64.b64decode(service[k8s.MASTER_KEY], validate=True)) == 32
-    assert service["A13N_SERVICE_IAM_INITIAL_ADMIN_EMAIL"] == "owner@example.com"
+    service = first[k8s.SERVICE_SECRET]
+    keys = json.loads(service["A13N_ENCRYPTION__KEYS"])
+    assert len(base64.b64decode(keys[service["A13N_ENCRYPTION__ACTIVE_KEY_ID"]], validate=True)) == 32
     assert first != second
 
 
 @pytest.mark.parametrize("source", ["local", "remote", "both"])
-def test_restart_reuses_credentials_and_email(source):
+def test_restart_reuses_credentials(source):
     original = fresh()
     local = original if source in {"local", "both"} else {}
     remote = original if source in {"remote", "both"} else {}
-    assert k8s.credentials(local, remote, retained=True, email="different@example.com") == original
+    assert k8s.credentials(local, remote, retained=True) == original
 
 
 def test_conflicting_credentials_do_not_overwrite_cluster():
     with pytest.raises(ValueError, match="differ"):
-        k8s.credentials(fresh(), fresh(), retained=True, email="owner@example.com")
+        k8s.credentials(fresh(), fresh(), retained=True)
 
 
 def test_existing_data_never_gets_new_credentials():
     with pytest.raises(ValueError, match="Existing PVCs"):
-        k8s.credentials({}, {}, retained=True, email="owner@example.com")
+        k8s.credentials({}, {}, retained=True)
 
 
 def test_partial_credentials_never_generate_replacement_key():
     values = fresh()
-    del values["a13n-service-secrets"]
+    del values[k8s.SERVICE_SECRET]
     with pytest.raises(ValueError, match="Incomplete"):
-        k8s.credentials(values, {}, retained=False, email="owner@example.com")
+        k8s.credentials(values, {}, retained=False)
 
 
-@pytest.mark.parametrize("key", ["REPLACE_BASE64_32_BYTE_KEY", "", base64.b64encode(b"short").decode()])
-def test_invalid_master_key_is_rejected_without_echoing_it(key):
+@pytest.mark.parametrize(
+    "keys,active",
+    [
+        ('{"primary":"REPLACE_BASE64_32_BYTE_KEY"}', "primary"),
+        ('{"primary":"' + base64.b64encode(b"short").decode() + '"}', "primary"),
+        ('{"other":"' + base64.b64encode(bytes(32)).decode() + '"}', "primary"),
+        ("not-json", "primary"),
+        ('["primary"]', "primary"),
+    ],
+)
+def test_invalid_key_ring_is_rejected_without_echoing_it(keys, active):
     values = fresh()
-    values["a13n-service-secrets"][k8s.MASTER_KEY] = key
+    values[k8s.SERVICE_SECRET]["A13N_ENCRYPTION__KEYS"] = keys
+    values[k8s.SERVICE_SECRET]["A13N_ENCRYPTION__ACTIVE_KEY_ID"] = active
     with pytest.raises(ValueError) as caught:
-        k8s.credentials(values, {}, retained=False, email="owner@example.com")
-    if key:
-        assert key not in str(caught.value)
+        k8s.credentials(values, {}, retained=False)
+    assert keys not in str(caught.value)
 
 
 def test_database_password_mismatch_is_rejected():
     values = fresh()
-    values["a13n-postgres-secrets"]["POSTGRES_PASSWORD"] = "different"
+    values[k8s.POSTGRES_SECRET]["POSTGRES_PASSWORD"] = "different"
     with pytest.raises(ValueError, match="matching local database"):
-        k8s.credentials(values, {}, retained=True, email="owner@example.com")
+        k8s.credentials(values, {}, retained=True)
+
+
+def test_administrator_is_generated_once_for_fresh_data(tmp_path):
+    admin = k8s.administrator(tmp_path, "owner@example.com", retained=False)
+    assert admin is not None and admin["EMAIL"] == "owner@example.com" and len(admin["PASSWORD"]) >= 12
+    assert stat.S_IMODE((tmp_path / k8s.ADMIN_FILE).stat().st_mode) == 0o600
+    assert k8s.administrator(tmp_path, "different@example.com", retained=True) == admin
+
+
+def test_existing_data_without_administrator_record_is_not_bootstrapped(tmp_path):
+    assert k8s.administrator(tmp_path, "owner@example.com", retained=True) is None
+    with pytest.raises(ValueError, match="email"):
+        k8s.administrator(tmp_path, "not an email", retained=False)
 
 
 @pytest.mark.parametrize("failed_secret", list(k8s.SECRET_FILES))
 def test_secret_creation_retry_preserves_files_and_recovers_partial_cluster(tmp_path, monkeypatch, failed_secret):
     remote = {}
-    fail_postgres = True
+    fail = True
 
     def kubectl(*args, capture=False, input_text=None):
         if args[:2] == ("get", "secret"):
@@ -82,7 +170,7 @@ def test_secret_creation_retry_preserves_files_and_recovers_partial_cluster(tmp_
         assert args == ("create", "-f", "-")
         manifest = json.loads(input_text)
         name = manifest["metadata"]["name"]
-        if name == failed_secret and fail_postgres:
+        if name == failed_secret and fail:
             raise RuntimeError("simulated interruption")
         assert name not in remote
         remote[name] = manifest["stringData"]
@@ -90,23 +178,44 @@ def test_secret_creation_retry_preserves_files_and_recovers_partial_cluster(tmp_
 
     monkeypatch.setattr(k8s, "kubectl", kubectl)
     with pytest.raises(RuntimeError, match="interruption"):
-        k8s.prepare_secrets(tmp_path)
-    files = {name: (tmp_path / name).read_bytes() for name in k8s.SECRET_FILES.values()}
-    fail_postgres = False
-    k8s.prepare_secrets(tmp_path)
-    k8s.prepare_secrets(tmp_path)
+        k8s.prepare(tmp_path)
+    names = [*k8s.SECRET_FILES.values(), k8s.ADMIN_FILE]
+    files = {name: (tmp_path / name).read_bytes() for name in names}
+    fail = False
+    first = k8s.prepare(tmp_path)
+    assert k8s.prepare(tmp_path) == first
     assert len(remote) == 2
     for name, original in files.items():
         assert (tmp_path / name).read_bytes() == original
         assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o600
 
 
-def test_bootstrap_link_only_extracts_expected_local_invitation():
-    link = k8s.ORIGIN + "/invitations/inv_test/accept#token=secret"
-    logs = "noise\n" + json.dumps({"message": "Administrator initialization link (single use): " + link})
-    assert k8s.bootstrap_link(logs) == link
-    assert k8s.bootstrap_link(logs.replace(k8s.ORIGIN, "https://unexpected.example")) is None
-    assert k8s.bootstrap_link(json.dumps({"message": "service_started"})) is None
+@pytest.mark.parametrize(
+    "returncode,stderr,expected",
+    [(0, "", True), (3, "Bootstrap refused: the Service is already initialized", False)],
+)
+def test_bootstrap_reports_creation_or_existing_initialization(monkeypatch, returncode, stderr, expected):
+    calls = []
+
+    def fake(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, returncode, "", stderr)
+
+    monkeypatch.setattr(k8s.subprocess, "run", fake)
+    assert k8s.bootstrap({"EMAIL": "owner@example.com", "PASSWORD": "secret-password"}) is expected
+    args, kwargs = calls[0]
+    assert "secret-password" not in args and kwargs["input"] == "secret-password\n"
+    assert args[:3] == ["kubectl", "--context", k8s.CONTEXT]
+    assert args[-3:] == ["--email", "owner@example.com", "--password-stdin"]
+
+
+def test_bootstrap_failure_does_not_disclose_output(monkeypatch):
+    monkeypatch.setattr(
+        k8s.subprocess, "run", lambda args, **kwargs: subprocess.CompletedProcess(args, 1, "secret", "secret")
+    )
+    with pytest.raises(RuntimeError) as caught:
+        k8s.bootstrap({"EMAIL": "owner@example.com", "PASSWORD": "secret"})
+    assert "secret" not in str(caught.value)
 
 
 def test_failed_captured_command_does_not_disclose_secrets(monkeypatch):
@@ -117,9 +226,8 @@ def test_failed_captured_command_does_not_disclose_secrets(monkeypatch):
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_startup_builds_loads_and_waits_before_displaying_invitation(tmp_path, monkeypatch, capsys, existing):
+def test_startup_builds_loads_and_waits_before_bootstrapping(tmp_path, monkeypatch, capsys, existing):
     commands = []
-    link = k8s.ORIGIN + "/invitations/inv_test/accept#token=test"
 
     def run(*args, **kwargs):
         commands.append(args)
@@ -131,13 +239,13 @@ def test_startup_builds_loads_and_waits_before_displaying_invitation(tmp_path, m
             return json.dumps(
                 [{"HostConfig": {"PortBindings": {"30080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]}}}]
             )
-        if "logs" in args:
-            return json.dumps({"message": "Administrator initialization link (single use): " + link})
         return ""
 
+    admin = {"EMAIL": "owner@example.com", "PASSWORD": "secret-password"}
     monkeypatch.setattr(k8s, "run", run)
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/bin/" + name)
-    monkeypatch.setattr(k8s, "prepare_secrets", lambda path: commands.append(("prepare-secrets",)))
+    monkeypatch.setattr(k8s, "prepare", lambda path: commands.append(("prepare",)) or admin)
+    monkeypatch.setattr(k8s, "bootstrap", lambda selected: commands.append(("bootstrap", selected["EMAIL"])) or True)
     k8s.start(tmp_path)
     builds = [c for c in commands if c[:2] == ("docker", "build")]
     load = next(c for c in commands if c[:3] == ("kind", "load", "docker-image"))
@@ -145,14 +253,14 @@ def test_startup_builds_loads_and_waits_before_displaying_invitation(tmp_path, m
     assert len(builds) == 2
     images = [c[c.index("-t") + 1] for c in builds]
     assert all(image in load for image in images)
-    assert "--wait" in helm and "--kube-context" in helm
+    assert "--wait" in helm and "--kube-context" in helm and k8s.NAMESPACE in helm
     assert f"image.tag={images[0].split(':')[1]}" in helm
     assert f"console.image.tag={images[1].split(':')[1]}" in helm
-    assert (
-        commands.index(("prepare-secrets",)) < commands.index(builds[0]) < commands.index(load) < commands.index(helm)
-    )
+    order = [commands.index(c) for c in (("prepare",), builds[0], load, helm, ("bootstrap", "owner@example.com"))]
+    assert order == sorted(order)
     assert any(c[:3] == ("kind", "create", "cluster") for c in commands) != existing
-    assert link in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "owner@example.com" in output and "secret-password" not in output
 
 
 def test_wrong_port_mapping_stops_before_mutation(tmp_path, monkeypatch):

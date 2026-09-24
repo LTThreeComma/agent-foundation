@@ -12,24 +12,25 @@ import {
 import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
+import { useAccess } from "../../layout/workspace";
 import { allPages, type Schema } from "../../shared/api";
 import { CatalogStep } from "../../shared/dialogs";
 import { ErrorNotice } from "../../shared/feedback";
-import {
-  FormActions,
-  TextAreaField,
-  jsonObject,
-  validateSettings,
-} from "../../shared/forms";
+import { FormActions, TextAreaField, jsonObject } from "../../shared/forms";
 import { IconTile } from "../../shared/identity";
 import sharedStyles from "../../shared/shared.module.css";
-import { ConnectionTest, ManageProvidersLink } from "../providers";
+import { ManageProvidersLink } from "../providers";
 import { modelApi, type ModelScope } from "./api";
 import { CatalogPicker, catalogRefKey } from "./catalog-picker";
 import { ModelIcon } from "./model-icon";
-import { ModelInformation } from "./model-information";
+import { ModelInformation, characteristicsInput } from "./model-information";
 import { suggestedKey } from "./model-options";
-import { ModelPricing } from "./model-pricing";
+import {
+  ModelPricing,
+  priceEntry,
+  priceTable,
+  type PriceTable,
+} from "./model-pricing";
 import { useModelProviderDefinitions } from "./provider-definitions";
 import styles from "./models.module.css";
 
@@ -37,12 +38,22 @@ type Draft = {
   name: string;
   key: string;
   description: string;
-  upstream_model: string;
+  model_name: string;
   catalog_ref: Schema["CatalogRef"] | null;
   model_api: string;
-  declarations: Schema["ModelDeclarations-Input"];
+  characteristics: Schema["HarnessModelCharacteristics-Input"];
+  pricing: PriceTable | null;
   enabled: boolean;
 };
+
+/** The request defaults a model's configuration carries, as Settings JSON. */
+function requestDefaults(config?: Schema["ModelConfig-Output"]) {
+  return Object.fromEntries(
+    (["max_tokens", "temperature", "top_p"] as const).flatMap((name) =>
+      config?.[name] == null ? [] : [[name, config[name]]],
+    ),
+  );
+}
 
 export type ModelDraft = ReturnType<typeof useModelDraft>;
 
@@ -68,29 +79,37 @@ export function useModelDraft({
 }) {
   const { t } = useTranslation(),
     client = useClient(),
+    { organization } = useAccess(),
     cache = useQueryClient();
-  const api = modelApi(client, scope);
+  const api = modelApi(client, organization.id, scope);
   const [original] = useState(resource);
   const [provider, setProvider] = useState(
     original?.value.provider_id ?? providerId ?? "",
+  );
+  // The entry the price table was read from; saved as it is unless the table changes.
+  const [pricingBase, setPricingBase] = useState(
+    original?.value.pricing ?? null,
   );
   const [draft, setDraft] = useState<Draft>(() => ({
     name: original?.value.name ?? "",
     key: original?.value.key ?? "",
     description: original?.value.description ?? "",
-    upstream_model: original?.value.upstream_model ?? "",
+    model_name: original?.value.config.model_name ?? "",
     catalog_ref: original?.value.catalog_ref ?? null,
-    model_api: original?.value.model_api ?? "",
-    declarations: original?.value.declarations ?? {},
+    model_api: original?.value.config.model_api ?? "",
+    characteristics: characteristicsInput(
+      original?.value.config.characteristics,
+    ),
+    pricing: priceTable(original?.value.pricing ?? null),
     enabled: original?.value.enabled ?? true,
   }));
   const [initial] = useState(draft);
   const [settingsJson, setSettingsJson] = useState(() =>
-    JSON.stringify(original?.value.settings ?? {}, null, 2),
+    JSON.stringify(requestDefaults(original?.value.config), null, 2),
   );
   const [initialSettingsJson] = useState(settingsJson);
   const [settingsExpanded, setSettingsExpanded] = useState(
-    Object.keys(original?.value.settings ?? {}).length > 0,
+    Object.keys(requestDefaults(original?.value.config)).length > 0,
   );
   const providers = useQuery({
     queryKey: ["model-provider-choices", scope.kind, scope.id],
@@ -100,7 +119,7 @@ export function useModelDraft({
   });
   const definitions = useModelProviderDefinitions();
   const catalog = useQuery({
-    queryKey: ["model-catalog", scope.kind, scope.id],
+    queryKey: ["model-catalog"],
     enabled: active,
     queryFn: ({ signal }) => api.catalog(signal),
   });
@@ -109,11 +128,11 @@ export function useModelDraft({
     (item) => item.type === selectedProvider?.type,
   );
   const callingApi = draft.model_api || definition?.default_model_api || "";
-  const customEndpoint = Object.entries(
-    selectedProvider?.configuration ?? {},
-  ).some(([key, value]) => key.endsWith("base_url") && !!value);
+  const customEndpoint = Object.entries(selectedProvider?.config ?? {}).some(
+    ([key, value]) => key.endsWith("base_url") && !!value,
+  );
   const channels = definition?.catalog_providers ?? [];
-  const selectedEntry = catalog.data?.items?.find(
+  const selectedEntry = catalog.data?.items.find(
     (item) =>
       draft.catalog_ref &&
       catalogRefKey(item.ref) === catalogRefKey(draft.catalog_ref),
@@ -130,45 +149,41 @@ export function useModelDraft({
       change("catalog_ref", null);
       return;
     }
-    const official = catalog.data?.items?.find(
+    const official = catalog.data?.items.find(
       (entry) =>
         entry.identity === item.identity &&
         `${entry.ref.provider}/${entry.ref.model}` === item.identity,
     );
+    const pricing = item.pricing ?? official?.pricing ?? null;
+    setPricingBase(pricing);
     setDraft((current) => ({
       ...current,
       catalog_ref: item.ref,
-      upstream_model: channels.includes(item.ref.provider)
-        ? item.ref.model
-        : "",
+      model_name: channels.includes(item.ref.provider) ? item.ref.model : "",
       model_api: channels.includes(item.ref.provider)
         ? callingApi
         : "openai.chat_completions",
       name: current.name || item.name,
       key: current.key || suggestedKey(item.ref.model),
-      declarations: {
-        ...item.declarations,
-        pricing:
-          item.declarations.pricing ?? official?.declarations.pricing ?? null,
-      },
+      characteristics: characteristicsInput(item.characteristics),
+      pricing: priceTable(pricing),
     }));
   }
   function chooseProvider(id: string, preferredApi = "") {
     setProvider(id);
     setSettingsJson("{}");
+    setPricingBase(null);
     setDraft((current) => ({
       ...current,
       catalog_ref: null,
-      upstream_model: "",
+      model_name: "",
       model_api: preferredApi,
-      declarations: {},
+      characteristics: {},
+      pricing: null,
     }));
   }
-  function acceptProvider(
-    item: Schema["ModelProvider"],
-    preferredApi?: string,
-  ) {
-    cache.setQueryData<Schema["ModelProvider"][]>(
+  function acceptProvider(item: Schema["Provider"], preferredApi?: string) {
+    cache.setQueryData<Schema["Provider"][]>(
       ["model-provider-choices", scope.kind, scope.id],
       (items) => [
         ...(items ?? []).filter((value) => value.id !== item.id),
@@ -179,19 +194,31 @@ export function useModelDraft({
   }
   const save = useMutation({
     mutationFn: async () => {
-      if (!definition || !callingApi)
+      if (!selectedProvider || !callingApi)
         throw new Error(t("Choose a provider and API."));
       const settings = jsonObject(settingsJson);
-      validateSettings(definition.settings_schemas[callingApi], settings);
+      const config = {
+        ...settings,
+        model_name: draft.model_name.trim(),
+        model_api: callingApi,
+        characteristics: draft.characteristics,
+      };
+      const identity = {
+        provider: selectedProvider.type,
+        model: config.model_name,
+      };
+      const pricing =
+        JSON.stringify(draft.pricing) ===
+        JSON.stringify(priceTable(pricingBase))
+          ? pricingBase
+          : priceEntry(draft.pricing, pricingBase, identity);
       const body = {
         name: draft.name,
-        description: draft.description || null,
-        upstream_model: draft.upstream_model.trim(),
-        catalog_ref: draft.catalog_ref,
-        model_api: callingApi,
-        settings,
-        declarations: draft.declarations,
+        description: draft.description,
         enabled: draft.enabled,
+        config,
+        pricing,
+        catalog_ref: draft.catalog_ref,
       };
       if (!original)
         return api.createModel({
@@ -212,7 +239,6 @@ export function useModelDraft({
     },
   });
   return {
-    api,
     close,
     original,
     provider,
@@ -237,7 +263,7 @@ export function useModelDraft({
     dirty,
     save,
     incomplete:
-      !draft.upstream_model.trim() ||
+      !draft.model_name.trim() ||
       !draft.name.trim() ||
       !draft.key.trim() ||
       !callingApi,
@@ -283,7 +309,7 @@ export function ModelSelection({
       <div className={styles.chosenRow}>
         <IconTile size={36} tone="elevated">
           <ModelIcon
-            upstream={draft.upstream_model}
+            upstream={draft.model_name}
             catalogRef={draft.catalog_ref}
             provider={model.selectedProvider?.type}
             size={20}
@@ -291,7 +317,7 @@ export function ModelSelection({
         </IconTile>
         <span className={styles.chosenCopy}>
           <strong>
-            {selectedEntry?.name || draft.upstream_model || t("Custom model")}
+            {selectedEntry?.name || draft.model_name || t("Custom model")}
           </strong>
           <small>
             {selectedEntry?.identity ??
@@ -318,21 +344,19 @@ export function ModelSelection({
           <Input
             required
             maxLength={256}
-            value={draft.upstream_model}
-            onChange={(event) =>
-              model.change("upstream_model", event.target.value)
-            }
+            value={draft.model_name}
+            onChange={(event) => model.change("model_name", event.target.value)}
           />
         </FormField>
-        {(definition?.supported_model_apis.length ?? 0) > 1 && (
+        {(definition?.model_apis?.length ?? 0) > 1 && (
           <ChoiceField
             label={t("API")}
             value={model.callingApi}
             onValueChange={(value) => model.change("model_api", value)}
             options={
-              definition?.supported_model_apis.map((value) => ({
+              definition?.model_apis?.map((value) => ({
                 value,
-                label: definition.model_api_labels[value] ?? value,
+                label: definition.model_api_labels?.[value] ?? value,
               })) ?? []
             }
           />
@@ -379,20 +403,18 @@ export function ModelFields({ model }: { model: ModelDraft }) {
         </FormField>
       </section>
       <ModelInformation
-        value={draft.declarations}
-        onChange={(value) => model.change("declarations", value)}
+        value={draft.characteristics}
+        onChange={(value) => model.change("characteristics", value)}
       />
       <ModelPricing
-        value={draft.declarations.pricing ?? null}
-        onChange={(pricing) =>
-          model.change("declarations", { ...draft.declarations, pricing })
-        }
+        value={draft.pricing}
+        onChange={(pricing) => model.change("pricing", pricing)}
       />
       {selectedEntry?.pricing_warning && (
         <p className={styles.stepNote}>{t(selectedEntry.pricing_warning)}</p>
       )}
       {selectedEntry &&
-        draft.declarations.pricing &&
+        draft.pricing &&
         (model.customEndpoint ||
           !model.channels.includes(selectedEntry.ref.provider)) && (
           <p className={styles.stepNote}>
@@ -424,7 +446,7 @@ export function ModelFields({ model }: { model: ModelDraft }) {
   );
 }
 
-/** Availability and the connection check, grouped on one surface. */
+/** Whether agents can select the model. */
 export function ModelStatus({ model }: { model: ModelDraft }) {
   const { t } = useTranslation();
   return (
@@ -440,13 +462,6 @@ export function ModelStatus({ model }: { model: ModelDraft }) {
           onCheckedChange={(value) => model.change("enabled", value)}
         />
       </SettingsRow>
-      {model.original && (
-        <ConnectionTest
-          action={() => model.api.testModel(model.original!.value.id)}
-          dirty={model.dirty || model.save.isPending}
-          description="May consume quota or incur cost."
-        />
-      )}
     </SettingsSection>
   );
 }

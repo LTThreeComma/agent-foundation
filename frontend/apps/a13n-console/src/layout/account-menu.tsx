@@ -83,7 +83,7 @@ export function AccountMenu({
             <UserAvatar name={user.name} url={user.image_url} />
             <span className={styles.accountCopy}>
               <strong title={user.name}>{user.name}</strong>
-              <small title={user.email}>{user.email}</small>
+              <small title={user.email ?? undefined}>{user.email}</small>
             </span>
           </div>
           <MenuGroup>

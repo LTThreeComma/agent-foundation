@@ -928,6 +928,7 @@ def test_context_samples_replace_root_requests_without_double_counting_cache_or_
     from a13n_harness_ui.live import LiveEvent, model_usage, root_context_samples
 
     root = ModelUsageRecord(
+        call_id="call_fixture",
         record_id="root-1",
         run_id="run-1",
         response_ordinal=2,
@@ -953,10 +954,11 @@ def test_context_samples_replace_root_requests_without_double_counting_cache_or_
         payload={
             "value": {
                 "event": {
+                    "schema_version": "1",
                     "payload": {
                         "type": "usage_report",
                         "records": [item.model_dump(mode="json") for item in (root, child, delegated, auxiliary)],
-                    }
+                    },
                 }
             }
         },

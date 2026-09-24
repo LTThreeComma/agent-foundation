@@ -9,6 +9,7 @@ import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { workspacePath } from "../../shared/paths";
 import { data, type Schema } from "../../shared/api";
+import { createWithKey } from "../../shared/keys";
 import { ErrorNotice } from "../../shared/feedback";
 import { FormActions } from "../../shared/forms";
 import styles from "../../shared/shared.module.css";
@@ -26,12 +27,14 @@ export function CreateWorkspace({
     [name, setName] = useState("");
   const create = useMutation({
     mutationFn: () =>
-      client.http
-        .POST("/api/v1/organizations/{organization}/workspaces", {
-          params: { path: { organization: organizationId } },
-          body: { name },
-        })
-        .then(data),
+      createWithKey(name, "workspace", (key) =>
+        client.http
+          .POST("/api/v1/organizations/{organization_id}/workspaces", {
+            params: { path: { organization_id: organizationId } },
+            body: { name, key },
+          })
+          .then(data),
+      ),
     onSuccess: (result) => {
       cache.setQueryData<{ items: Schema["Workspace"][] }>(
         ["workspaces", organizationId],

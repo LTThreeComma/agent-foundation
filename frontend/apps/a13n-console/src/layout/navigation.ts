@@ -1,15 +1,12 @@
 import {
   type Icon,
-  DatabaseIcon,
   PulseIcon,
   HeartIcon,
   CubeIcon,
-  PlugsConnectedIcon,
   ChatsIcon,
   MonitorIcon,
   PlugIcon,
   PuzzlePieceIcon,
-  RobotIcon,
 } from "@phosphor-icons/react";
 export const navigationGroups: {
   label: string;
@@ -27,7 +24,6 @@ export const navigationGroups: {
     entries: [
       ["models", "Models", CubeIcon],
       ["skills", "Skills", PuzzlePieceIcon],
-      ["memories", "Memories", DatabaseIcon],
       [
         "environments",
         "Environments",
@@ -41,11 +37,7 @@ export const navigationGroups: {
   },
   {
     label: "Integrations",
-    entries: [
-      ["bots", "Bots", RobotIcon],
-      ["application-accounts", "Application accounts", PlugsConnectedIcon],
-      ["connections", "Connections", PlugIcon],
-    ],
+    entries: [["connections", "Connections", PlugIcon]],
   },
   {
     label: "Observe",
@@ -66,15 +58,12 @@ export function routeSkeleton(
     "/sessions": 4,
     "/models": 4,
     "/skills": 3,
-    "/memories": 4,
     "/environments": 4,
-    "/bots": 4,
-    "/application-accounts": 4,
     "/connections": 3,
     "/traces": 5,
   };
   if (tail in lists) return { variant: "page", columns: lists[tail] };
-  if (/^\/(agents|bots|traces|environments)\/[^/]+$/.test(tail))
+  if (/^\/(agents|traces|environments)\/[^/]+$/.test(tail))
     return { variant: "detail", columns: 4 };
   return undefined;
 }

@@ -112,12 +112,12 @@ export function RunRow({ node }: { node: OutlineRun }) {
   );
 }
 
-/** How long it took, or where it stopped. */
+/** How long it took, or where it stopped: a waiting Run is sealed, not done. */
 function spanOf(
-  run: Schema["RunResource"],
+  run: Schema["RunView"],
   t: (key: string, options?: Record<string, unknown>) => string,
 ) {
-  return run.started_at && run.completed_at
-    ? formatDuration(Date.parse(run.completed_at) - Date.parse(run.started_at))
+  return run.started_at && run.sealed_at && run.status !== "waiting"
+    ? formatDuration(Date.parse(run.sealed_at) - Date.parse(run.started_at))
     : t(`state.${run.status}`, { defaultValue: run.status });
 }

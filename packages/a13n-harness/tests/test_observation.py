@@ -23,6 +23,7 @@ from a13n_harness import (
     RunBindings,
     RunCleanupError,
 )
+from a13n_harness.observation import redact_json
 from a13n_harness.plugins import (
     PluginRunExchange,
     PluginRunNext,
@@ -1389,3 +1390,20 @@ def test_structural_metadata_is_bounded_local_and_best_effort():
     assert "a13n.phase.invalid" not in owner.attributes
     assert "a13n.phase.count" not in child.attributes
     provider.shutdown()
+
+
+def test_redact_json_hides_authority_but_keeps_usage_counts():
+    value = {
+        "Authorization": "Bearer abc",
+        "headers": {"x-api-key": "sk-live", "accept": "application/json"},
+        "usage": {"input_tokens": 3, "output_tokens": 5},
+        "messages": ["use Bearer xyz.123 now", {"password": "hunter2"}],
+    }
+
+    assert redact_json(value) == {
+        "Authorization": "[REDACTED]",
+        "headers": {"x-api-key": "[REDACTED]", "accept": "application/json"},
+        "usage": {"input_tokens": 3, "output_tokens": 5},
+        "messages": ["use Bearer [REDACTED] now", {"password": "[REDACTED]"}],
+    }
+    assert value["messages"][1] == {"password": "hunter2"}

@@ -1,16 +1,15 @@
-import { requireCompletedAuthorization } from "../connections/authorization-context";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChoiceField, FormField, Input, ReadOnlyField } from "a13n-ui";
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { commandHeaders, data, type Schema } from "../../shared/api";
+import { data, type Schema } from "../../shared/api";
 import { ErrorNotice } from "../../shared/feedback";
 import { FormActions } from "../../shared/forms";
-import { useIdempotency } from "../../shared/idempotency";
 import { ProviderKeyLink } from "../../shared/forms";
 import styles from "../../shared/shared.module.css";
+import { requireTestSuccess, testConnection } from "../connections/api";
 import { MCPOAuthSetup } from "./oauth-setup";
 import {
   HeaderFields,
@@ -26,7 +25,7 @@ export function CreateMCP({
   onSuccess,
   onCancel,
 }: {
-  preset?: Schema["MCPServer"];
+  preset?: Schema["McpServer"];
   endpoint?: string;
   onStarted: () => void;
   onSuccess: (value: Schema["Connection"]) => void;
@@ -35,16 +34,13 @@ export function CreateMCP({
   const client = useClient(),
     cache = useQueryClient(),
     { workspace } = useWorkspace(),
-    { t } = useTranslation(),
-    key = useIdempotency();
+    { t } = useTranslation();
   const created = useRef<Schema["Connection"]>(undefined);
   const [name, setName] = useState(preset?.name ?? ""),
-    [endpoint, setEndpoint] = useState(preset?.endpoint_url ?? initialEndpoint),
-    [mode, setMode] = useState<Schema["MCPSource"]["auth_mode"]>(
-      preset?.auth_mode ?? "oauth",
-    ),
+    [endpoint, setEndpoint] = useState(preset?.url ?? initialEndpoint),
+    [mode, setMode] = useState<Schema["McpAuth"]>(preset?.auth ?? "oauth"),
     [headerRows, setHeaderRows] = useState<HeaderDraft[]>(() =>
-      (preset?.static_header_names ?? [""]).map((name) => ({
+      (preset?.header_names ?? [""]).map((name) => ({
         id: crypto.randomUUID(),
         name,
         value: "",
@@ -58,7 +54,7 @@ export function CreateMCP({
     mutationFn: async () => {
       const headers = Object.fromEntries(
         Object.entries(
-          mode === "static_headers" && !created.current?.credential_configured
+          mode === "headers" && !created.current?.credential_configured
             ? serializeHeaders(headerRows, [])
             : {},
         ).filter((entry): entry is [string, string] => entry[1] !== null),
@@ -66,64 +62,39 @@ export function CreateMCP({
       const headerNames = headerRows.map((row) =>
         row.name.trim().toLowerCase(),
       );
-      if (mode === "static_headers" && !headerNames.length)
+      if (mode === "headers" && !headerNames.length)
         throw new Error(t("Add at least one header."));
       setStarted(true);
       onStarted();
       let connection = created.current;
       if (!connection) {
-        const body: Schema["CreateConnectionRequest"] = {
-          name,
-          source: {
-            kind: "mcp",
-            endpoint_url: endpoint,
-            auth_mode: mode,
-            static_header_names: mode === "static_headers" ? headerNames : [],
-          },
-        };
+        // Entered credentials are written with the connection itself.
+        const credential =
+          mode === "bearer"
+            ? { token: bearer }
+            : mode === "headers"
+              ? { headers }
+              : undefined;
         connection = data(
-          await client.http.POST("/api/v1/workspaces/{workspace}/connections", {
-            params: {
-              path: { workspace: workspace.id },
-              header: commandHeaders(workspace.id, key.forBody(body)),
+          await client.http.POST(
+            "/api/v1/workspaces/{workspace_id}/connections",
+            {
+              params: { path: { workspace_id: workspace.id } },
+              body: {
+                type: "mcp",
+                name,
+                config: {
+                  url: endpoint,
+                  headers: mode === "headers" ? headerNames : [],
+                },
+                auth: mode,
+                ...(credential ? { credential } : {}),
+              },
             },
-            body,
-          }),
+          ),
         );
         created.current = connection;
         void cache.invalidateQueries({ queryKey: ["connections"] });
-      }
-      const path = { connection_id: connection.id };
-      if (mode === "oauth") {
-        setOAuthConnection(connection);
-        return;
-      }
-      if (mode !== "none" && !connection.credential_configured) {
-        const body = {
-          expected_version: connection.version,
-          method: "credentials" as const,
-          credentials: mode === "bearer" ? { bearer } : headers,
-        };
-        requireCompletedAuthorization(
-          data(
-            await client.http.POST(
-              "/api/v1/connections/{connection_id}/authorizations",
-              {
-                params: {
-                  path,
-                  header: commandHeaders(workspace.id, key.forBody(body)),
-                },
-                body,
-              },
-            ),
-          ),
-        );
-        connection = data(
-          await client.http.GET("/api/v1/connections/{connection_id}", {
-            params: { path },
-          }),
-        );
-        created.current = connection;
         setBearer("");
         setHeaderRows((rows) =>
           rows.map((row) => ({
@@ -133,16 +104,12 @@ export function CreateMCP({
           })),
         );
       }
-      const body = { expected_version: connection.version };
-      const result = data(
-        await client.http.POST("/api/v1/connections/{connection_id}/check", {
-          params: {
-            path,
-          },
-          body,
-        }),
-      );
-      onSuccess(result);
+      if (mode === "oauth") {
+        setOAuthConnection(connection);
+        return;
+      }
+      requireTestSuccess(await testConnection(client, connection));
+      onSuccess(connection);
     },
     onSettled: () => {
       void cache.invalidateQueries({ queryKey: ["connections"] });
@@ -214,17 +181,17 @@ export function CreateMCP({
               value === "none" ||
               value === "oauth" ||
               value === "bearer" ||
-              value === "static_headers"
+              value === "headers"
             )
               setMode(value);
           }}
-          options={(["oauth", "bearer", "static_headers", "none"] as const).map(
+          options={(["oauth", "bearer", "headers", "none"] as const).map(
             (value) => ({ value, label: t(`auth.${value}`) }),
           )}
         />
       )}
       {!created.current?.credential_configured &&
-        (mode === "static_headers" ? (
+        (mode === "headers" ? (
           <HeaderFields
             rows={headerRows}
             onChange={setHeaderRows}

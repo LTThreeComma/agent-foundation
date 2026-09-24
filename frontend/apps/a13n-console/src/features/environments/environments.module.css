@@ -22,23 +22,6 @@
   padding: 0;
 }
 
-/* "Test image" sits on the row below the image field with its result pill. */
-.testRow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-.testResult {
-  min-width: 0;
-  flex: 1 1 12rem;
-  margin: 0;
-  color: var(--a13n-secondary);
-  font-size: 12px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
 /* The chosen provider sits above the configuration group, on its own. */
 .chosenProviderBlock {
   padding-bottom: 4px;
@@ -76,27 +59,6 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-}
-
-.revisionNote {
-  margin: 0;
-  color: var(--a13n-secondary);
-  font-size: 12.5px;
-  line-height: 1.6;
-}
-
-/* Versions tab ----------------------------------------------------------- */
-
-.versions {
-  display: grid;
-  gap: 12px;
-  min-width: 0;
-}
-.versionMeta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
 }
 
 /* Instance inspector ----------------------------------------------------- */

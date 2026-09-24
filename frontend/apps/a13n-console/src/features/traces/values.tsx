@@ -23,18 +23,14 @@ export function Fact({
 }
 
 /** Presentation only: missing end time does not imply running execution. */
-export function durationMs(observation: Schema["Observation"]): number | null {
+export function durationMs(observation: Schema["Span"]): number | null {
   if (!observation.ended_at) return null;
   const value =
     Date.parse(observation.ended_at) - Date.parse(observation.started_at);
   return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-export function Duration({
-  observation,
-}: {
-  observation: Schema["Observation"];
-}) {
+export function Duration({ observation }: { observation: Schema["Span"] }) {
   const value = durationMs(observation);
   return (
     <>
@@ -52,13 +48,9 @@ export function Duration({
 export function TelemetryStatus({
   observation,
 }: {
-  observation: Schema["Observation"];
+  observation: Schema["Span"];
 }) {
-  return observation.status === null ? (
-    <>{UNKNOWN}</>
-  ) : (
-    <StatePill state={observation.status} />
-  );
+  return <StatePill state={observation.status} />;
 }
 
 const levelLabels: Record<string, string> = {

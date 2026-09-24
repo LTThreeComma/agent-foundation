@@ -9,23 +9,27 @@ const state = vi.hoisted(() => ({ PATCH: vi.fn(), close: vi.fn() }));
 vi.mock("../../auth/context", () => ({
   useClient: () => ({ http: { PATCH: state.PATCH } }),
 }));
+vi.mock("../../layout/workspace", () => ({
+  useAccess: () => ({ organization: { id: "org_test" } }),
+}));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
-const provider: Schema["ModelProvider"] = {
+const provider: Schema["Provider"] = {
   id: "mprov_test",
   organization_id: "org_test",
   workspace_id: "ws_test",
   type: "deepseek",
   name: "DeepSeek Gateway",
-  configuration: {
+  config: {
     base_url: "https://gateway.example/v1",
   },
   credential_configured: true,
   header_names: ["x-gateway"],
   enabled: true,
-  created_by: { principal_type: "user", principal_id: "usr_test" },
-  updated_by: { principal_type: "user", principal_id: "usr_test" },
+  version: 1,
+  created_by_id: "usr_test",
+  updated_by_id: "usr_test",
   created_at: "2026-09-11T00:00:00Z",
   updated_at: "2026-09-11T00:00:00Z",
 };
@@ -44,16 +48,14 @@ function mount() {
           {
             type: "deepseek",
             display_name: "DeepSeek",
-            supports_connection_probe: true,
-            supported_model_apis: ["openai.chat_completions"],
+            supports_test: true,
+            model_apis: ["openai.chat_completions"],
             default_model_api: "openai.chat_completions",
             model_api_labels: {
               "openai.chat_completions": "Chat Completions",
             },
-            settings_schemas: {
-              "openai.chat_completions": { type: "object" },
-            },
-            catalog_providers: ["openai"],
+            setup_url: null,
+            setup_label: null,
             authentication: { mode: "required" },
             credential_schema: { type: "string" },
             configuration_schema: {
@@ -75,10 +77,6 @@ function mount() {
                     },
                     { type: "null" },
                   ],
-                },
-                extra_headers: {
-                  type: "object",
-                  additionalProperties: { type: "string" },
                 },
               },
             },
@@ -111,10 +109,18 @@ it("starts collapsed and saves header rotation without resubmitting the primary 
   await user.type(screen.getByLabelText("Header value 1"), "replacement");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(state.close).toHaveBeenCalled());
-  const body = state.PATCH.mock.calls[0][1].body;
-  expect(body.extra_headers).toEqual({ "x-gateway": "replacement" });
-  expect(body.configuration).toEqual(provider.configuration);
-  expect(body).not.toHaveProperty("credential");
+  const [path, request] = state.PATCH.mock.calls[0];
+  expect(path).toBe(
+    "/api/v1/organizations/{organization_id}/model-providers/{provider_id}",
+  );
+  expect(request.params.path).toEqual({
+    organization_id: "org_test",
+    provider_id: provider.id,
+  });
+  expect(request.headers).toEqual({ "If-Match": '"test"' });
+  expect(request.body.extra_headers).toEqual({ "x-gateway": "replacement" });
+  expect(request.body.config).toEqual(provider.config);
+  expect(request.body).not.toHaveProperty("credential");
 });
 
 it("reopens advanced settings for an invalid renamed secret and retains the draft", async () => {
@@ -164,8 +170,8 @@ it("fills a preset, replaces it with a custom name and saves only the header nam
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(state.close).toHaveBeenCalled());
   const body = state.PATCH.mock.calls[0][1].body;
-  expect(body.configuration).toEqual({
-    ...provider.configuration,
+  expect(body.config).toEqual({
+    ...provider.config,
     session_affinity_header: "x-company-session",
   });
   expect(body.extra_headers).toEqual({});
@@ -188,22 +194,16 @@ it("clears a preset without changing the endpoint or static headers", async () =
   expect(input.value).toBe("");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(state.close).toHaveBeenCalled());
-  expect(state.PATCH.mock.calls[0][1].body.configuration).toEqual(
-    provider.configuration,
-  );
+  expect(state.PATCH.mock.calls[0][1].body.config).toEqual(provider.config);
 });
 
-const customDefinition: Schema["ModelProviderMetadata"] = {
+const customDefinition: Schema["ProviderType"] = {
   type: "acme",
   display_name: "Acme",
-  supports_connection_probe: false,
+  supports_test: false,
   setup_url: "https://docs.example.com/model-setup",
   setup_label: "Configure Acme access",
-  supported_model_apis: ["openai.chat_completions"],
-  default_model_api: "openai.chat_completions",
-  model_api_labels: {},
-  settings_schemas: {},
-  catalog_providers: [],
+  model_apis: ["openai.chat_completions"],
   authentication: {
     mode: "required",
     cases: [
@@ -259,7 +259,7 @@ function mountCustom(configuration = {}, definition = customDefinition) {
           value: {
             ...provider,
             type: definition.type,
-            configuration,
+            config: configuration,
             header_names: [],
           },
           etag: '"test"',
@@ -278,7 +278,7 @@ it("uses custom auth defaults to hide credentials and removes saved material", a
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(state.close).toHaveBeenCalled());
   expect(state.PATCH.mock.calls[0][1].body).toMatchObject({
-    configuration: { access: "public" },
+    config: { access: "public" },
     credential: null,
   });
 });
@@ -296,7 +296,7 @@ it("renders a custom conditional credential with nested secrets and a numeric va
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(state.close).toHaveBeenCalled());
   expect(state.PATCH.mock.calls[0][1].body).toMatchObject({
-    configuration: { access: "private" },
+    config: { access: "private" },
     credential: { authorization: { token: "nested-secret" }, revision: 7 },
   });
 });
@@ -317,7 +317,7 @@ it("offers a probe only for a definition with the operation and permits absent h
     { access: "private" },
     {
       ...customDefinition,
-      supports_connection_probe: true,
+      supports_test: true,
       setup_url: null,
       setup_label: null,
     },

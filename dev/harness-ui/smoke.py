@@ -13,7 +13,7 @@ from a13n_harness_ui.app import open_harness_ui_app
 from a13n_harness_ui.settings import HarnessUiSettings, StorageSettings
 from a13n_harness_ui.surfaces import RootOperationStatus
 
-from dev.service.model import model_process
+from dev.fixtures.model import model_process
 
 ROOT = Path(__file__).resolve().parents[2]
 

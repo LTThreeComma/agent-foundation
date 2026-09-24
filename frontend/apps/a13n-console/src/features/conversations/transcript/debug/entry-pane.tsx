@@ -267,11 +267,13 @@ function OtherPane({ entry }: { entry: OtherEntry }) {
         {entry.observations.map((observation) => (
           <li key={observation.id}>
             <code>{observation.name}</code>
-            <span>
-              {new Intl.DateTimeFormat(i18n.resolvedLanguage, {
-                timeStyle: "medium",
-              }).format(new Date(observation.occurredAt))}
-            </span>
+            {observation.occurredAt && (
+              <span>
+                {new Intl.DateTimeFormat(i18n.resolvedLanguage, {
+                  timeStyle: "medium",
+                }).format(new Date(observation.occurredAt))}
+              </span>
+            )}
             <RawDialog
               title={observation.name}
               value={observation.detail}

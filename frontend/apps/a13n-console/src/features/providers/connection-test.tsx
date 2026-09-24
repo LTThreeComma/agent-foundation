@@ -1,6 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { Button, SettingsRow } from "a13n-ui";
 import { useTranslation } from "react-i18next";
+import type { Schema } from "../../shared/api";
 import { ErrorNotice, StatePill } from "../../shared/feedback";
 import styles from "./providers.module.css";
 
@@ -8,8 +9,16 @@ import styles from "./providers.module.css";
 export interface ConnectionTestResult {
   success: boolean;
   message: string;
-  /** Reported where the category measures the round trip. */
-  elapsed_ms?: number;
+}
+
+/** A provider probe as the check shows it; only a probe that ran and passed succeeds. */
+export function providerTestResult(
+  result: Schema["ProviderTest"],
+): ConnectionTestResult {
+  return {
+    success: result.status === "succeeded",
+    message: result.message ?? "",
+  };
 }
 
 /**
@@ -51,9 +60,6 @@ export function ConnectionTest({
     <div role="status" className={styles.checkResult}>
       <span className={styles.checkRow}>
         <StatePill state={test.data.success ? "succeeded" : "failed"} />
-        {test.data.elapsed_ms !== undefined && (
-          <span className={styles.checkNote}>{test.data.elapsed_ms} ms</span>
-        )}
       </span>
       <p className={styles.checkMessage}>{test.data.message}</p>
     </div>

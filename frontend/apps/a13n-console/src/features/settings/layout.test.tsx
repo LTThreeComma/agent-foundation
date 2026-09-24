@@ -9,7 +9,7 @@ vi.mock("../../layout/workspace", () => {
     workspace: { id: "workspace", key: "design", name: "Design" },
     organization: { id: "organization", key: "acme", name: "Acme" },
     workspaces: [{ id: "workspace", key: "design", name: "Design" }],
-    organizationAdmin: true,
+    organizationCan: () => true,
     can: () => true,
   });
   return { useWorkspace: useAccess, useAccess };
@@ -60,9 +60,9 @@ it("redirects a legacy section query to the section's own address", () => {
 });
 
 it("keeps other query parameters while redirecting", () => {
-  mount("/workspace/design/settings?section=providers&category=memory");
+  mount("/workspace/design/settings?section=providers&category=web");
   expect(screen.getByLabelText("Current address").textContent).toBe(
-    "/workspace/design/settings/providers?category=memory",
+    "/workspace/design/settings/providers?category=web",
   );
 });
 

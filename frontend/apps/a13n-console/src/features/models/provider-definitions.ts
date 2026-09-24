@@ -7,6 +7,11 @@ export function useModelProviderDefinitions() {
   return useQuery({
     queryKey: ["model-provider-types"],
     queryFn: ({ signal }) =>
-      client.http.GET("/api/v1/model-provider-types", { signal }).then(data),
+      client.http
+        .GET("/api/v1/provider-types/{kind}", {
+          params: { path: { kind: "model" } },
+          signal,
+        })
+        .then(data),
   });
 }

@@ -12,7 +12,9 @@ members = ["packages/*"]
 
 [dependency-groups]
 dev = [
+    "a13n-harness[mem0,docker,e2b,modal]",
     "deptry>=0.25,<0.26",
+    "import-linter>=2.3,<3",
     # Keep real MCP server fixtures available in the default local development environment.
     "fastmcp>=4.0,<5",
     "grpcio-tools>=1.75,<2",

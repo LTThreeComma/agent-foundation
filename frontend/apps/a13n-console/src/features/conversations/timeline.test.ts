@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
-import type { RunEvent } from "../../service-client";
 import type { Schema } from "../../shared/api";
+import type { RunEvent } from "./display";
 import { applyRun, emptyExecution, type RunFold } from "./execution";
 import { compareCursors, type PresentedItem } from "./projection";
 import { runTimeline, type ModelEntry, type TimelineEntry } from "./timeline";
@@ -18,11 +18,9 @@ function event(
     event: {
       event_type: type,
       event_id: `event-${sequence}`,
-      run_id: "run",
-      thread_id: "thread",
       occurred_at: occurredAt,
       payload,
-      item_id: item,
+      item_id: item ?? null,
       run_attempt_id: "attempt",
       harness_run_id: scope,
     },
@@ -114,8 +112,8 @@ const run = {
   status: "completed",
   created_at: "2026-09-12T00:00:00Z",
   started_at: "2026-09-12T00:00:00Z",
-  completed_at: "2026-09-12T00:00:09Z",
-} as unknown as Schema["RunResource"];
+  sealed_at: "2026-09-12T00:00:09Z",
+} as unknown as Schema["RunView"];
 
 function timeline(...events: RunEvent[]) {
   const state: RunFold = events.reduce(applyRun, {
@@ -439,7 +437,6 @@ it("reads a retained tool-call Item as the call it recorded", () => {
         id: "item_call",
         kind: "tool_call",
         state: "completed",
-        parentId: null,
         firstCursor: "1-0",
         lastCursor: "1-1",
         startedAt: null,

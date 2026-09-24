@@ -10,7 +10,7 @@ import {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { createClient, type Client } from "../../../service-client";
-import { fixtureThread } from "./fixture";
+import { fixtureRun, fixtureThread } from "./fixture";
 import { HistoryTranscript } from "./history";
 
 let client: Client;
@@ -123,62 +123,57 @@ function stage(level: "chat" | "debug") {
   };
 }
 
-function ancestorService(requests: URL[]) {
+/** A Run of the fixture Thread, as the lineage and the Run read serve it. */
+const ancestor = (id: string) =>
+  fixtureRun({
+    id,
+    thread_id: "thread",
+    session_id: "session",
+    agent_id: "agent",
+    input: { content: [{ type: "text", text: "Earlier request" }] },
+  });
+
+/** The lineage in pages, nearest first, as the Service pages it. */
+function ancestorService(
+  requests: URL[],
+  pages: string[][] = [["current", "parent", "grandparent"]],
+) {
   return createClient({
     baseUrl: "https://test.invalid",
     auth: { type: "session" },
     fetch: async (input) => {
       const url = new URL((input as Request).url);
       requests.push(url);
-      if (url.pathname.endsWith("/lineage"))
+      if (url.pathname.endsWith("/lineage")) {
+        const index = Number(url.searchParams.get("cursor") ?? 0);
         return Response.json({
-          items: [
-            { run_id: "current", thread_id: "thread", depth_from_head: 0 },
-            { run_id: "parent", thread_id: "thread", depth_from_head: 1 },
-            {
-              run_id: "grandparent",
-              thread_id: "thread",
-              depth_from_head: 2,
-            },
-          ],
+          items: pages[index]!.map(ancestor),
+          next_cursor: index + 1 < pages.length ? String(index + 1) : null,
         });
+      }
       if (url.pathname.endsWith("/threads/thread/runs"))
         return Response.json({ items: [], next_cursor: null });
       if (url.pathname.endsWith("/items")) {
-        const older = url.searchParams.has("cursor");
-        const run = url.pathname.split("/").at(-2);
+        const run = url.pathname.split("/").at(-2)!;
         return Response.json({
-          snapshot_version: 1,
-          projection_cursor: "3-0",
+          run: ancestor(run),
+          position: "2-0",
           complete: true,
-          finalized: true,
-          incomplete_reason: null,
-          next_cursor: older ? null : "older",
           items: [
             {
-              id: older ? "old" : run,
+              id: run,
               kind: "text_message",
               state: "completed",
-              parent_item_id: null,
-              first_stream_id: older ? "1-0" : "2-0",
-              last_stream_id: older ? "1-0" : "2-0",
-              content: {
-                text: older
-                  ? `Earlier ${run} message`
-                  : `Latest ${run} message`,
-              },
+              first_stream_id: "2-0",
+              last_stream_id: "2-0",
+              started_at: "2026-09-20T10:00:01.000Z",
+              ended_at: "2026-09-20T10:00:02.000Z",
+              content: { role: "assistant", text: `Latest ${run} message` },
             },
           ],
         });
       }
-      return Response.json({
-        id: url.pathname.split("/").at(-1),
-        thread_id: "thread",
-        session_id: "session",
-        agent_id: "agent",
-        status: "completed",
-        created_at: "2026-09-17T00:00:00Z",
-      });
+      return Response.json(ancestor(url.pathname.split("/").at(-1)!));
     },
   });
 }
@@ -190,7 +185,7 @@ it("reaches one run further back each time the reader scrolls to the top", async
   // Nothing but the lineage until the sentinel above the transcript is seen.
   await waitFor(() => expect(StageObserver.created).toHaveLength(1));
   expect(requests.map((url) => url.pathname)).toEqual([
-    "/api/v1/runs/current/lineage",
+    "/api/v1/workspaces/workspace/runs/current/lineage",
   ]);
   expect(
     screen.queryByRole("button", { name: "Load earlier runs" }),
@@ -208,12 +203,27 @@ it("reaches one run further back each time the reader scrolls to the top", async
   expect(viewport.dataset.loadingEarlier).toBeUndefined();
   StageObserver.created[1]!.reach();
   await screen.findByText("Latest grandparent message");
-  // An ancestor's own earlier items still load on demand, inside that run.
-  fireEvent.click(
-    screen.getAllByRole("button", { name: "Load earlier messages" })[0]!,
-  );
-  await screen.findByText("Earlier grandparent message");
-  expect(requests.at(-1)?.searchParams.get("cursor")).toBe("older");
+  cache.clear();
+});
+
+it("reads the next lineage page only once the reader reaches past the loaded one", async () => {
+  const requests: URL[] = [];
+  client = ancestorService(requests, [["current", "parent"], ["grandparent"]]);
+  const { cache } = stage("chat");
+  const lineage = () =>
+    requests.filter((url) => url.pathname.endsWith("/lineage"));
+  await waitFor(() => expect(StageObserver.created).toHaveLength(1));
+  StageObserver.created[0]!.reach();
+  await screen.findByText("Latest parent message");
+  // The loaded page still had the parent: no further page was read for it.
+  expect(lineage()).toHaveLength(1);
+  await waitFor(() => expect(StageObserver.created).toHaveLength(2));
+  StageObserver.created[1]!.reach();
+  await screen.findByText("Latest grandparent message");
+  expect(lineage().map((url) => url.searchParams.get("cursor"))).toEqual([
+    null,
+    "1",
+  ]);
   cache.clear();
 });
 
@@ -227,28 +237,14 @@ it("reveals an ancestor as a debug section, replayed on its own", async () => {
       requests.push(url);
       if (url.pathname.endsWith("/lineage"))
         return Response.json({
-          items: [
-            { run_id: "current", thread_id: "thread", depth_from_head: 0 },
-            { run_id: "parent", thread_id: "thread", depth_from_head: 1 },
-          ],
+          items: ["current", "parent"].map(ancestor),
+          next_cursor: null,
         });
       if (url.pathname.endsWith("/runs"))
         return Response.json({ items: [], next_cursor: null });
       if (url.pathname.endsWith("/threads"))
         return Response.json({ items: [], next_cursor: null });
-      return Response.json({
-        id: "parent",
-        thread_id: "thread",
-        session_id: "session",
-        agent_id: "agent",
-        status: "completed",
-        input_kind: "agent_input",
-        input_text: "Earlier request",
-        lineage_kind: "root",
-        created_at: "2026-09-17T00:00:00Z",
-        started_at: "2026-09-17T00:00:00Z",
-        completed_at: "2026-09-17T00:00:04Z",
-      });
+      return Response.json({ ...ancestor("parent"), lineage: "root" });
     },
   });
   const { cache } = stage("debug");

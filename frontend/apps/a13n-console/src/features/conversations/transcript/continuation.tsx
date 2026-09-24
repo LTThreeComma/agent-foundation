@@ -5,6 +5,7 @@ import { useClient } from "../../../auth/context";
 import { useWorkspace } from "../../../layout/workspace";
 import { commandHeaders, data, type Schema } from "../../../shared/api";
 import { Composer } from "../composer";
+import { questionsOnly } from "./run-actions";
 import styles from "./cards.module.css";
 
 /** Resolving the whole waiting batch by default is a decision, so it is confirmed. */
@@ -13,9 +14,9 @@ export function ContinueWithoutFeedback({
   thread,
   accepted,
 }: {
-  run: Schema["RunResource"];
-  thread: Schema["ThreadResource"];
-  accepted: (receipt: Schema["RunAcceptanceReceipt"]) => void;
+  run: Schema["RunView"];
+  thread: Schema["ThreadView"];
+  accepted: (next: Schema["RunView"] | null) => void;
 }) {
   const { t } = useTranslation(),
     client = useClient(),
@@ -44,24 +45,43 @@ export function ContinueWithoutFeedback({
           disabled={!confirmed}
           label={t("Resolve and continue")}
           placeholder={t("Answer above, or send a new message")}
-          submit={async (input, key) => {
+          submit={async (payload, key) => {
+            const workspace_id = workspace.id;
+            // A message resolves a wait of questions alone by default; any
+            // other wait resumes with default answers and takes the message
+            // as guidance.
+            const resumed = questionsOnly(run.pending?.items ?? [])
+              ? null
+              : data(
+                  await client.http.POST(
+                    "/api/v1/workspaces/{workspace_id}/runs/{run_id}/resume",
+                    {
+                      params: {
+                        path: { workspace_id, run_id: run.id },
+                        header: commandHeaders(`${key}:resume`),
+                      },
+                      body: { answers: [] },
+                    },
+                  ),
+                );
             const receipt = data(
-              await client.http.POST("/api/v1/threads/{thread_id}/runs", {
-                params: {
-                  path: { thread_id: thread.id },
-                  header: commandHeaders(workspace.id, key),
-                },
-                body: {
-                  expected_thread_version: thread.version,
-                  input,
-                  waiting_resolution: {
-                    mode: "defaults",
-                    sealed_state_digest_sha256: run.sealed_state_digest_sha256!,
+              await client.http.POST(
+                "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/inbox",
+                {
+                  params: {
+                    path: { workspace_id, thread_id: thread.id },
+                    header: commandHeaders(key),
+                  },
+                  body: {
+                    kind: "message",
+                    delivery: "steer",
+                    payload,
+                    agent_id: run.agent_id,
                   },
                 },
-              }),
+              ),
             );
-            if (receipt.run) accepted(receipt.run);
+            accepted(receipt.run ?? resumed);
           }}
         />
       </div>

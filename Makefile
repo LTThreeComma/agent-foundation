@@ -1,17 +1,18 @@
 .DEFAULT_GOAL := help
 
 A13N_SERVICE_IMAGE ?= a13n-service:local
+A13N_CONSOLE_IMAGE ?= a13n-console:local
 SANDBOX_IMAGE ?= a13n-sandbox:local
 A13N_HARNESS_UI_IMAGE ?= a13n-harness-ui:local
 EXAMPLE_DIRS := examples/agent-app examples/environment-provider examples/plugins examples/provider-plugin
 PYTHON_TEST_DIRS ?=
 PYTHON_TEST_WORKERS ?=
-SERVICE_CONFIG ?= dev/service/local.toml
+SERVICE_CONFIG ?= var/dev/service.toml
 HARNESS_ENV ?= dev/harness/.env
 HARNESS_UI_ENV ?= dev/harness-ui/.env
 STATE ?=
-MEM0_CONFIG ?= dev/mem0/local.toml
-SERVICE_DEV = python3 -m dev.service --config "$(SERVICE_CONFIG)" --mem0-config "$(MEM0_CONFIG)"
+TRACES ?= auto
+SERVICE_DEV = python3 -m dev.service --traces "$(TRACES)"
 CHECK_JOBS ?= 4
 CHECK_TARGETS := \
 	lint \
@@ -87,30 +88,27 @@ examples-check: examples-lock-check examples-format-check examples-typecheck ## 
 examples-check-all: examples-check examples-test examples-smoke examples-build ## Run the complete examples gate
 
 .PHONY: setup
-setup: ## Prepare this checkout's stores, shared Langfuse and Service schema
+setup: ## Prepare this checkout's stores, schema and local administrator without starting applications
 	@$(SERVICE_DEV) setup
 
-.PHONY: k8s-up k8s-admin-link k8s-check
-k8s-up: ## Build and start local kind Kubernetes, preserving credentials and printing initial admin link
+.PHONY: k8s-up k8s-check
+k8s-up: ## Build and start local kind Kubernetes, preserving credentials and creating the first administrator
 	@python3 scripts/k8s_local.py up
 
-k8s-admin-link: ## Replace a lost pending administrator invitation in local kind Kubernetes
-	@python3 scripts/k8s_local.py admin-link
-
-k8s-check: ## Test local Kubernetes launcher without building images or changing a cluster
+k8s-check: ## Test the chart and local Kubernetes launcher without building images or changing a cluster
 	@uv run --locked python -m pytest scripts/tests/test_k8s_local.py
 	@helm lint deploy/kubernetes/a13n-service -f deploy/kubernetes/values-local.yaml --strict
 
 .PHONY: dev
-dev: ## Prepare and start this checkout's Service, scripted model and Console in the background
+dev: ## Prepare and start this checkout's scripted model, Service and Console in the background (TRACES=auto|langfuse|none)
 	@$(SERVICE_DEV) dev
 
 .PHONY: dev-foreground dev-stop
-dev-foreground: ## Prepare and run Service and Console attached to this terminal
+dev-foreground: ## Prepare and run the scripted model, Service and Console attached to this terminal
 	@$(SERVICE_DEV) dev --foreground
 
-dev-stop: ## Stop Service, scripted model and Console started in the background
-	@python3 -m dev.service --config "$(SERVICE_CONFIG)" --mem0-config "$(MEM0_CONFIG)" stop
+dev-stop: ## Stop this checkout's running applications
+	@$(SERVICE_DEV) stop
 
 # Initialize only missing files; templates changing must never replace private settings.
 # Resolve the template beside the selected file, including explicit path overrides.
@@ -156,120 +154,31 @@ harness-ui-smoke: harness-ui-env ## Exercise HarnessUiApp with a scripted model;
 	@uv run --locked --env-file "$(HARNESS_UI_ENV)" python -m dev.harness-ui.smoke
 
 .PHONY: dev-down dev-status dev-env-list
-.PHONY: live-test-init live-test-setup live-test-control live-test-worker live-test live-test-local live-test-check live-test-auth-control live-test-round-two live-test-management
-LIVE_TEST_RUN = uv run --locked $(if $(wildcard .env),--env-file .env,)
+dev-down: ## Stop this checkout's PostgreSQL and Redis, preserving their data
+	@$(SERVICE_DEV) down
 
-live-test-auth-control: sync ## Run ordinary local Control settings with the private test authenticator
-	@$(LIVE_TEST_RUN) python -m dev.live_tests.manage authenticated-control
+dev-status: ## Print this checkout's instance, URLs and listeners as JSON without changing anything
+	@$(SERVICE_DEV) status
 
-live-test-init: sync ## Seed an isolated local live-test identity (requires migrated database)
-	@$(LIVE_TEST_RUN) python -m dev.live_tests.manage init
-
-live-test-control: sync ## Run the local live-test Control with explicit test authentication
-	@$(LIVE_TEST_RUN) python -m dev.live_tests.manage control
-
-live-test-worker: sync ## Run the separate local live-test Worker
-	@$(LIVE_TEST_RUN) python -m dev.live_tests.manage worker
-
-live-test-setup: sync ## Create live-test Model, Environment, Plugin, and Agents through Control HTTP
-	@$(LIVE_TEST_RUN) python -m dev.live_tests.manage setup
-
-live-test: sync ## Run opt-in local HTTP journeys (LIVE_TEST_ARGS="-k basic" selects cases)
-	@$(LIVE_TEST_RUN) python -m pytest dev/live_tests --live -v --tb=short -o log_cli=true -o log_cli_level=INFO $(LIVE_TEST_ARGS)
-
-live-test-local: sync ## Run first-round HTTP journeys with owned Docker dependencies and service processes
-	@uv run --locked python -m dev.live_tests.isolated $(LIVE_TEST_ARGS)
-
-.PHONY: live-test-ci live-test-ci-environment-build
-live-test-ci: sync ## Run reviewed live journeys (suite=smoke|core|functional|control|fork-queue|run-faults|environment-native|environment-service; LIVE_TEST_ARGS selects infrastructure)
-	@uv run --locked python -m dev.live_tests.ci $(suite) $(LIVE_TEST_ARGS)
-
-live-test-ci-environment-build: image-sandbox image-docker-environment ## Build the native daemon and fixture images for the manual Environment matrices
-	@cargo build --locked --package a13n-envd
-	@docker build -f dev/live_tests/environment/file_resources.Dockerfile --build-arg SANDBOX_IMAGE="$(SANDBOX_IMAGE)" --target worker -t a13n-file-resources:local .
-
-live-test-round-two: sync ## Run isolated HTTP fault/recovery journeys with Docker dependencies
-	@$(LIVE_TEST_RUN) python -m pytest dev/live_tests --live-round-two -v --tb=short -o log_cli=true -o log_cli_level=INFO $(LIVE_TEST_ARGS)
-
-.PHONY: live-test-performance
-live-test-performance: sync ## Measure concurrent PG/S3 calls and bounded Service operations
-	@uv run --locked python -m pytest dev/live_tests/performance/test_operations.py --live-performance -n 0 -v --tb=short -o log_cli=true -o log_cli_level=INFO --log-disable=httpx2 $(LIVE_TEST_ARGS)
-
-.PHONY: live-test-session live-test-contention live-test-s3
-live-test-session: sync ## Verify real sequential history and built-in compaction without latency gates
-	@uv run --locked python -m pytest dev/live_tests/harness_integration/test_36_long_session.py --live-long-session -v --tb=short -o log_cli=true -o log_cli_level=INFO --log-disable=httpx2 $(LIVE_TEST_ARGS)
-
-live-test-contention: sync ## Exercise multiwriter Run, Attempt, inbox and queue races
-	@uv run --locked python -m pytest dev/live_tests/control/test_57_admission_contention.py dev/live_tests/control/test_58_inbox_contention.py dev/live_tests/control/test_59_queue_contention.py dev/live_tests/control/test_61_attempt_control_contention.py dev/live_tests/run_recovery/test_60_attempt_contention.py --live-round-two -v --tb=short -o log_cli=true -o log_cli_level=INFO --log-disable=httpx2 $(LIVE_TEST_ARGS)
-
-live-test-s3: sync ## Measure single S3 requests (skips without private Provider [s3] settings)
-	@uv run --locked python -m pytest dev/live_tests/performance/test_s3_benchmark.py --live-performance -n 0 -v --tb=short -o log_cli=true -o log_cli_level=INFO --log-disable=httpx2 $(LIVE_TEST_ARGS)
-
-.PHONY: live-test-report
-live-test-report: ## Render selected performance artifacts as one scenario-based table
-	@uv run --locked python -m dev.live_tests.performance.scenario_report $(REPORT_ARGS)
-
-live-test-management: sync ## Run isolated Service/Harness management journeys with Docker dependencies
-	@$(LIVE_TEST_RUN) python -m pytest dev/live_tests --live-management -v --tb=short -o log_cli=true -o log_cli_level=INFO $(LIVE_TEST_ARGS)
-
-.PHONY: live-test-plugin-image
-live-test-plugin-image: sync ## Build a custom plugin wheel/image and exercise the production Worker through HTTP
-	@uv run --locked python -m pytest dev/live_tests/harness_integration/test_19_plugin_image.py --live-plugin-image -v --tb=short -o log_cli=true -o log_cli_level=INFO --log-disable=httpx2 $(LIVE_TEST_ARGS)
-
-.PHONY: live-test-providers
-live-test-providers: sync ## Run optional configured real Providers in disposable local labs
-	@$(LIVE_TEST_RUN) python -m pytest dev/live_tests/providers --live-providers -v --tb=short -o log_cli=true -o log_cli_level=INFO $(LIVE_TEST_ARGS)
-
-.PHONY: live-test-models live-test-model-console live-test-openai live-test-zhipu
-live-test-openai: sync ## Run official OpenAI Chat Completions and Responses journeys
-	@$(LIVE_TEST_RUN) python -m pytest dev/live_tests/providers/test_openai_direct.py --live-openai -n 0 -v --tb=short --log-disable=httpx2 $(LIVE_TEST_ARGS)
-
-live-test-zhipu: sync ## Run GLM journeys against the official BigModel endpoint
-	@$(LIVE_TEST_RUN) python -m pytest dev/live_tests/providers/test_zhipu_direct.py --live-zhipu -n 0 -v --tb=short --log-disable=httpx2 $(LIVE_TEST_ARGS)
-
-live-test-models: sync ## Run isolated Model Management HTTP, IAM, protocol and recovery journeys
-	@uv run --locked python -m pytest dev/live_tests/model --live-management -n 0 -v --tb=short --log-disable=httpx2 $(LIVE_TEST_ARGS)
-
-live-test-model-console: sync frontend-sync ## Run optional Chromium Model Management journeys
-	@uv run --locked --with playwright==1.58.0 python -m pytest dev/live_tests/model/test_console.py --live-management --live-model-console -n 0 -v --tb=short --log-disable=httpx2 $(LIVE_TEST_ARGS)
-
-live-test-check: sync ## Validate live-test support without contacting services
-	@uv run --locked ruff check --no-fix dev/live_tests
-	@uv run --locked ruff format --check dev/live_tests
-	@uv run --locked mdformat --check --number dev/live_tests/README.md dev/live_tests/performance/REPORTING.md
-	@uv run --locked python -m pytest dev/live_tests -q
-
-.PHONY: mem0-up mem0-down mem0-logs
-mem0-up: ## Start and verify this checkout's local Mem0 OSS server
-	@$(SERVICE_DEV) mem0 up
-
-mem0-down: ## Stop this checkout's local Mem0 OSS while preserving memories
-	@$(SERVICE_DEV) mem0 down
-
-mem0-logs: ## Inspect this checkout's local Mem0 OSS startup and provider errors
-	@$(SERVICE_DEV) mem0 logs
-
-dev-status: ## Print this checkout's local instance and listeners as JSON without changing state
-	@python3 -m dev.service --config "$(SERVICE_CONFIG)" --mem0-config "$(MEM0_CONFIG)" status
-
-dev-env-list: ## List this repository's worktrees and local test environments
+dev-env-list: ## List this machine's checkouts and their local instances
 	@python3 -m dev.service.envs list
 
-dev-down: ## Stop this checkout's PostgreSQL, Redis and Mem0, preserving data and shared Langfuse
-	@$(SERVICE_DEV) down
+.PHONY: live-test
+live-test: sync ## Run the Service live journeys: Control and two Workers over HTTPS with disposable stores (Docker)
+	@uv run --locked python -m dev.live_tests $(LIVE_TEST_ARGS)
 
 .PHONY: langfuse-up langfuse-down langfuse-test langfuse-reset
 langfuse-up: ## Start and authenticate machine-shared local Langfuse
-	@$(SERVICE_DEV) langfuse up
+	@uv run --locked python -m dev.observability.langfuse up
 
 langfuse-down: ## Stop machine-shared local Langfuse while preserving its data
-	@$(SERVICE_DEV) langfuse down
+	@uv run --locked python -m dev.observability.langfuse down
 
 langfuse-test: ## Verify Service OTLP write and Trace Query against shared local Langfuse v4
-	@$(SERVICE_DEV) langfuse test
+	@uv run --locked python -m dev.observability.langfuse test
 
 langfuse-reset: ## Stop shared local Langfuse and remove all shared local trace data
-	@$(SERVICE_DEV) langfuse reset
+	@uv run --locked python -m dev.observability.langfuse reset
 
 .PHONY: a13n-harness-ui-skills
 a13n-harness-ui-skills: sync ## Generate the bundled configuration Skill and documentation navigation
@@ -314,12 +223,14 @@ lint: sync deps-check ## Run non-mutating repository lint checks
 		git ls-files --cached --others --exclude-standard -z | \
 			xargs -0 uv run --locked pre-commit run "$$hook" --files || exit $$?; \
 	done
-	@git ls-files --cached --others --exclude-standard -z -- '*.md' | xargs -0 uv run --locked mdformat --check --number
+	@git ls-files --cached --others --exclude-standard -z -- '*.md' | \
+		python3 -c 'import os,sys; sys.stdout.buffer.write(b"\0".join(p for p in sys.stdin.buffer.read().split(b"\0") if p and os.path.isfile(p)))' | \
+		xargs -0 uv run --locked mdformat --check --number
 	@uv run --locked ruff check --no-fix packages scripts
 	@uv run --locked ruff format --check packages scripts
 
 .PHONY: typecheck
-typecheck: sync ## Type-check Python package sources
+typecheck: sync service-boundaries ## Type-check Python package sources
 	@uv run --locked pyright
 
 .PHONY: docs-check
@@ -360,11 +271,12 @@ eip-verify: sync ## Verify checked EIP artifacts without modifying the repositor
 	@uv run --locked python -m scripts.eip_codegen verify
 
 .PHONY: eip-integration-test
-eip-integration-test: sync ## Run EIP generation, runtime, cross-language, and wire-model integration tests
+eip-integration-test: sync ## Run EIP generation, runtime, cross-language, wire-model and Service external-target integration tests
 	@cargo build --locked --package a13n-envd
 	@test -x "$(CURDIR)/target/debug/a13n-envd"
 	@A13N_ENVD_TEST_BINARY="$(CURDIR)/target/debug/a13n-envd" A13N_ENVD_EXECUTABLE="$(CURDIR)/target/debug/a13n-envd" uv run --locked python -m pytest $(if $(EIP_TEST_REPORT_DIR),--junitxml=$(EIP_TEST_REPORT_DIR)/eip.xml) scripts/tests/test_eip_codegen.py packages/a13n-envd-client/tests/eip packages/a13n-harness/tests/providers_environment/test_local_envd.py packages/a13n-harness/tests/providers_environment/test_local_envd_e2e.py packages/a13n-harness/tests/providers_environment/test_remote_envd.py packages/a13n-harness/tests/providers_environment/test_remote_envd_e2e.py
 	@A13N_ENVD_TEST_BINARY="$(CURDIR)/target/debug/a13n-envd" uv run --project examples/environment-provider --locked python -m pytest $(if $(EIP_TEST_REPORT_DIR),--junitxml=$(EIP_TEST_REPORT_DIR)/eip-example.xml) examples/environment-provider/tests
+	@A13N_ENVD_TEST_BINARY="$(CURDIR)/target/debug/a13n-envd" uv run --locked python -m pytest $(if $(EIP_TEST_REPORT_DIR),--junitxml=$(EIP_TEST_REPORT_DIR)/eip-service.xml) packages/a13n-service/tests/test_environments_envd.py
 	@uv run --locked pyright packages/a13n-envd-client/a13n_envd_client packages/a13n-harness/a13n_harness/providers/environment
 
 .PHONY: eip-test
@@ -515,24 +427,12 @@ db-migrate: sync ## Generate a migration (usage: make db-migrate msg="descriptio
 	@bash dev/service/db-migrate.sh "$(msg)"
 
 .PHONY: db-upgrade
-db-upgrade: sync ## Upgrade the local a13n-service database to all heads
-	@uv run --locked a13n-service --config "$(SERVICE_CONFIG)" db upgrade
-
-.PHONY: db-downgrade
-db-downgrade: sync ## Downgrade the local database by one reviewed revision
-	@uv run --locked a13n-service --config "$(SERVICE_CONFIG)" db downgrade
-
-.PHONY: db-current
-db-current: sync ## Show the current a13n-service database revision
-	@uv run --locked a13n-service --config "$(SERVICE_CONFIG)" db current
+db-upgrade: service-config-check sync ## Upgrade this checkout's a13n-service database to all heads
+	@uv run --locked a13n-service --config "$(SERVICE_CONFIG)" migrate
 
 .PHONY: db-check
-db-check: sync ## Fail unless the a13n-service database is at all heads
-	@uv run --locked a13n-service --config "$(SERVICE_CONFIG)" db current --check-heads
-
-.PHONY: db-history
-db-history: sync ## Show a13n-service migration history
-	@uv run --locked a13n-service --config "$(SERVICE_CONFIG)" db history
+db-check: service-config-check sync ## Fail unless this checkout's a13n-service database is at all heads
+	@uv run --locked a13n-service --config "$(SERVICE_CONFIG)" migrate --check
 
 .PHONY: release-check
 release-check: ## Validate a component version (component=a13n-harness|a13n-harness-ui|a13n-logging|a13n-service|a13n-envd version=X.Y.Z or X.Y.Z-rc.N)
@@ -543,6 +443,10 @@ release-check: ## Validate a component version (component=a13n-harness|a13n-harn
 .PHONY: image-a13n-service
 image-a13n-service: ## Build the local a13n-service container image
 	@docker build -f deploy/containers/a13n-service/Dockerfile -t "$(A13N_SERVICE_IMAGE)" .
+
+.PHONY: image-a13n-console
+image-a13n-console: ## Build the local Console image (static app and Service proxy)
+	@docker build -f deploy/containers/a13n-console/Dockerfile -t "$(A13N_CONSOLE_IMAGE)" .
 
 .PHONY: image-sandbox
 image-sandbox: ## Build the local sandbox image with a13n-envd
@@ -557,7 +461,7 @@ image-a13n-harness-ui: a13n-harness-ui-image-context ## Build the local packaged
 	@docker build -f deploy/containers/a13n-harness-ui/Dockerfile -t "$(A13N_HARNESS_UI_IMAGE)" dist/a13n-harness-ui-image
 
 .PHONY: images
-images: image-a13n-service image-sandbox image-docker-environment image-a13n-harness-ui ## Build all local container images
+images: image-a13n-service image-a13n-console image-sandbox image-docker-environment image-a13n-harness-ui ## Build all local container images
 
 .PHONY: image-check-a13n-harness-ui
 image-check-a13n-harness-ui: ## Check an existing UI image locally; not a CI or release prerequisite
@@ -567,6 +471,12 @@ image-check-a13n-harness-ui: ## Check an existing UI image locally; not a CI or 
 image-check-a13n-service: ## Smoke-check the existing a13n-service container image
 	@test "$$(docker image inspect --format '{{.Config.User}}' "$(A13N_SERVICE_IMAGE)")" = "app"
 	@docker run --rm --entrypoint sh "$(A13N_SERVICE_IMAGE)" -c '! command -v node'
+	@docker run --rm "$(A13N_SERVICE_IMAGE)" a13n-service --config /app/service.toml run --help >/dev/null
+
+.PHONY: image-check-a13n-console
+image-check-a13n-console: ## Smoke-check the existing Console image and its proxy configuration
+	@test "$$(docker image inspect --format '{{.Config.User}}' "$(A13N_CONSOLE_IMAGE)")" = "101:101"
+	@docker run --rm "$(A13N_CONSOLE_IMAGE)" "envsubst '\$${A13N_SERVICE_UPSTREAM}' < /etc/a13n/nginx.conf.template > /tmp/nginx.conf; nginx -t -q -c /tmp/nginx.conf"
 
 .PHONY: image-check-sandbox
 image-check-sandbox: ## Smoke-check sandbox defaults, development account, sudo and daemon startup
@@ -582,7 +492,7 @@ image-check-sandbox: ## Smoke-check sandbox defaults, development account, sudo 
 
 .PHONY: image-check
 image-check: images ## Build and smoke-check all container images
-	@$(MAKE) --no-print-directory image-check-a13n-service image-check-sandbox image-check-a13n-harness-ui image-check-docker-environment
+	@$(MAKE) --no-print-directory image-check-a13n-service image-check-a13n-console image-check-sandbox image-check-a13n-harness-ui image-check-docker-environment
 
 .PHONY: python-check
 python-check: lint typecheck ## Run Python workspace lint and type checks
@@ -615,8 +525,9 @@ help: ## Show available commands
 	@printf '  make webui WEBUI_ARGS="--port 9000" Forward WebUI server options\n'
 	@printf '  make cli CLI_ARGS="--help"         Forward options or subcommands to Harness UI\n'
 	@printf '  make env-init                      Prepare both development .env files only\n'
-	@printf '  make dev                           Start local Service, Console, and infrastructure\n'
-	@printf '  make dev-down                      Stop infrastructure, preserving data\n'
+	@printf '  make dev                           Start the local Service and Console in the background\n'
+	@printf '  make dev-status                    Show the local URLs, ports and listeners\n'
+	@printf '  make dev-stop                      Stop the applications; make dev-down also stops the stores\n'
 	@printf '  make test PYTHON_TEST_DIRS=scripts/tests PYTHON_TEST_WORKERS=0\n'
 	@printf '  make check CHECK_JOBS=4             Format, then run fast checks\n\n'
 	@printf 'Environment overrides: HARNESS_UI_ENV=path, HARNESS_ENV=path, SERVICE_CONFIG=path\n'
@@ -625,21 +536,17 @@ help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-38s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: service-dev dev-reset dev-state-check
-service-dev: ## Prepare and run only this checkout's Service and scripted model
+service-dev: ## Prepare and run only this checkout's scripted model and Service in the foreground
 	@$(SERVICE_DEV) service-dev
 
-dev-reset: ## Reset this checkout's Service stores (STATE=empty or STATE=seeded)
+dev-reset: ## Delete this checkout's state and rebuild it (STATE=empty or STATE=seeded)
 	@$(SERVICE_DEV) reset "$(STATE)"
 
-dev-state-check: sync ## Validate local state tools and seed journeys in disposable storage
+dev-state-check: sync ## Check the local development tools, including seeding a disposable Service
 	@uv run --locked ruff check --no-fix dev/service
 	@uv run --locked ruff format --check dev/service
 	@uv run --locked pyright dev/service
-	@uv run --locked pytest dev/service/tests -q --tb=short
-
-.PHONY: db-migrate-core-verification
-db-migrate-core-verification: sync ## Generate the isolated Bot-free verification schema
-	@bash dev/service/db-migrate.sh "$(msg)" core-verification
+	@uv run --locked python -m pytest dev/service/tests -q --tb=short
 
 DOCKER_ENVIRONMENT_IMAGE ?= a13n-docker-environment:local
 .PHONY: image-docker-environment image-check-docker-environment
@@ -651,5 +558,21 @@ image-check-docker-environment: ## Validate native Docker image prerequisites
 	@docker run --rm --entrypoint sh "$(DOCKER_ENVIRONMENT_IMAGE)" -c 'python3 --version && git --version && bash --version && node --version && npm --version && test -w /workspace && test -w /tmp/a13n && ! command -v a13n-envd'
 
 .PHONY: docker-provider-live-test
-docker-provider-live-test: ## Exercise native Docker against an explicitly selected real Engine
-	@A13N_TEST_DOCKER_IMAGE="$(DOCKER_ENVIRONMENT_IMAGE)" uv run --locked pytest dev/live_tests/environment/test_53_native_docker.py --live-environments
+docker-provider-live-test: sync image-docker-environment ## Run the environment journey on the native Docker provider
+	@DOCKER_ENVIRONMENT_IMAGE="$(DOCKER_ENVIRONMENT_IMAGE)" uv run --locked python -m dev.live_tests -k docker --require-all
+
+.PHONY: service-boundaries
+service-boundaries: sync ## Verify Service import direction
+	@uv run --locked lint-imports --config packages/a13n-service/.importlinter
+
+.PHONY: live-test-check
+live-test-check: sync ## Check live-test fixtures, configuration and journey selection without Docker
+	@uv run --locked python -m pytest scripts/tests/test_service_foundation_tooling.py -q
+
+.PHONY: service-config-check
+service-config-check:
+	@test -f "$(SERVICE_CONFIG)" || { echo "Missing Service settings: $(SERVICE_CONFIG). Run make setup first or set SERVICE_CONFIG to an existing file." >&2; exit 2; }
+
+.PHONY: live-test-console
+live-test-console: sync frontend-sync ## Launch Console with disposable real Service stores and model fixture
+	@uv run --locked python -m dev.live_tests.console --directory "$(CONSOLE_LIVE_DIR)"

@@ -12,17 +12,23 @@ import {
   UploadSimpleIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
-import { commandHeaders, data, type Schema } from "../../shared/api";
+import {
+  data,
+  ifMatch,
+  rowTag,
+  uploadFile,
+  type Schema,
+} from "../../shared/api";
 import { ErrorNotice } from "../../shared/feedback";
 import { FormActions, JsonView } from "../../shared/forms";
 import { IconTile } from "../../shared/identity";
-import { useIdempotency } from "../../shared/idempotency";
 import shared from "../../shared/shared.module.css";
+import { revisionsQuery } from "./revisions";
 import { SourceIcon } from "./source";
 import styles from "./skills.module.css";
 
@@ -84,8 +90,7 @@ function ImportForm({
   const client = useClient(),
     { workspace } = useWorkspace(),
     cache = useQueryClient(),
-    { t } = useTranslation(),
-    key = useIdempotency();
+    { t } = useTranslation();
   const [basis] = useState(skill),
     [kind, setKind] = useState("zip_upload"),
     [name, setName] = useState(skill?.name ?? ""),
@@ -94,63 +99,71 @@ function ImportForm({
     [subdirectory, setSubdirectory] = useState(""),
     [commit, setCommit] = useState("");
   const [upload, setUpload] = useState<{ file: File; key: string }>(),
-    [receipt, setReceipt] = useState<Schema["SkillUploadReceipt"]>();
+    [receipt, setReceipt] = useState<Schema["SkillManifest"]>();
+  // A new version follows the latest one, which leads the first revision page.
+  const latest = useQuery({
+    ...revisionsQuery(client, workspace.id, basis?.id ?? ""),
+    enabled: !!basis,
+  }).data?.items[0]?.number;
+  const version = !basis ? 1 : latest === undefined ? undefined : latest + 1;
   const stage = useMutation({
     mutationFn: async () => {
       if (!upload) throw new Error(t("Choose a ZIP file first."));
+      const staged = await uploadFile(
+        client,
+        workspace.id,
+        upload.file,
+        upload.key,
+      );
+      // The Service checks the package exactly as publishing will, storing nothing.
       return client.http
-        .POST("/api/v1/workspaces/{workspace}/skill-uploads", {
-          params: {
-            path: { workspace: workspace.id },
-            header: commandHeaders(workspace.id, upload.key),
-          },
-          headers: { "Content-Type": "application/zip" },
-          body: upload.file,
+        .POST("/api/v1/workspaces/{workspace_id}/skills/validate", {
+          params: { path: { workspace_id: workspace.id } },
+          body: { source: { kind: "upload", upload_id: staged.upload_id } },
         })
         .then(data);
     },
     onSuccess: setReceipt,
   });
   const publish = useMutation({
-    mutationFn: async () => {
-      if (kind === "zip_upload" && !receipt)
-        throw new Error(t("Validate your ZIP file before publishing."));
-      const source: Schema["CreateSkillRequest"]["source"] =
+    mutationFn: async (): Promise<Schema["Skill"]> => {
+      const source: Schema["SkillCreate"]["source"] | undefined =
         kind === "zip_upload"
-          ? { kind: "zip_upload", upload_id: receipt!.upload_id }
+          ? receipt?.source
           : {
               kind: "github",
-              repository_url: repository,
+              repository: githubRepository(repository),
               ...(ref && { ref }),
-              subdirectory,
-              ...(commit && { expected_commit_sha: commit }),
+              path: subdirectory,
+              ...(commit && { commit }),
             };
+      if (!source)
+        throw new Error(t("Validate your ZIP file before publishing."));
       if (basis) {
-        const body = { source, expected_version: basis.version };
-        return client.http
-          .POST("/api/v1/skills/{skill_id}/revisions", {
-            params: {
-              path: { skill_id: basis.id },
-              header: commandHeaders(workspace.id, key.forBody(body)),
+        data(
+          await client.http.POST(
+            "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/revisions",
+            {
+              params: {
+                path: { workspace_id: workspace.id, skill_id: basis.id },
+              },
+              headers: ifMatch(rowTag(basis)),
+              body: { source },
             },
-            body,
-          })
-          .then(data);
+          ),
+        );
+        return basis;
       }
-      const body = { source, ...(name && { name }) };
       return client.http
-        .POST("/api/v1/workspaces/{workspace}/skills", {
-          params: {
-            path: { workspace: workspace.id },
-            header: commandHeaders(workspace.id, key.forBody(body)),
-          },
-          body,
+        .POST("/api/v1/workspaces/{workspace_id}/skills", {
+          params: { path: { workspace_id: workspace.id } },
+          body: { source, ...(name && { name }) },
         })
         .then(data);
     },
     onSuccess: (result) => {
       void cache.invalidateQueries({ queryKey: ["skills"] });
-      onSuccess(result.skill);
+      onSuccess(result);
     },
   });
   const busy = stage.isPending || publish.isPending;
@@ -229,12 +242,7 @@ function ImportForm({
               {t("Validate package")}
             </Button>
           )}
-          {receipt && (
-            <Receipt
-              receipt={receipt}
-              version={basis ? basis.version + 1 : 1}
-            />
-          )}
+          {receipt && <Receipt receipt={receipt} version={version} />}
           <ErrorNotice error={stage.error} />
         </div>
       ) : (
@@ -302,8 +310,8 @@ function Receipt({
   receipt,
   version,
 }: {
-  receipt: Schema["SkillUploadReceipt"];
-  version: number;
+  receipt: Schema["SkillManifest"];
+  version?: number;
 }) {
   const { t } = useTranslation();
   return (
@@ -312,33 +320,38 @@ function Receipt({
         <IconTile size={32} tone="elevated">
           <CheckCircleIcon size={16} aria-hidden="true" />
         </IconTile>
-        <strong title={receipt.manifest.skill_name}>
-          {receipt.manifest.skill_name}
-        </strong>
-        <span className={styles.version}>v{version}</span>
+        <strong title={receipt.name}>{receipt.name}</strong>
+        {version !== undefined && (
+          <span className={styles.version}>v{version}</span>
+        )}
       </div>
       <p className={styles.receiptFacts}>
-        <span>
-          {t("{{count}} files", { count: receipt.manifest.files.length })}
-        </span>
+        <span>{t("{{count}} files", { count: receipt.files.length })}</span>
         <span className={styles.dot}>·</span>
         <span>
-          {t("{{size}} KB", {
-            size: Math.ceil(receipt.manifest.total_size_bytes / 1024),
-          })}
+          {t("{{size}} KB", { size: Math.ceil(receipt.size / 1024) })}
         </span>
-        {receipt.manifest.description && (
+        {receipt.description && (
           <>
             <span className={styles.dot}>·</span>
-            <span>{receipt.manifest.description}</span>
+            <span>{receipt.description}</span>
           </>
         )}
       </p>
       <DisclosureSection title={t("Manifest")}>
-        <JsonView value={receipt.manifest} />
+        <JsonView value={receipt} />
       </DisclosureSection>
     </div>
   );
+}
+
+/** GitHub sources name `owner/repository`; the form asks for the repository URL. */
+function githubRepository(url: string) {
+  const match = /^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(
+    url.trim(),
+  );
+  // Anything else goes to the Service as typed, which reports the invalid field.
+  return match?.[1] ?? url;
 }
 
 /**

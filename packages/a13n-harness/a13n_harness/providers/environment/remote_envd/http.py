@@ -9,7 +9,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from a13n_envd_client import EIPDeviceConnection, EIPSession, HttpTransport
-from a13n_envd_client.eip.v1 import DeviceDescriptor, DirectoryListParams, DirectoryListResult
+from a13n_envd_client.eip.v1 import DeviceDescriptor, DirectoryListParams, DirectoryListResult, ErrorType
+from a13n_envd_client.errors import EIPMethodError
 from pydantic import BaseModel
 
 from ...authentication import Authentication, CredentialMode
@@ -90,7 +91,9 @@ class HttpEnvdProviderRuntime:
                     )
                 except TimeoutError:
                     raise provider_error(HTTP_PROVIDER_KEY, "provider_connection_timeout", Category.TIMEOUT) from None
-                except Exception:
+                except Exception as error:
+                    if expected_device_id is not None and _refused_as_incompatible(error):
+                        raise provider_error(HTTP_PROVIDER_KEY, "provider_device_mismatch", Category.INVALID) from None
                     raise provider_error(
                         HTTP_PROVIDER_KEY, "provider_connection_failed", Category.UNAVAILABLE
                     ) from None
@@ -142,6 +145,12 @@ class HttpEnvdProviderRuntime:
 
     async def __aexit__(self, *args: object) -> None:
         await self.close()
+
+
+def _refused_as_incompatible(error: Exception) -> bool:
+    """Whether the daemon refused to initialize as incompatible: for an expected device, that it is another
+    device, or one no longer speaking the only protocol version the client offers."""
+    return isinstance(error, EIPMethodError) and error.error.data.error_type == ErrorType.PROTOCOL_INCOMPATIBLE
 
 
 def _backend_identity(configuration: BaseModel) -> str:

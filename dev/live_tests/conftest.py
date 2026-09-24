@@ -1,286 +1,162 @@
-from __future__ import annotations
+"""Fixtures of the live journeys: session-wide stores and a fresh Service stack for every journey."""
 
-import os
+import re
+import signal
+from collections.abc import AsyncIterator, Generator, Iterator
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
-import anyio
 import httpx2
 import pytest
+from redis import Redis as SyncRedis
+from redis.asyncio import Redis
+from sqlalchemy import Engine, create_engine
+from testcontainers.postgres import PostgresContainer
+from testcontainers.redis import RedisContainer
 
-from .infrastructure.client import LiveClient
-from .infrastructure.config import load_config
-from .infrastructure.dependencies import CONFIG_ENV, MODE_ENV
+from dev.fixtures.process import fixture_process
+
+from .api import Workspace, expect
+from .scripted import ScriptedModel
+from .stack import (
+    EMAIL,
+    PASSWORD,
+    ServiceProcess,
+    Stores,
+    cloned_database,
+    database_url,
+    prepare_template,
+    trust,
+    wait_ready,
+    write_config,
+)
 
 
-def pytest_addoption(parser):
-    parser.addoption("--live-shared-labs", action="store_true", help="Reuse only the reviewed smoke-test labs")
-    parser.addoption("--infrastructure", choices=("docker", "external"), default=None)
-    parser.addoption("--infrastructure-config", type=Path)
-    parser.addoption("--live", action="store_true", help="Run real local Foundation HTTP journeys")
-    parser.addoption("--live-round-two", action="store_true", help="Run isolated process and dependency fault journeys")
-    parser.addoption("--live-management", action="store_true", help="Run isolated Service/Harness management journeys")
+def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
-        "--live-model-console", action="store_true", help="Run optional Chromium model-management journeys"
+        "--require-all",
+        action="store_true",
+        help="Fail instead of skipping journeys whose external dependency is unavailable (CI)",
     )
-    parser.addoption("--live-plugin-image", action="store_true", help="Build and run a custom plugin Worker image")
-    parser.addoption("--live-providers", action="store_true", help="Run configured real-provider integration journeys")
-    parser.addoption("--live-openai", action="store_true", help="Run official OpenAI API journeys using OPENAI_API_KEY")
-    parser.addoption("--live-zhipu", action="store_true", help="Run free official GLM journeys using ZHIPU_API_KEY")
-    parser.addoption("--live-environments", action="store_true", help="Run the five-backend Environment matrix")
-    parser.addoption("--live-performance", action="store_true", help="Measure bounded PG, S3 and Service operations")
-    parser.addoption("--performance-profile", help="TOML concurrency matrix and per-operation latency budgets")
-    parser.addoption("--live-long-session", action="store_true", help="Verify real sequential history and compaction")
     parser.addoption(
-        "--session-message-bytes", type=int, default=1024, help="ASCII padding bytes per real input/output"
+        "--hosted",
+        action="store_true",
+        help="Also run the journeys on hosted sandbox vendors, which need their accounts and create billable sandboxes",
     )
-    parser.addoption("--session-runs", default="1,1000,10000", help="Checkpoints along one real sequential Run chain")
 
 
-def pytest_configure(config):
-    # The suite launcher passes explicit settings through the subprocess environment.
-    # Direct pytest invocations may select the same mode through command-line flags.
-    config._live_infrastructure_environment = {key: os.environ.get(key) for key in (MODE_ENV, CONFIG_ENV)}
-    if mode := config.getoption("--infrastructure"):
-        os.environ[MODE_ENV] = mode
-        os.environ.pop(CONFIG_ENV, None)
-    if path := config.getoption("--infrastructure-config"):
-        if os.environ.get(MODE_ENV, "docker") != "external":
-            raise pytest.UsageError("--infrastructure-config requires --infrastructure=external")
-        os.environ[CONFIG_ENV] = str(path.resolve())
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line("markers", "hosted(type): a journey on a hosted sandbox vendor, run only when asked for")
 
 
-def pytest_unconfigure(config):
-    for key, value in getattr(config, "_live_infrastructure_environment", {}).items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
-
-
-def pytest_collection_modifyitems(config, items):
-    if not config.getoption("--live-shared-labs"):
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Hosted journeys run only when asked for: with `--hosted`, a `-m` expression naming the `hosted` marker, or a
+    `-k` expression naming the journey's vendor type; any other selection leaves them out."""
+    if config.getoption("--hosted") or re.search(r"\bhosted\b", config.getoption("markexpr") or ""):
         return
-    from .ci import SMOKE_GROUPS, TEST_ROOT
-
-    distributed = bool(getattr(config.option, "numprocesses", 0) or hasattr(config, "workerinput"))
-    allowed = {selection for group in SMOKE_GROUPS.values() for selection in group}
-    for item in items:
-        if not item.path.is_relative_to(TEST_ROOT):
-            raise pytest.UsageError(f"Shared labs do not support this unreviewed journey: {item.nodeid}")
-        selection = str(item.path.relative_to(TEST_ROOT)) + "::" + item.originalname
-        if selection not in allowed:
-            raise pytest.UsageError(f"Shared labs do not support this unreviewed journey: {item.nodeid}")
-        if distributed and selection not in SMOKE_GROUPS["core"]:
-            raise pytest.UsageError(f"Parallel shared labs support only reviewed Core smoke journeys: {item.nodeid}")
+    named = set(re.findall(r"\w+", config.getoption("keyword") or ""))
+    left_out = [item for item in items if (marker := item.get_closest_marker("hosted")) and marker.args[0] not in named]
+    if left_out:
+        config.hook.pytest_deselected(items=left_out)
+        items[:] = [item for item in items if item not in left_out]
 
 
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    report = (yield).get_result()
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    report = yield
     if report.when == "call":
-        item.live_call_report = report
+        item.stash[FAILED] = report.failed
+    return report
 
 
-def backend_scope(*, fixture_name, config):
-    return "session" if config.getoption("--live-shared-labs") else "function"
+FAILED = pytest.StashKey[bool]()
 
 
 @pytest.fixture(scope="session")
-async def shared_labs(anyio_backend):
-    from .infrastructure.shared_labs import SharedLabs
-
-    pool = SharedLabs()
-    try:
-        yield pool
-    finally:
-        await pool.close()
-
-
-@pytest.fixture
-def selected_shared_labs(request):
-    return request.getfixturevalue("shared_labs") if request.config.getoption("--live-shared-labs") else None
+def stores(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stores]:
+    with (
+        PostgresContainer("postgres:17-alpine", driver="psycopg") as postgres,
+        RedisContainer("redis:8-alpine") as redis,
+    ):
+        redis_url = f"redis://{redis.get_container_host_ip()}:{redis.get_exposed_port(6379)}/0"
+        yield prepare_template(tmp_path_factory.mktemp("stores"), postgres.get_connection_url(), redis_url)
 
 
 @pytest.fixture
-async def long_session(request):
-    if not request.config.getoption("--live-long-session"):
-        pytest.skip("Opt in with make live-test-session; no compaction infrastructure starts by default")
-    message_bytes = request.config.getoption("--session-message-bytes")
-    try:
-        runs = sorted(set(int(value) for value in request.config.getoption("--session-runs").split(",")))
-        assert runs and all(1 <= value <= 100000 for value in runs)
-    except (ValueError, AssertionError) as error:
-        raise pytest.UsageError("--session-runs requires integers between 1 and 100000") from error
-    if not 1 <= message_bytes <= 2048:
-        raise pytest.UsageError("Require message bytes 1..2048")
-    from .infrastructure.round_two_lab import open_lab
-
-    async with open_lab(long_session={"message_bytes": message_bytes, "context_window": 32768}) as lab:
-        lab.client.http.timeout = httpx2.Timeout(120)
-        yield lab, runs
-
-
-@pytest.fixture(scope=backend_scope)
-def anyio_backend():
+def anyio_backend() -> str:
     return "asyncio"
 
 
-@pytest.fixture(scope="session")
-def owned_postgres_url():
-    """One disposable PostgreSQL server shared by offline infrastructure tests."""
-    from testcontainers.postgres import PostgresContainer
+@dataclass
+class Stack:
+    """One journey's Service: its processes, its workspace client, the scripted model and read-only stores."""
 
-    with PostgresContainer("postgres:17-alpine") as container:
-        yield (
-            f"postgresql+psycopg://{container.username}:{container.password}"
-            f"@{container.get_container_host_ip()}:{container.get_exposed_port(5432)}/{container.dbname}"
+    api: Workspace
+    model: ScriptedModel
+    control: ServiceProcess
+    workers: list[ServiceProcess]
+    redis: Redis
+    database: Engine
+    directory: Path
+    stores: Stores
+
+    def client(self, **headers: str) -> httpx2.AsyncClient:
+        """Another HTTPS client of Control, such as one authenticated by an API key."""
+        return httpx2.AsyncClient(
+            base_url=self.control.url, verify=trust(self.stores), trust_env=False, timeout=10, headers=headers
         )
 
-
-@pytest.fixture
-async def live(request, selected_shared_labs):
-    if not request.config.getoption("--live"):
-        pytest.skip("Opt in with make live-test or --live; no live network calls are made by default")
-    if selected_shared_labs is not None:
-        async with selected_shared_labs.case("core", request) as lab:
-            await lab.client.preflight()
-            yield lab.client
-        return
-    config = load_config()
-    async with httpx2.AsyncClient(
-        base_url=config["control_url"],
-        headers={"Authorization": f"Bearer {config['token']}"},
-        timeout=15,
-        trust_env=False,
-        follow_redirects=False,
-    ) as http:
-        client = LiveClient(config, http)
-        await client.preflight()
+    @contextmanager
+    def only(self, worker: ServiceProcess) -> Iterator[None]:
+        """Suspend the other workers, so that runs accepted meanwhile are claimed by `worker`."""
+        others = [other for other in self.workers if other is not worker]
+        for other in others:
+            other.signal(signal.SIGSTOP)
         try:
-            yield client
+            yield
         finally:
-            await client.cleanup()
+            for other in others:
+                other.signal(signal.SIGCONT)
 
 
 @pytest.fixture
-async def round_two(request, selected_shared_labs):
-    if not request.config.getoption("--live-round-two"):
-        pytest.skip("Opt in with make live-test-round-two; no fault injection runs by default")
-    if selected_shared_labs is not None:
-        async with selected_shared_labs.case("round-two", request) as lab:
-            yield lab
-        return
-    from .infrastructure.round_two_lab import open_lab
-
-    async with open_lab() as lab:
-        yield lab
-
-
-@pytest.fixture
-async def management(request, selected_shared_labs):
-    if not request.config.getoption("--live-management"):
-        pytest.skip("Opt in with make live-test-management; no management resources are changed by default")
-    from .infrastructure.management_support import ManagementJourney
-    from .infrastructure.round_two_lab import open_lab
-
-    if selected_shared_labs is not None:
-        async with selected_shared_labs.case("management", request) as lab:
-            yield ManagementJourney(lab)
-        return
-    async with open_lab(suite="management") as lab:
-        yield ManagementJourney(lab)
-
-
-@pytest.fixture
-async def run_faults(request):
-    if not request.config.getoption("--live-round-two"):
-        pytest.skip("Opt in with --live-round-two for process and persistence fault tests")
-    from .infrastructure.round_two_lab import open_lab
-    from .run_recovery.run_fault_support import RunFaultJourney
-
-    options = getattr(request, "param", {})
-    async with open_lab(suite="management", run_faults=options) as lab:
-        journey = RunFaultJourney(lab)
-        await journey.setup()
-        try:
-            yield journey
-        finally:
-            journey.close_barriers()
-
-
-@pytest.fixture
-async def control(request):
-    if not request.config.getoption("--live-round-two"):
-        pytest.skip("Opt in with --live-round-two for control transition and concurrency journeys")
-    from .control.control_support import ControlJourney
-    from .infrastructure.round_two_lab import open_lab
-
-    options = {"control": getattr(request, "param", {}), "identity_management": True}
-    async with open_lab(suite="management", run_faults=options) as lab:
-        journey = ControlJourney(lab)
-        await journey.setup()
-        try:
-            yield journey
-        finally:
-            journey.close_barriers()
-
-
-@pytest.fixture
-async def multiworker(management):
-    """Three owned one-slot Workers; retain the management opt-in and cleanup boundary."""
-    management.live.timeout = 180
-    await management.lab.start_worker()
-    await management.lab.start_worker()
-    return management
-
-
-@pytest.fixture
-async def configured_provider(request):
-    selection, upstream_model = request.param if isinstance(request.param, tuple) else (request.param, None)
-    if not any(
-        request.config.getoption(option)
-        for option in ("--live", "--live-round-two", "--live-management", "--live-providers")
-    ):
-        pytest.skip("Opt in with a live-test target; private Provider configuration is not read by offline checks")
-    from .providers.provider_config import load_provider_settings
-
-    section = selection
-    configuration = (
-        load_provider_settings(upstream_model=upstream_model)
-        if upstream_model is not None
-        else load_provider_settings()
-    )
-    settings = getattr(configuration, section)
-    if settings is None:
-        pytest.skip(f"Optional {section} Provider is not configured; existing defaults are unchanged")
-    if upstream_model is not None:
-        if settings.provider != "openrouter":
-            pytest.skip("The GPT/Gemini/Claude matrix requires model.provider=openrouter")
-    from .providers.real_providers import configured_provider_lab
-
-    async with configured_provider_lab("search" if section == "brave_search" else section, settings) as configured:
-        yield configured
-
-
-@pytest.fixture(scope="module")
-def e2b_settings(request):
-    if not request.config.getoption("--live-environments"):
-        pytest.skip("Opt in with --live-environments for real E2B lifecycle tests")
-    from .providers.provider_config import load_provider_settings
-
-    settings = load_provider_settings().environment
-    if settings is None:
-        pytest.skip("Configure the optional E2B environment section")
-    return settings
-
-
-@pytest.fixture
-async def e2b_sandboxes(e2b_settings):
-    from .environment.e2b_support import E2BSandboxes
-
-    sandboxes = E2BSandboxes(e2b_settings)
-    try:
-        yield sandboxes
-    finally:
-        with anyio.CancelScope(shield=True), anyio.fail_after(180):
-            await sandboxes.cleanup()
+async def stack(stores: Stores, tmp_path: Path, request: pytest.FixtureRequest) -> AsyncIterator[Stack]:
+    SyncRedis.from_url(stores.redis_url).flushall()
+    with ExitStack() as cleanup:
+        database = cleanup.enter_context(cloned_database(stores))
+        config = write_config(tmp_path / "service.toml", stores, database, tmp_path / "objects")
+        model_url = cleanup.enter_context(fixture_process("dev.fixtures.scripted_model"))
+        control = ServiceProcess("control", config, tmp_path / "control.log")
+        workers = [ServiceProcess("worker", config, tmp_path / f"worker-{index}.log") for index in (1, 2)]
+        processes = [control, *workers]
+        for process in processes:
+            cleanup.callback(process.kill)
+            process.start()
+        context = trust(stores)
+        wait_ready(processes, context)
+        engine = create_engine(database_url(stores.postgres_url, database))
+        cleanup.callback(engine.dispose)
+        async with (
+            httpx2.AsyncClient(base_url=control.url, verify=context, trust_env=False, timeout=10) as client,
+            Redis.from_url(stores.redis_url, decode_responses=True) as redis,
+        ):
+            login = expect(await client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD}), 200)
+            client.headers["x-csrf-token"] = login["csrf_token"]
+            model = ScriptedModel(model_url)
+            try:
+                yield Stack(
+                    api=Workspace(client, stores.tenant),
+                    model=model,
+                    control=control,
+                    workers=workers,
+                    redis=redis,
+                    database=engine,
+                    directory=tmp_path,
+                    stores=stores,
+                )
+            finally:
+                await model.aclose()
+                if request.node.stash.get(FAILED, False):
+                    for process in processes:
+                        print(f"--- {process.role} {process.log.name} ---\n{process.tail()}")

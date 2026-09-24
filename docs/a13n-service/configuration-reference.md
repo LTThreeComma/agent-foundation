@@ -1,358 +1,183 @@
 # Service configuration reference
 
-This field reference is generated from the same `Settings` and `configuration_fields()` definitions used by the Service loader. Run `uv run --locked python scripts/docs/references.py` after changing those definitions. Do not independently edit generated rows.
+This field reference is generated from the same `Settings` definitions used by the Service loader. Run `uv run --locked python scripts/docs/references.py` after changing those definitions. Do not independently edit generated rows.
 
 Use [Configure Service](configuration.md) for precedence, examples, role/storage requirements, and cross-field validation. Types and field constraints below do not replace those combined checks. Secret defaults are masked by the schema; this reference never reads deployment environment values. Defaults apply to the source version, not every historical release.
 
 The complete machine-readable validation schema, including named enum/union definitions, is available as [Service settings JSON](../assets/reference/service-settings.json).
 
-## `service`
+## `server`
 
-| Setting                               | Environment variable                       | Type / choices                             | Constraints and default                       |
-| ------------------------------------- | ------------------------------------------ | ------------------------------------------ | --------------------------------------------- |
-| `service.name`                        | `A13N_SERVICE_SERVICE_NAME`                | string                                     | default="a13n-service"                        |
-| `service.role`                        | `A13N_SERVICE_ROLE`                        | "all", "control", "worker", "connectivity" | default="all"                                 |
-| `service.host`                        | `A13N_SERVICE_HOST`                        | string                                     | default="127.0.0.1"                           |
-| `service.port`                        | `A13N_SERVICE_PORT`                        | integer                                    | minimum=1; maximum=65535; default=8000        |
-| `service.build_version`               | `A13N_SERVICE_BUILD_VERSION`               | string                                     | default="0.0.0"                               |
-| `service.deployment_environment_name` | `A13N_SERVICE_DEPLOYMENT_ENVIRONMENT_NAME` | string                                     | minLength=1; maxLength=256; default="default" |
-| `service.instance_id`                 | `A13N_SERVICE_SERVICE_INSTANCE_ID`         | string or null                             | default=null                                  |
-
-## `iam`
-
-| Setting                   | Environment variable                   | Type / choices    | Constraints and default                                                          |
-| ------------------------- | -------------------------------------- | ----------------- | -------------------------------------------------------------------------------- |
-| `iam.public_origin`       | `A13N_SERVICE_IAM_PUBLIC_ORIGIN`       | string            | default="http://127.0.0.1:8000"                                                  |
-| `iam.session_cookie_name` | `A13N_SERVICE_IAM_SESSION_COOKIE_NAME` | string            | minLength=1; maxLength=128; `pattern="^[A-Za-z0-9_-]+$"`; default="a13n_session" |
-| `iam.initial_admin_email` | `A13N_SERVICE_IAM_INITIAL_ADMIN_EMAIL` | string or null    | default=null                                                                     |
-| `iam.session_days`        | `A13N_SERVICE_IAM_SESSION_DAYS`        | integer           | minimum=1; maximum=90; default=7                                                 |
-| `iam.invitation_days`     | `A13N_SERVICE_IAM_INVITATION_DAYS`     | integer           | minimum=1; maximum=30; default=7                                                 |
-| `iam.smtp_host`           | `A13N_SERVICE_IAM_SMTP_HOST`           | string or null    | default=null                                                                     |
-| `iam.smtp_port`           | `A13N_SERVICE_IAM_SMTP_PORT`           | integer           | minimum=1; maximum=65535; default=587                                            |
-| `iam.smtp_username`       | `A13N_SERVICE_IAM_SMTP_USERNAME`       | string or null    | default=null                                                                     |
-| `iam.smtp_password`       | `A13N_SERVICE_IAM_SMTP_PASSWORD`       | string or null    | default=null                                                                     |
-| `iam.smtp_sender`         | `A13N_SERVICE_IAM_SMTP_SENDER`         | string or null    | default=null                                                                     |
-| `iam.smtp_tls`            | `A13N_SERVICE_IAM_SMTP_TLS`            | "starttls", "tls" | default="starttls"                                                               |
-
-## `plugins`
-
-| Setting        | Environment variable       | Type / choices  | Constraints and default  |
-| -------------- | -------------------------- | --------------- | ------------------------ |
-| `plugins.keys` | `A13N_SERVICE_PLUGIN_KEYS` | array of string | maxItems=128; default=[] |
-
-## `provider_plugins`
-
-| Setting                    | Environment variable                   | Type / choices  | Constraints and default  |
-| -------------------------- | -------------------------------------- | --------------- | ------------------------ |
-| `provider_plugins.enabled` | `A13N_SERVICE_PROVIDER_PLUGIN_ENABLED` | array of string | maxItems=128; default=[] |
-
-## `worker`
-
-| Setting                        | Environment variable                        | Type / choices | Constraints and default                      |
-| ------------------------------ | ------------------------------------------- | -------------- | -------------------------------------------- |
-| `worker.concurrency`           | `A13N_SERVICE_WORKER_CONCURRENCY`           | integer        | minimum=1; maximum=1024; default=8           |
-| `worker.poll_interval_seconds` | `A13N_SERVICE_WORKER_POLL_INTERVAL_SECONDS` | number         | maximum=60; exclusiveMinimum=0; default=1    |
-| `worker.lease_seconds`         | `A13N_SERVICE_WORKER_LEASE_SECONDS`         | number         | minimum=12; maximum=3600; default=30         |
-| `worker.cleanup_seconds`       | `A13N_SERVICE_WORKER_CLEANUP_SECONDS`       | number         | maximum=300; exclusiveMinimum=0; default=10  |
-| `worker.drain_seconds`         | `A13N_SERVICE_WORKER_DRAIN_SECONDS`         | number         | maximum=3600; exclusiveMinimum=0; default=30 |
-
-## `subagents`
-
-| Setting                                     | Environment variable                                    | Type / choices | Constraints and default                      |
-| ------------------------------------------- | ------------------------------------------------------- | -------------- | -------------------------------------------- |
-| `subagents.reconcile_drain_seconds`         | `A13N_SERVICE_SUBAGENT_RECONCILE_DRAIN_SECONDS`         | number         | maximum=3600; exclusiveMinimum=0; default=30 |
-| `subagents.reconcile_poll_interval_seconds` | `A13N_SERVICE_SUBAGENT_RECONCILE_POLL_INTERVAL_SECONDS` | number         | maximum=60; exclusiveMinimum=0; default=1    |
-
-## `deployment`
-
-| Setting           | Environment variable           | Type / choices               | Constraints and default |
-| ----------------- | ------------------------------ | ---------------------------- | ----------------------- |
-| `deployment.mode` | `A13N_SERVICE_DEPLOYMENT_MODE` | "single_host", "distributed" | default="single_host"   |
-
-## `environments`
-
-| Setting                                     | Environment variable                                    | Type / choices  | Constraints and default                                                                            |
-| ------------------------------------------- | ------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------- |
-| `environments.provider_builtins`            | `A13N_SERVICE_ENVIRONMENT_PROVIDER_BUILTINS`            | array of string | default=["e2b", "daytona", "modal", "vercel", "sprites", "runloop", "http_envd", "websocket_envd"] |
-| `environments.client_public_origin`         | `A13N_SERVICE_ENVIRONMENT_CLIENT_PUBLIC_ORIGIN`         | string or null  | default=null                                                                                       |
-| `environments.client_max_connections`       | `A13N_SERVICE_ENVIRONMENT_CLIENT_MAX_CONNECTIONS`       | integer         | minimum=1; maximum=1000; default=128                                                               |
-| `environments.local_providers`              | `A13N_SERVICE_ENVIRONMENT_LOCAL_PROVIDERS`              | object          | —                                                                                                  |
-| `environments.maintenance_interval_seconds` | `A13N_SERVICE_ENVIRONMENT_MAINTENANCE_INTERVAL_SECONDS` | number          | maximum=300; exclusiveMinimum=0; default=5                                                         |
-| `environments.operation_timeout_seconds`    | `A13N_SERVICE_ENVIRONMENT_OPERATION_TIMEOUT_SECONDS`    | number          | maximum=3600; exclusiveMinimum=0; default=60                                                       |
-| `environments.max_targets_per_workspace`    | `A13N_SERVICE_ENVIRONMENT_MAX_TARGETS_PER_WORKSPACE`    | integer         | minimum=1; default=1000                                                                            |
-| `environments.max_active_per_workspace`     | `A13N_SERVICE_ENVIRONMENT_MAX_ACTIVE_PER_WORKSPACE`     | integer         | minimum=1; default=100                                                                             |
-| `environments.maintenance_batch_size`       | `A13N_SERVICE_ENVIRONMENT_MAINTENANCE_BATCH_SIZE`       | integer         | minimum=1; maximum=10000; default=64                                                               |
-| `environments.maintenance_concurrency`      | `A13N_SERVICE_ENVIRONMENT_MAINTENANCE_CONCURRENCY`      | integer         | minimum=1; maximum=128; default=4                                                                  |
-
-## `pricing`
-
-| Setting               | Environment variable               | Type / choices | Constraints and default |
-| --------------------- | ---------------------------------- | -------------- | ----------------------- |
-| `pricing.auto_update` | `A13N_SERVICE_PRICING_AUTO_UPDATE` | boolean        | default=true            |
-
-## `observability`
-
-| Setting                                    | Environment variable                                    | Type / choices             | Constraints and default                                     |
-| ------------------------------------------ | ------------------------------------------------------- | -------------------------- | ----------------------------------------------------------- |
-| `observability.tracing`                    | `A13N_SERVICE_OBSERVABILITY_TRACING`                    | boolean                    | default=true                                                |
-| `observability.metrics`                    | `A13N_SERVICE_OBSERVABILITY_METRICS`                    | boolean                    | default=false                                               |
-| `observability.trace_content`              | `A13N_SERVICE_OBSERVABILITY_TRACE_CONTENT`              | "none", "standard", "full" | default="none"                                              |
-| `observability.query.logfire_base_url`     | `A13N_SERVICE_OBSERVABILITY_QUERY_LOGFIRE_BASE_URL`     | string or null             | default=null                                                |
-| `observability.query.logfire_read_token`   | `A13N_SERVICE_OBSERVABILITY_QUERY_LOGFIRE_READ_TOKEN`   | string or null             | default=null                                                |
-| `observability.query.logfire_history_from` | `A13N_SERVICE_OBSERVABILITY_QUERY_LOGFIRE_HISTORY_FROM` | string or null             | default=null                                                |
-| `observability.query.provider`             | `A13N_SERVICE_OBSERVABILITY_QUERY_PROVIDER`             | string                     | maxLength=64; `pattern="^[a-z][a-z0-9_]*$"`; default="none" |
-| `observability.query.langfuse_base_url`    | `A13N_SERVICE_OBSERVABILITY_QUERY_LANGFUSE_BASE_URL`    | string or null             | default=null                                                |
-| `observability.query.langfuse_public_key`  | `A13N_SERVICE_OBSERVABILITY_QUERY_LANGFUSE_PUBLIC_KEY`  | string or null             | default=null                                                |
-| `observability.query.langfuse_secret_key`  | `A13N_SERVICE_OBSERVABILITY_QUERY_LANGFUSE_SECRET_KEY`  | string or null             | default=null                                                |
+| Setting                    | Environment variable             | Type / choices  | Constraints and default                         |
+| -------------------------- | -------------------------------- | --------------- | ----------------------------------------------- |
+| `server.host`              | `A13N_SERVER__HOST`              | string          | default="127.0.0.1"                             |
+| `server.port`              | `A13N_SERVER__PORT`              | integer         | minimum=1; maximum=65535; default=8000          |
+| `server.public_url`        | `A13N_SERVER__PUBLIC_URL`        | string          | maxLength=2048; default="http://127.0.0.1:8000" |
+| `server.trusted_proxies`   | `A13N_SERVER__TRUSTED_PROXIES`   | array of string | default=[]                                      |
+| `server.request_bytes`     | `A13N_SERVER__REQUEST_BYTES`     | integer         | minimum=1024; maximum=33554432; default=2097152 |
+| `server.request_timeout`   | `A13N_SERVER__REQUEST_TIMEOUT`   | number          | maximum=60; exclusiveMinimum=0; default=10      |
+| `server.readiness_timeout` | `A13N_SERVER__READINESS_TIMEOUT` | number          | maximum=30; exclusiveMinimum=0; default=2       |
+| `server.shutdown_timeout`  | `A13N_SERVER__SHUTDOWN_TIMEOUT`  | integer         | minimum=1; maximum=300; default=15              |
+| `server.tls_certificate`   | `A13N_SERVER__TLS_CERTIFICATE`   | string or null  | format="path"; default=null                     |
+| `server.tls_key`           | `A13N_SERVER__TLS_KEY`           | string or null  | format="path"; default=null                     |
 
 ## `database`
 
-| Setting                              | Environment variable                              | Type / choices | Constraints and default                           |
-| ------------------------------------ | ------------------------------------------------- | -------------- | ------------------------------------------------- |
-| `database.url`                       | `A13N_SERVICE_DATABASE_URL`                       | string         | format="password"; default="\*\*\*\*\*\*\*\*\*\*" |
-| `database.pool_size`                 | `A13N_SERVICE_DATABASE_POOL_SIZE`                 | integer        | minimum=1; maximum=1000; default=10               |
-| `database.max_overflow`              | `A13N_SERVICE_DATABASE_MAX_OVERFLOW`              | integer        | minimum=0; maximum=1000; default=20               |
-| `database.pool_timeout_seconds`      | `A13N_SERVICE_DATABASE_POOL_TIMEOUT_SECONDS`      | number         | maximum=300; exclusiveMinimum=0; default=30       |
-| `database.pool_recycle_seconds`      | `A13N_SERVICE_DATABASE_POOL_RECYCLE_SECONDS`      | integer        | minimum=0; default=3600                           |
-| `database.connect_timeout_seconds`   | `A13N_SERVICE_DATABASE_CONNECT_TIMEOUT_SECONDS`   | integer        | minimum=1; maximum=300; default=10                |
-| `database.statement_timeout_seconds` | `A13N_SERVICE_DATABASE_STATEMENT_TIMEOUT_SECONDS` | number         | maximum=3600; exclusiveMinimum=0; default=30      |
-| `database.cleanup_timeout_seconds`   | `A13N_SERVICE_DATABASE_CLEANUP_TIMEOUT_SECONDS`   | number         | maximum=60; exclusiveMinimum=0; default=5         |
-| `database.readiness_timeout_seconds` | `A13N_SERVICE_DATABASE_READINESS_TIMEOUT_SECONDS` | number         | maximum=300; exclusiveMinimum=0; default=3        |
-
-## `models`
-
-| Setting                                  | Environment variable                                 | Type / choices  | Constraints and default                     |
-| ---------------------------------------- | ---------------------------------------------------- | --------------- | ------------------------------------------- |
-| `models.catalog_released_since`          | `A13N_SERVICE_MODEL_CATALOG_RELEASED_SINCE`          | string          | format="date"; default="2026-04-23"         |
-| `models.private_endpoint_domains`        | `A13N_SERVICE_MODEL_PRIVATE_ENDPOINT_DOMAINS`        | array of string | default=[]                                  |
-| `models.private_endpoint_cidrs`          | `A13N_SERVICE_MODEL_PRIVATE_ENDPOINT_CIDRS`          | array of string | default=[]                                  |
-| `models.resolve_dns_on_save`             | `A13N_SERVICE_MODEL_RESOLVE_DNS_ON_SAVE`             | boolean         | default=true                                |
-| `models.connection_test_timeout_seconds` | `A13N_SERVICE_MODEL_CONNECTION_TEST_TIMEOUT_SECONDS` | number          | maximum=120; exclusiveMinimum=0; default=15 |
-
-## `memory`
-
-| Setting                  | Environment variable                  | Type / choices | Constraints and default                     |
-| ------------------------ | ------------------------------------- | -------------- | ------------------------------------------- |
-| `memory.timeout_seconds` | `A13N_SERVICE_MEMORY_TIMEOUT_SECONDS` | number         | maximum=300; exclusiveMinimum=0; default=30 |
-
-## `configuration_assistant`
-
-| Setting                                      | Environment variable                                      | Type / choices  | Constraints and default |
-| -------------------------------------------- | --------------------------------------------------------- | --------------- | ----------------------- |
-| `configuration_assistant.total_tokens_limit` | `A13N_SERVICE_CONFIGURATION_ASSISTANT_TOTAL_TOKENS_LIMIT` | integer or null | default=null            |
-
-## `webhooks`
-
-| Setting                             | Environment variable                            | Type / choices  | Constraints and default                        |
-| ----------------------------------- | ----------------------------------------------- | --------------- | ---------------------------------------------- |
-| `webhooks.private_endpoint_domains` | `A13N_SERVICE_WEBHOOK_PRIVATE_ENDPOINT_DOMAINS` | array of string | default=[]                                     |
-| `webhooks.private_endpoint_cidrs`   | `A13N_SERVICE_WEBHOOK_PRIVATE_ENDPOINT_CIDRS`   | array of string | default=[]                                     |
-| `webhooks.poll_interval_seconds`    | `A13N_SERVICE_WEBHOOK_POLL_INTERVAL_SECONDS`    | number          | maximum=60; exclusiveMinimum=0; default=1      |
-| `webhooks.claim_lease_seconds`      | `A13N_SERVICE_WEBHOOK_CLAIM_LEASE_SECONDS`      | number          | maximum=3600; exclusiveMinimum=0; default=30   |
-| `webhooks.claim_limit`              | `A13N_SERVICE_WEBHOOK_CLAIM_LIMIT`              | integer         | minimum=1; maximum=100; default=25             |
-| `webhooks.max_attempts`             | `A13N_SERVICE_WEBHOOK_MAX_ATTEMPTS`             | integer         | minimum=1; maximum=1000; default=10            |
-| `webhooks.retry_base_seconds`       | `A13N_SERVICE_WEBHOOK_RETRY_BASE_SECONDS`       | number          | maximum=3600; exclusiveMinimum=0; default=2    |
-| `webhooks.retry_max_seconds`        | `A13N_SERVICE_WEBHOOK_RETRY_MAX_SECONDS`        | number          | maximum=86400; exclusiveMinimum=0; default=300 |
-| `webhooks.request_timeout_seconds`  | `A13N_SERVICE_WEBHOOK_REQUEST_TIMEOUT_SECONDS`  | number          | maximum=300; exclusiveMinimum=0; default=10    |
-| `webhooks.max_response_bytes`       | `A13N_SERVICE_WEBHOOK_MAX_RESPONSE_BYTES`       | integer         | minimum=1; maximum=16777216; default=65536     |
-
-## `lifecycle`
-
-| Setting                                       | Environment variable                                       | Type / choices | Constraints and default                        |
-| --------------------------------------------- | ---------------------------------------------------------- | -------------- | ---------------------------------------------- |
-| `lifecycle.retention_days`                    | `A13N_SERVICE_LIFECYCLE_RETENTION_DAYS`                    | integer        | minimum=1; maximum=3650; default=30            |
-| `lifecycle.published_delivery_retention_days` | `A13N_SERVICE_LIFECYCLE_PUBLISHED_DELIVERY_RETENTION_DAYS` | integer        | minimum=1; maximum=3650; default=7             |
-| `lifecycle.dead_letter_retention_days`        | `A13N_SERVICE_LIFECYCLE_DEAD_LETTER_RETENTION_DAYS`        | integer        | minimum=1; maximum=3650; default=30            |
-| `lifecycle.retention_poll_interval_seconds`   | `A13N_SERVICE_LIFECYCLE_RETENTION_POLL_INTERVAL_SECONDS`   | number         | maximum=86400; exclusiveMinimum=0; default=300 |
-| `lifecycle.retention_batch_limit`             | `A13N_SERVICE_LIFECYCLE_RETENTION_BATCH_LIMIT`             | integer        | minimum=1; maximum=1000; default=200           |
-| `lifecycle.projection_poll_interval_seconds`  | `A13N_SERVICE_LIFECYCLE_PROJECTION_POLL_INTERVAL_SECONDS`  | number         | maximum=60; exclusiveMinimum=0; default=1      |
-| `lifecycle.projection_lease_seconds`          | `A13N_SERVICE_LIFECYCLE_PROJECTION_LEASE_SECONDS`          | number         | maximum=3600; exclusiveMinimum=0; default=60   |
-| `lifecycle.projection_retry_seconds`          | `A13N_SERVICE_LIFECYCLE_PROJECTION_RETRY_SECONDS`          | number         | minimum=0; maximum=3600; default=5             |
-| `lifecycle.projection_max_attempts`           | `A13N_SERVICE_LIFECYCLE_PROJECTION_MAX_ATTEMPTS`           | integer        | minimum=1; maximum=1000; default=20            |
-| `lifecycle.projection_claim_limit`            | `A13N_SERVICE_LIFECYCLE_PROJECTION_CLAIM_LIMIT`            | integer        | minimum=1; maximum=200; default=16             |
-
-## `control`
-
-| Setting                                    | Environment variable                                    | Type / choices | Constraints and default                        |
-| ------------------------------------------ | ------------------------------------------------------- | -------------- | ---------------------------------------------- |
-| `control.recovery_poll_interval_seconds`   | `A13N_SERVICE_CONTROL_RECOVERY_POLL_INTERVAL_SECONDS`   | number         | maximum=300; exclusiveMinimum=0; default=1     |
-| `control.recovery_batch_limit`             | `A13N_SERVICE_CONTROL_RECOVERY_BATCH_LIMIT`             | integer        | minimum=1; maximum=1000; default=64            |
-| `control.recovery_item_timeout_seconds`    | `A13N_SERVICE_CONTROL_RECOVERY_ITEM_TIMEOUT_SECONDS`    | number         | maximum=300; exclusiveMinimum=0; default=30    |
-| `control.collection_poll_interval_seconds` | `A13N_SERVICE_CONTROL_COLLECTION_POLL_INTERVAL_SECONDS` | number         | maximum=86400; exclusiveMinimum=0; default=300 |
-| `control.collection_batch_limit`           | `A13N_SERVICE_CONTROL_COLLECTION_BATCH_LIMIT`           | integer        | minimum=1; maximum=1000; default=64            |
-| `control.collection_timeout_seconds`       | `A13N_SERVICE_CONTROL_COLLECTION_TIMEOUT_SECONDS`       | number         | maximum=300; exclusiveMinimum=0; default=30    |
-
-## `assets`
-
-| Setting                                   | Environment variable                                  | Type / choices | Constraints and default                                   |
-| ----------------------------------------- | ----------------------------------------------------- | -------------- | --------------------------------------------------------- |
-| `assets.tombstone_minimum_retention_days` | `A13N_SERVICE_ASSET_TOMBSTONE_MINIMUM_RETENTION_DAYS` | integer        | minimum=1; maximum=36500; default=30                      |
-| `assets.max_size_bytes`                   | `A13N_SERVICE_ASSET_MAX_SIZE_BYTES`                   | integer        | minimum=1; maximum=9223372036854775807; default=104857600 |
-| `assets.cleanup_poll_interval_seconds`    | `A13N_SERVICE_ASSET_CLEANUP_POLL_INTERVAL_SECONDS`    | number         | maximum=300; exclusiveMinimum=0; default=5                |
-| `assets.cleanup_lease_seconds`            | `A13N_SERVICE_ASSET_CLEANUP_LEASE_SECONDS`            | number         | maximum=3600; exclusiveMinimum=0; default=30              |
-| `assets.cleanup_max_attempts`             | `A13N_SERVICE_ASSET_CLEANUP_MAX_ATTEMPTS`             | integer        | minimum=1; maximum=1000; default=10                       |
-
-## `hooks`
-
-| Setting                                | Environment variable                               | Type / choices | Constraints and default                        |
-| -------------------------------------- | -------------------------------------------------- | -------------- | ---------------------------------------------- |
-| `hooks.history_minimum_retention_days` | `A13N_SERVICE_HOOK_HISTORY_MINIMUM_RETENTION_DAYS` | integer        | minimum=1; maximum=3650; default=30            |
-| `hooks.dispatch_poll_interval_seconds` | `A13N_SERVICE_HOOK_DISPATCH_POLL_INTERVAL_SECONDS` | number         | maximum=60; exclusiveMinimum=0; default=1      |
-| `hooks.dispatch_batch_limit`           | `A13N_SERVICE_HOOK_DISPATCH_BATCH_LIMIT`           | integer        | minimum=1; maximum=100; default=16             |
-| `hooks.dispatch_max_attempts`          | `A13N_SERVICE_HOOK_DISPATCH_MAX_ATTEMPTS`          | integer        | minimum=1; maximum=1000; default=10            |
-| `hooks.dispatch_retry_base_seconds`    | `A13N_SERVICE_HOOK_DISPATCH_RETRY_BASE_SECONDS`    | number         | maximum=3600; exclusiveMinimum=0; default=2    |
-| `hooks.dispatch_retry_max_seconds`     | `A13N_SERVICE_HOOK_DISPATCH_RETRY_MAX_SECONDS`     | number         | maximum=86400; exclusiveMinimum=0; default=300 |
+| Setting                                       | Environment variable                                | Type / choices | Constraints and default                           |
+| --------------------------------------------- | --------------------------------------------------- | -------------- | ------------------------------------------------- |
+| `database.url`                                | `A13N_DATABASE__URL`                                | string         | format="password"; default="\*\*\*\*\*\*\*\*\*\*" |
+| `database.auto_migrate`                       | `A13N_DATABASE__AUTO_MIGRATE`                       | boolean        | default=true                                      |
+| `database.pool_size`                          | `A13N_DATABASE__POOL_SIZE`                          | integer        | minimum=1; maximum=100; default=5                 |
+| `database.connect_timeout`                    | `A13N_DATABASE__CONNECT_TIMEOUT`                    | integer        | minimum=1; maximum=60; default=5                  |
+| `database.statement_timeout`                  | `A13N_DATABASE__STATEMENT_TIMEOUT`                  | integer        | minimum=1; maximum=300; default=10                |
+| `database.migration_advisory_lock_timeout`    | `A13N_DATABASE__MIGRATION_ADVISORY_LOCK_TIMEOUT`    | integer        | minimum=1; maximum=3600; default=900              |
+| `database.migration_lock_timeout`             | `A13N_DATABASE__MIGRATION_LOCK_TIMEOUT`             | integer        | minimum=1; maximum=60; default=3                  |
+| `database.migration_statement_timeout`        | `A13N_DATABASE__MIGRATION_STATEMENT_TIMEOUT`        | integer        | minimum=1; maximum=3600; default=900              |
+| `database.migration_idle_transaction_timeout` | `A13N_DATABASE__MIGRATION_IDLE_TRANSACTION_TIMEOUT` | integer        | minimum=1; maximum=300; default=30                |
 
 ## `objects`
 
-| Setting                                 | Environment variable                                | Type / choices | Constraints and default                            |
-| --------------------------------------- | --------------------------------------------------- | -------------- | -------------------------------------------------- |
-| `objects.publication_timeout_seconds`   | `A13N_SERVICE_OBJECT_PUBLICATION_TIMEOUT_SECONDS`   | number         | maximum=3600; exclusiveMinimum=0; default=120      |
-| `objects.orphan_minimum_age_hours`      | `A13N_SERVICE_OBJECT_ORPHAN_MINIMUM_AGE_HOURS`      | integer        | minimum=1; maximum=87600; default=24               |
-| `objects.backend`                       | `A13N_SERVICE_OBJECT_BACKEND`                       | "s3", "local"  | default="local"                                    |
-| `objects.local_root`                    | `A13N_SERVICE_OBJECT_LOCAL_ROOT`                    | string         | format="path"; default="var/objects"               |
-| `objects.bucket`                        | `A13N_SERVICE_OBJECT_BUCKET`                        | string or null | default=null                                       |
-| `objects.region`                        | `A13N_SERVICE_OBJECT_REGION`                        | string         | minLength=1; default="us-east-1"                   |
-| `objects.endpoint_url`                  | `A13N_SERVICE_OBJECT_ENDPOINT_URL`                  | string or null | default=null                                       |
-| `objects.force_path_style`              | `A13N_SERVICE_OBJECT_FORCE_PATH_STYLE`              | boolean        | default=false                                      |
-| `objects.connect_timeout_seconds`       | `A13N_SERVICE_OBJECT_CONNECT_TIMEOUT_SECONDS`       | number         | maximum=300; exclusiveMinimum=0; default=5         |
-| `objects.read_timeout_seconds`          | `A13N_SERVICE_OBJECT_READ_TIMEOUT_SECONDS`          | number         | maximum=300; exclusiveMinimum=0; default=30        |
-| `objects.compatibility_timeout_seconds` | `A13N_SERVICE_OBJECT_COMPATIBILITY_TIMEOUT_SECONDS` | number         | maximum=600; exclusiveMinimum=0; default=120       |
-| `objects.max_pool_connections`          | `A13N_SERVICE_OBJECT_MAX_POOL_CONNECTIONS`          | integer        | minimum=1; maximum=1000; default=20                |
-| `objects.multipart_part_size`           | `A13N_SERVICE_OBJECT_MULTIPART_PART_SIZE`           | integer        | minimum=5242880; maximum=67108864; default=8388608 |
-| `objects.local_chunk_size`              | `A13N_SERVICE_OBJECT_LOCAL_CHUNK_SIZE`              | integer        | minimum=4096; maximum=8388608; default=262144      |
-
-## `runs`
-
-| Setting                                    | Environment variable                                   | Type / choices | Constraints and default                            |
-| ------------------------------------------ | ------------------------------------------------------ | -------------- | -------------------------------------------------- |
-| `runs.stream_max_events`                   | `A13N_SERVICE_RUN_STREAM_MAX_EVENTS`                   | integer        | minimum=1; maximum=100000; default=4096            |
-| `runs.stream_max_event_bytes`              | `A13N_SERVICE_RUN_STREAM_MAX_EVENT_BYTES`              | integer        | minimum=1024; maximum=16777216; default=327680     |
-| `runs.stream_closed_ttl_seconds`           | `A13N_SERVICE_RUN_STREAM_CLOSED_TTL_SECONDS`           | integer        | minimum=60; maximum=31536000; default=86400        |
-| `runs.hosted_archive_max_events`           | `A13N_SERVICE_RUN_HOSTED_ARCHIVE_MAX_EVENTS`           | integer        | minimum=1; maximum=100000; default=4096            |
-| `runs.display_max_items`                   | `A13N_SERVICE_RUN_DISPLAY_MAX_ITEMS`                   | integer        | minimum=1; maximum=100000; default=2048            |
-| `runs.display_max_bytes`                   | `A13N_SERVICE_RUN_DISPLAY_MAX_BYTES`                   | integer        | minimum=1024; maximum=1073741824; default=16777216 |
-| `runs.hosted_archive_max_bytes`            | `A13N_SERVICE_RUN_HOSTED_ARCHIVE_MAX_BYTES`            | integer        | minimum=1024; maximum=1073741824; default=16777216 |
-| `runs.stream_max_pending_events`           | `A13N_SERVICE_RUN_STREAM_MAX_PENDING_EVENTS`           | integer        | minimum=1; maximum=1000000; default=16384          |
-| `runs.stream_max_pending_bytes`            | `A13N_SERVICE_RUN_STREAM_MAX_PENDING_BYTES`            | integer        | minimum=1024; maximum=1073741824; default=33554432 |
-| `runs.stream_backpressure_timeout_seconds` | `A13N_SERVICE_RUN_STREAM_BACKPRESSURE_TIMEOUT_SECONDS` | number         | maximum=300; exclusiveMinimum=0; default=5         |
-| `runs.display_concurrency`                 | `A13N_SERVICE_RUN_DISPLAY_CONCURRENCY`                 | integer        | minimum=1; maximum=128; default=4                  |
-| `runs.display_candidate_batch_size`        | `A13N_SERVICE_RUN_DISPLAY_CANDIDATE_BATCH_SIZE`        | integer        | minimum=1; maximum=1000; default=32                |
-| `runs.display_event_batch_size`            | `A13N_SERVICE_RUN_DISPLAY_EVENT_BATCH_SIZE`            | integer        | minimum=1; maximum=1000; default=64                |
-| `runs.display_flush_events`                | `A13N_SERVICE_RUN_DISPLAY_FLUSH_EVENTS`                | integer        | minimum=1; maximum=100000; default=256             |
-| `runs.display_flush_bytes`                 | `A13N_SERVICE_RUN_DISPLAY_FLUSH_BYTES`                 | integer        | minimum=1024; maximum=67108864; default=1048576    |
-| `runs.display_flush_interval_seconds`      | `A13N_SERVICE_RUN_DISPLAY_FLUSH_INTERVAL_SECONDS`      | number         | maximum=60; exclusiveMinimum=0; default=1          |
-| `runs.display_poll_interval_seconds`       | `A13N_SERVICE_RUN_DISPLAY_POLL_INTERVAL_SECONDS`       | number         | maximum=60; exclusiveMinimum=0; default=0.25       |
-| `runs.display_operation_timeout_seconds`   | `A13N_SERVICE_RUN_DISPLAY_OPERATION_TIMEOUT_SECONDS`   | number         | maximum=300; exclusiveMinimum=0; default=10        |
-
-## `gateway`
-
-| Setting                                           | Environment variable                                           | Type / choices | Constraints and default                                          |
-| ------------------------------------------------- | -------------------------------------------------------------- | -------------- | ---------------------------------------------------------------- |
-| `gateway.stream_page_size`                        | `A13N_SERVICE_GATEWAY_STREAM_PAGE_SIZE`                        | integer        | minimum=1; maximum=1000; default=256                             |
-| `gateway.stream_poll_interval_seconds`            | `A13N_SERVICE_GATEWAY_STREAM_POLL_INTERVAL_SECONDS`            | number         | maximum=10; exclusiveMinimum=0; default=0.25                     |
-| `gateway.stream_heartbeat_interval_seconds`       | `A13N_SERVICE_GATEWAY_STREAM_HEARTBEAT_INTERVAL_SECONDS`       | number         | maximum=300; exclusiveMinimum=0; default=15                      |
-| `gateway.stream_authorization_interval_seconds`   | `A13N_SERVICE_GATEWAY_STREAM_AUTHORIZATION_INTERVAL_SECONDS`   | number         | maximum=300; exclusiveMinimum=0; default=30                      |
-| `gateway.stream_maximum_lifetime_seconds`         | `A13N_SERVICE_GATEWAY_STREAM_MAXIMUM_LIFETIME_SECONDS`         | number         | maximum=3600; exclusiveMinimum=0; default=300                    |
-| `gateway.notification_poll_interval_seconds`      | `A13N_SERVICE_GATEWAY_NOTIFICATION_POLL_INTERVAL_SECONDS`      | number         | maximum=30; exclusiveMinimum=0; default=0.5                      |
-| `gateway.notification_heartbeat_interval_seconds` | `A13N_SERVICE_GATEWAY_NOTIFICATION_HEARTBEAT_INTERVAL_SECONDS` | number         | maximum=300; exclusiveMinimum=0; default=20                      |
-| `gateway.notification_send_timeout_seconds`       | `A13N_SERVICE_GATEWAY_NOTIFICATION_SEND_TIMEOUT_SECONDS`       | number         | maximum=60; exclusiveMinimum=0; default=10                       |
-| `gateway.notification_max_frame_bytes`            | `A13N_SERVICE_GATEWAY_NOTIFICATION_MAX_FRAME_BYTES`            | integer        | minimum=1024; maximum=1048576; default=65536                     |
-| `gateway.notification_max_subscriptions`          | `A13N_SERVICE_GATEWAY_NOTIFICATION_MAX_SUBSCRIPTIONS`          | integer        | minimum=1; maximum=1024; default=64                              |
-| `gateway.notification_max_topics`                 | `A13N_SERVICE_GATEWAY_NOTIFICATION_MAX_TOPICS`                 | integer        | minimum=1; maximum=4096; default=128                             |
-| `gateway.notification_poll_limit`                 | `A13N_SERVICE_GATEWAY_NOTIFICATION_POLL_LIMIT`                 | integer        | minimum=1; maximum=1000; default=100                             |
-| `gateway.notification_maximum_lifetime_seconds`   | `A13N_SERVICE_GATEWAY_NOTIFICATION_MAXIMUM_LIFETIME_SECONDS`   | number         | maximum=86400; exclusiveMinimum=0; default=3600                  |
-| `gateway.run_execution_max_attempts`              | `A13N_SERVICE_GATEWAY_RUN_EXECUTION_MAX_ATTEMPTS`              | integer        | minimum=0; maximum=100; default=3                                |
-| `gateway.run_max_handoffs`                        | `A13N_SERVICE_GATEWAY_RUN_MAX_HANDOFFS`                        | integer        | minimum=0; maximum=100; default=2                                |
-| `gateway.run_queue_name`                          | `A13N_SERVICE_GATEWAY_RUN_QUEUE_NAME`                          | string         | `pattern="^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$"`; default="default" |
-| `gateway.run_priority`                            | `A13N_SERVICE_GATEWAY_RUN_PRIORITY`                            | integer        | minimum=-1000000; maximum=1000000; default=0                     |
-| `gateway.a2a_enabled`                             | `A13N_SERVICE_A2A_ENABLED`                                     | boolean        | default=true                                                     |
-| `gateway.a2a_public_origin`                       | `A13N_SERVICE_A2A_PUBLIC_ORIGIN`                               | string or null | default=null                                                     |
-| `gateway.a2a_default_agent_id`                    | `A13N_SERVICE_A2A_DEFAULT_AGENT_ID`                            | string or null | default=null                                                     |
-| `gateway.a2a_poll_interval_seconds`               | `A13N_SERVICE_A2A_POLL_INTERVAL_SECONDS`                       | number         | maximum=30; exclusiveMinimum=0; default=0.5                      |
-| `gateway.a2a_maximum_wait_seconds`                | `A13N_SERVICE_A2A_MAXIMUM_WAIT_SECONDS`                        | number         | maximum=3600; exclusiveMinimum=0; default=300                    |
-
-## `secrets`
-
-| Setting                     | Environment variable                    | Type / choices | Constraints and default |
-| --------------------------- | --------------------------------------- | -------------- | ----------------------- |
-| `secrets.master_key_base64` | `A13N_SERVICE_SECRET_MASTER_KEY_BASE64` | string or null | default=null            |
-| `secrets.encryption_key_id` | `A13N_SERVICE_SECRET_ENCRYPTION_KEY_ID` | string or null | default=null            |
-
-## `connectivity`
-
-| Setting                                                  | Environment variable                                                  | Type / choices             | Constraints and default                                    |
-| -------------------------------------------------------- | --------------------------------------------------------------------- | -------------------------- | ---------------------------------------------------------- |
-| `connectivity.provider_request_max_bytes`                | `A13N_SERVICE_CONNECTIVITY_PROVIDER_REQUEST_MAX_BYTES`                | integer                    | minimum=1; maximum=8388608; default=8388608                |
-| `connectivity.workspace_pending_max_count`               | `A13N_SERVICE_CONNECTIVITY_WORKSPACE_PENDING_MAX_COUNT`               | integer                    | minimum=1; maximum=1000000; default=10000                  |
-| `connectivity.workspace_pending_max_bytes`               | `A13N_SERVICE_CONNECTIVITY_WORKSPACE_PENDING_MAX_BYTES`               | integer                    | minimum=1; maximum=9223372036854775807; default=1073741824 |
-| `connectivity.account_pending_max_count`                 | `A13N_SERVICE_CONNECTIVITY_ACCOUNT_PENDING_MAX_COUNT`                 | integer                    | minimum=1; maximum=100000; default=1000                    |
-| `connectivity.account_pending_max_bytes`                 | `A13N_SERVICE_CONNECTIVITY_ACCOUNT_PENDING_MAX_BYTES`                 | integer                    | minimum=1; maximum=9223372036854775807; default=134217728  |
-| `connectivity.batch_max_events`                          | `A13N_SERVICE_CONNECTIVITY_BATCH_MAX_EVENTS`                          | integer                    | minimum=1; maximum=1000; default=100                       |
-| `connectivity.batch_max_bytes`                           | `A13N_SERVICE_CONNECTIVITY_BATCH_MAX_BYTES`                           | integer                    | minimum=1; maximum=67108864; default=4194304               |
-| `connectivity.batch_max_wait_seconds`                    | `A13N_SERVICE_CONNECTIVITY_BATCH_MAX_WAIT_SECONDS`                    | number                     | maximum=3600; exclusiveMinimum=0; default=300              |
-| `connectivity.admission_poll_interval_seconds`           | `A13N_SERVICE_CONNECTIVITY_ADMISSION_POLL_INTERVAL_SECONDS`           | number                     | maximum=60; exclusiveMinimum=0; default=1                  |
-| `connectivity.admission_lease_seconds`                   | `A13N_SERVICE_CONNECTIVITY_ADMISSION_LEASE_SECONDS`                   | number                     | maximum=3600; exclusiveMinimum=0; default=30               |
-| `connectivity.admission_backoff_steps`                   | `A13N_SERVICE_CONNECTIVITY_ADMISSION_BACKOFF_STEPS`                   | integer                    | minimum=1; maximum=1000; default=20                        |
-| `connectivity.admission_max_backoff_seconds`             | `A13N_SERVICE_CONNECTIVITY_ADMISSION_MAX_BACKOFF_SECONDS`             | number                     | maximum=3600; exclusiveMinimum=0; default=300              |
-| `connectivity.dedup_horizon_seconds`                     | `A13N_SERVICE_CONNECTIVITY_DEDUP_HORIZON_SECONDS`                     | integer                    | minimum=60; maximum=2592000; default=604800                |
-| `connectivity.connect_timeout_seconds`                   | `A13N_SERVICE_CONNECTIVITY_CONNECT_TIMEOUT_SECONDS`                   | number                     | maximum=60; exclusiveMinimum=0; default=5                  |
-| `connectivity.read_timeout_seconds`                      | `A13N_SERVICE_CONNECTIVITY_READ_TIMEOUT_SECONDS`                      | number                     | maximum=300; exclusiveMinimum=0; default=30                |
-| `connectivity.total_timeout_seconds`                     | `A13N_SERVICE_CONNECTIVITY_TOTAL_TIMEOUT_SECONDS`                     | number                     | maximum=600; exclusiveMinimum=0; default=60                |
-| `connectivity.response_max_bytes`                        | `A13N_SERVICE_CONNECTIVITY_RESPONSE_MAX_BYTES`                        | integer                    | minimum=1; maximum=8388608; default=1048576                |
-| `connectivity.max_redirects`                             | `A13N_SERVICE_CONNECTIVITY_MAX_REDIRECTS`                             | integer                    | minimum=0; maximum=3; default=3                            |
-| `connectivity.oauth_setup_ttl_seconds`                   | `A13N_SERVICE_CONNECTIVITY_OAUTH_SETUP_TTL_SECONDS`                   | integer                    | minimum=60; maximum=900; default=600                       |
-| `connectivity.public_origin`                             | `A13N_SERVICE_CONNECTIVITY_PUBLIC_ORIGIN`                             | string or null             | default=null                                               |
-| `connectivity.authorization_callback_urls`               | `A13N_SERVICE_CONNECTIVITY_AUTHORIZATION_CALLBACK_URLS`               | array of string            | default=[]                                                 |
-| `connectivity.mcp_servers`                               | `A13N_SERVICE_CONNECTIVITY_MCP_SERVERS`                               | array of MCPServerSettings | default=[]                                                 |
-| `connectivity.oauth_client_name`                         | `A13N_SERVICE_CONNECTIVITY_OAUTH_CLIENT_NAME`                         | string                     | minLength=1; maxLength=128; default="Agent Foundation"     |
-| `connectivity.private_endpoint_domains`                  | `A13N_SERVICE_CONNECTIVITY_PRIVATE_ENDPOINT_DOMAINS`                  | array of string            | default=[]                                                 |
-| `connectivity.private_endpoint_cidrs`                    | `A13N_SERVICE_CONNECTIVITY_PRIVATE_ENDPOINT_CIDRS`                    | array of string            | default=[]                                                 |
-| `connectivity.http_origins`                              | `A13N_SERVICE_CONNECTIVITY_HTTP_ORIGINS`                              | array of string            | default=[]                                                 |
-| `connectivity.provider_origins`                          | `A13N_SERVICE_CONNECTIVITY_PROVIDER_ORIGINS`                          | array of string            | default=[]                                                 |
-| `connectivity.provider_token_expiry_skew_seconds`        | `A13N_SERVICE_CONNECTIVITY_PROVIDER_TOKEN_EXPIRY_SKEW_SECONDS`        | integer                    | minimum=0; maximum=600; default=60                         |
-| `connectivity.setup_correlation_secret`                  | `A13N_SERVICE_CONNECTIVITY_SETUP_CORRELATION_SECRET`                  | string or null             | default=null                                               |
-| `connectivity.connector_reconcile_poll_interval_seconds` | `A13N_SERVICE_CONNECTIVITY_CONNECTOR_RECONCILE_POLL_INTERVAL_SECONDS` | number                     | maximum=300; exclusiveMinimum=0; default=2                 |
-| `connectivity.connector_reconcile_lease_seconds`         | `A13N_SERVICE_CONNECTIVITY_CONNECTOR_RECONCILE_LEASE_SECONDS`         | integer                    | minimum=10; maximum=600; default=60                        |
-| `connectivity.retention_poll_interval_seconds`           | `A13N_SERVICE_CONNECTIVITY_RETENTION_POLL_INTERVAL_SECONDS`           | number                     | maximum=3600; exclusiveMinimum=0; default=60               |
-| `connectivity.retention_batch_size`                      | `A13N_SERVICE_CONNECTIVITY_RETENTION_BATCH_SIZE`                      | integer                    | minimum=1; maximum=1000; default=25                        |
+| Setting                         | Environment variable                  | Type / choices | Constraints and default                           |
+| ------------------------------- | ------------------------------------- | -------------- | ------------------------------------------------- |
+| `objects.backend`               | `A13N_OBJECTS__BACKEND`               | "local", "s3"  | default="local"                                   |
+| `objects.root`                  | `A13N_OBJECTS__ROOT`                  | string         | format="path"; default="var/service/objects"      |
+| `objects.bucket`                | `A13N_OBJECTS__BUCKET`                | string or null | default=null                                      |
+| `objects.prefix`                | `A13N_OBJECTS__PREFIX`                | string         | default=""                                        |
+| `objects.endpoint_url`          | `A13N_OBJECTS__ENDPOINT_URL`          | string or null | default=null                                      |
+| `objects.path_style`            | `A13N_OBJECTS__PATH_STYLE`            | boolean        | default=false                                     |
+| `objects.region`                | `A13N_OBJECTS__REGION`                | string or null | default=null                                      |
+| `objects.access_key_id`         | `A13N_OBJECTS__ACCESS_KEY_ID`         | string or null | format="password"; default=null                   |
+| `objects.secret_access_key`     | `A13N_OBJECTS__SECRET_ACCESS_KEY`     | string or null | format="password"; default=null                   |
+| `objects.max_bytes`             | `A13N_OBJECTS__MAX_BYTES`             | integer        | minimum=65536; maximum=67108864; default=16777216 |
+| `objects.timeout`               | `A13N_OBJECTS__TIMEOUT`               | number         | maximum=60; exclusiveMinimum=0; default=5         |
+| `objects.upload_bytes`          | `A13N_OBJECTS__UPLOAD_BYTES`          | integer        | minimum=1; maximum=33554432; default=1048576      |
+| `objects.upload_limit`          | `A13N_OBJECTS__UPLOAD_LIMIT`          | integer        | minimum=1; maximum=1000; default=60               |
+| `objects.upload_window_seconds` | `A13N_OBJECTS__UPLOAD_WINDOW_SECONDS` | integer        | minimum=1; maximum=3600; default=60               |
 
 ## `redis`
 
-| Setting                               | Environment variable                               | Type / choices    | Constraints and default                      |
-| ------------------------------------- | -------------------------------------------------- | ----------------- | -------------------------------------------- |
-| `redis.backend`                       | `A13N_SERVICE_REDIS_BACKEND`                       | "redis", "memory" | default="redis"                              |
-| `redis.url`                           | `A13N_SERVICE_REDIS_URL`                           | string or null    | default="\*\*\*\*\*\*\*\*\*\*"               |
-| `redis.max_connections`               | `A13N_SERVICE_REDIS_MAX_CONNECTIONS`               | integer           | minimum=1; maximum=1000; default=20          |
-| `redis.connect_timeout_seconds`       | `A13N_SERVICE_REDIS_CONNECT_TIMEOUT_SECONDS`       | number            | maximum=300; exclusiveMinimum=0; default=5   |
-| `redis.command_timeout_seconds`       | `A13N_SERVICE_REDIS_COMMAND_TIMEOUT_SECONDS`       | number            | maximum=300; exclusiveMinimum=0; default=10  |
-| `redis.health_check_interval_seconds` | `A13N_SERVICE_REDIS_HEALTH_CHECK_INTERVAL_SECONDS` | number            | maximum=3600; exclusiveMinimum=0; default=30 |
-| `redis.cleanup_timeout_seconds`       | `A13N_SERVICE_REDIS_CLEANUP_TIMEOUT_SECONDS`       | number            | maximum=60; exclusiveMinimum=0; default=5    |
+| Setting         | Environment variable  | Type / choices | Constraints and default                           |
+| --------------- | --------------------- | -------------- | ------------------------------------------------- |
+| `redis.url`     | `A13N_REDIS__URL`     | string         | format="password"; default="\*\*\*\*\*\*\*\*\*\*" |
+| `redis.timeout` | `A13N_REDIS__TIMEOUT` | number         | maximum=30; exclusiveMinimum=0; default=2         |
 
-## `filesystem`
+## `auth`
 
-| Setting                   | Environment variable                   | Type / choices | Constraints and default            |
-| ------------------------- | -------------------------------------- | -------------- | ---------------------------------- |
-| `filesystem.root`         | `A13N_SERVICE_FILESYSTEM_ROOT`         | string         | format="path"; default="var/files" |
-| `filesystem.worker_limit` | `A13N_SERVICE_FILESYSTEM_WORKER_LIMIT` | integer        | minimum=1; maximum=256; default=20 |
+| Setting                     | Environment variable                           | Type / choices    | Constraints and default                       |
+| --------------------------- | ---------------------------------------------- | ----------------- | --------------------------------------------- |
+| `auth.session_seconds`      | `A13N_AUTH__SESSION_SECONDS`                   | integer           | minimum=60; maximum=604800; default=43200     |
+| `auth.login_limit`          | `A13N_AUTH__LOGIN_LIMIT`                       | integer           | minimum=1; maximum=1000; default=10           |
+| `auth.login_window_seconds` | `A13N_AUTH__LOGIN_WINDOW_SECONDS`              | integer           | minimum=1; maximum=3600; default=60           |
+| `auth.invitation_seconds`   | `A13N_AUTH__INVITATION_SECONDS`                | integer           | minimum=3600; maximum=2592000; default=604800 |
+| `auth.link_seconds`         | `A13N_AUTH__LINK_SECONDS`                      | integer           | minimum=300; maximum=86400; default=3600      |
+| `auth.expiry_scan_seconds`  | `A13N_AUTH__EXPIRY_SCAN_SECONDS`               | number            | maximum=3600; exclusiveMinimum=0; default=60  |
+| `auth.mail.smtp_host`       | `A13N_AUTH__MAIL` (JSON field `smtp_host`)     | string or null    | maxLength=253; default=null                   |
+| `auth.mail.smtp_port`       | `A13N_AUTH__MAIL` (JSON field `smtp_port`)     | integer           | minimum=1; maximum=65535; default=587         |
+| `auth.mail.smtp_security`   | `A13N_AUTH__MAIL` (JSON field `smtp_security`) | "starttls", "tls" | default="starttls"                            |
+| `auth.mail.smtp_username`   | `A13N_AUTH__MAIL` (JSON field `smtp_username`) | string or null    | maxLength=320; default=null                   |
+| `auth.mail.smtp_password`   | `A13N_AUTH__MAIL` (JSON field `smtp_password`) | string or null    | format="password"; default=null               |
+| `auth.mail.sender`          | `A13N_AUTH__MAIL` (JSON field `sender`)        | string or null    | maxLength=320; default=null                   |
+| `auth.mail.timeout`         | `A13N_AUTH__MAIL` (JSON field `timeout`)       | number            | maximum=60; exclusiveMinimum=0; default=10    |
 
-## `migration`
+## `encryption`
 
-| Setting                                      | Environment variable                                      | Type / choices | Constraints and default                        |
-| -------------------------------------------- | --------------------------------------------------------- | -------------- | ---------------------------------------------- |
-| `migration.auto_migrate`                     | `A13N_SERVICE_AUTO_MIGRATE`                               | boolean        | default=false                                  |
-| `migration.advisory_lock_timeout_seconds`    | `A13N_SERVICE_MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS`    | number         | maximum=86400; exclusiveMinimum=0; default=900 |
-| `migration.lock_timeout_seconds`             | `A13N_SERVICE_MIGRATION_LOCK_TIMEOUT_SECONDS`             | number         | maximum=3600; exclusiveMinimum=0; default=3    |
-| `migration.statement_timeout_seconds`        | `A13N_SERVICE_MIGRATION_STATEMENT_TIMEOUT_SECONDS`        | number         | maximum=86400; exclusiveMinimum=0; default=900 |
-| `migration.idle_transaction_timeout_seconds` | `A13N_SERVICE_MIGRATION_IDLE_TRANSACTION_TIMEOUT_SECONDS` | number         | maximum=3600; exclusiveMinimum=0; default=30   |
+| Setting                    | Environment variable             | Type / choices | Constraints and default                  |
+| -------------------------- | -------------------------------- | -------------- | ---------------------------------------- |
+| `encryption.active_key_id` | `A13N_ENCRYPTION__ACTIVE_KEY_ID` | string or null | minLength=1; maxLength=128; default=null |
+| `encryption.keys`          | `A13N_ENCRYPTION__KEYS`          | object         | —                                        |
 
-## `logging`
+## `control`
 
-| Setting                     | Environment variable                 | Type / choices           | Constraints and default                         |
-| --------------------------- | ------------------------------------ | ------------------------ | ----------------------------------------------- |
-| `logging.level`             | `A13N_SERVICE_LOG_LEVEL`             | string                   | default="INFO"                                  |
-| `logging.format`            | `A13N_SERVICE_LOG_FORMAT`            | "pretty", "json"         | default="pretty"                                |
-| `logging.destination`       | `A13N_SERVICE_LOG_DESTINATION`       | "stdout", "file", "both" | default="stdout"                                |
-| `logging.file_path`         | `A13N_SERVICE_LOG_FILE_PATH`         | string or null           | default=null                                    |
-| `logging.file_max_bytes`    | `A13N_SERVICE_LOG_FILE_MAX_BYTES`    | integer                  | minimum=1; maximum=1073741824; default=10485760 |
-| `logging.file_backup_count` | `A13N_SERVICE_LOG_FILE_BACKUP_COUNT` | integer                  | minimum=1; maximum=100; default=5               |
+| Setting                          | Environment variable                   | Type / choices | Constraints and default                         |
+| -------------------------------- | -------------------------------------- | -------------- | ----------------------------------------------- |
+| `control.scan_seconds`           | `A13N_CONTROL__SCAN_SECONDS`           | number         | maximum=60; exclusiveMinimum=0; default=1       |
+| `control.sweep_batch`            | `A13N_CONTROL__SWEEP_BATCH`            | integer        | minimum=1; maximum=10000; default=100           |
+| `control.inbox_count`            | `A13N_CONTROL__INBOX_COUNT`            | integer        | minimum=1; maximum=10000; default=128           |
+| `control.inbox_bytes`            | `A13N_CONTROL__INBOX_BYTES`            | integer        | minimum=1024; maximum=16777216; default=2097152 |
+| `control.subscriptions`          | `A13N_CONTROL__SUBSCRIPTIONS`          | integer        | minimum=1; maximum=1000; default=32             |
+| `control.outbox_batch`           | `A13N_CONTROL__OUTBOX_BATCH`           | integer        | minimum=1; maximum=1000; default=32             |
+| `control.outbox_attempts`        | `A13N_CONTROL__OUTBOX_ATTEMPTS`        | integer        | minimum=1; maximum=100; default=12              |
+| `control.outbox_lease_seconds`   | `A13N_CONTROL__OUTBOX_LEASE_SECONDS`   | integer        | minimum=10; maximum=600; default=60             |
+| `control.outbox_retention_days`  | `A13N_CONTROL__OUTBOX_RETENTION_DAYS`  | integer        | minimum=1; maximum=365; default=14              |
+| `control.webhook_timeout`        | `A13N_CONTROL__WEBHOOK_TIMEOUT`        | number         | maximum=30; exclusiveMinimum=0; default=10      |
+| `control.import_timeout`         | `A13N_CONTROL__IMPORT_TIMEOUT`         | number         | maximum=120; exclusiveMinimum=0; default=30     |
+| `control.stream_refresh_seconds` | `A13N_CONTROL__STREAM_REFRESH_SECONDS` | number         | maximum=60; exclusiveMinimum=0; default=2       |
+
+## `worker`
+
+| Setting                          | Environment variable                   | Type / choices | Constraints and default                          |
+| -------------------------------- | -------------------------------------- | -------------- | ------------------------------------------------ |
+| `worker.slots`                   | `A13N_WORKER__SLOTS`                   | integer        | minimum=1; maximum=128; default=4                |
+| `worker.max_attempts`            | `A13N_WORKER__MAX_ATTEMPTS`            | integer        | minimum=1; maximum=20; default=3                 |
+| `worker.lease_seconds`           | `A13N_WORKER__LEASE_SECONDS`           | integer        | minimum=3; maximum=300; default=30               |
+| `worker.scan_seconds`            | `A13N_WORKER__SCAN_SECONDS`            | number         | maximum=30; exclusiveMinimum=0; default=1        |
+| `worker.authority_seconds`       | `A13N_WORKER__AUTHORITY_SECONDS`       | number         | maximum=30; exclusiveMinimum=0; default=1        |
+| `worker.drain_seconds`           | `A13N_WORKER__DRAIN_SECONDS`           | number         | maximum=300; exclusiveMinimum=0; default=10      |
+| `worker.delivery_count`          | `A13N_WORKER__DELIVERY_COUNT`          | integer        | minimum=1; maximum=128; default=8                |
+| `worker.delivery_bytes`          | `A13N_WORKER__DELIVERY_BYTES`          | integer        | minimum=1024; maximum=16777216; default=262144   |
+| `worker.display_bytes`           | `A13N_WORKER__DISPLAY_BYTES`           | integer        | minimum=65536; maximum=67108864; default=8388608 |
+| `worker.output_bytes`            | `A13N_WORKER__OUTPUT_BYTES`            | integer        | minimum=1024; maximum=16777216; default=1048576  |
+| `worker.stream_length`           | `A13N_WORKER__STREAM_LENGTH`           | integer        | minimum=16; maximum=100000; default=10000        |
+| `worker.stream_ttl`              | `A13N_WORKER__STREAM_TTL`              | integer        | minimum=1; maximum=86400; default=600            |
+| `worker.stream_coalesce_seconds` | `A13N_WORKER__STREAM_COALESCE_SECONDS` | number         | minimum=0; maximum=1; default=0.1                |
+| `worker.stream_trim_seconds`     | `A13N_WORKER__STREAM_TRIM_SECONDS`     | number         | minimum=0; maximum=600; default=10               |
+| `worker.child_depth`             | `A13N_WORKER__CHILD_DEPTH`             | integer        | minimum=0; maximum=16; default=4                 |
+| `worker.child_count`             | `A13N_WORKER__CHILD_COUNT`             | integer        | minimum=0; maximum=256; default=16               |
+
+## `environments`
+
+| Setting                           | Environment variable                    | Type / choices  | Constraints and default                       |
+| --------------------------------- | --------------------------------------- | --------------- | --------------------------------------------- |
+| `environments.scan_seconds`       | `A13N_ENVIRONMENTS__SCAN_SECONDS`       | number          | maximum=300; exclusiveMinimum=0; default=5    |
+| `environments.batch`              | `A13N_ENVIRONMENTS__BATCH`              | integer         | minimum=1; maximum=1000; default=16           |
+| `environments.operation_seconds`  | `A13N_ENVIRONMENTS__OPERATION_SECONDS`  | number          | maximum=3600; exclusiveMinimum=0; default=120 |
+| `environments.renewal_seconds`    | `A13N_ENVIRONMENTS__RENEWAL_SECONDS`    | number          | maximum=60; exclusiveMinimum=0; default=20    |
+| `environments.wait_seconds`       | `A13N_ENVIRONMENTS__WAIT_SECONDS`       | number          | maximum=3600; exclusiveMinimum=0; default=300 |
+| `environments.managed_count`      | `A13N_ENVIRONMENTS__MANAGED_COUNT`      | integer         | minimum=1; maximum=100000; default=100        |
+| `environments.allow_local`        | `A13N_ENVIRONMENTS__ALLOW_LOCAL`        | boolean         | default=false                                 |
+| `environments.docker_host`        | `A13N_ENVIRONMENTS__DOCKER_HOST`        | string or null  | minLength=1; maxLength=2048; default=null     |
+| `environments.docker_mount_roots` | `A13N_ENVIRONMENTS__DOCKER_MOUNT_ROOTS` | array of string | maxItems=64; default=[]                       |
+
+## `providers`
+
+| Setting                            | Environment variable                     | Type / choices  | Constraints and default                            |
+| ---------------------------------- | ---------------------------------------- | --------------- | -------------------------------------------------- |
+| `providers.private_domains`        | `A13N_PROVIDERS__PRIVATE_DOMAINS`        | array of string | default=[]                                         |
+| `providers.private_cidrs`          | `A13N_PROVIDERS__PRIVATE_CIDRS`          | array of string | default=[]                                         |
+| `providers.http_origins`           | `A13N_PROVIDERS__HTTP_ORIGINS`           | array of string | default=[]                                         |
+| `providers.require_https`          | `A13N_PROVIDERS__REQUIRE_HTTPS`          | boolean         | default=true                                       |
+| `providers.return_urls`            | `A13N_PROVIDERS__RETURN_URLS`            | array of string | default=[]                                         |
+| `providers.mcp_servers`            | `A13N_PROVIDERS__MCP_SERVERS`            | McpServers      | default=[]                                         |
+| `providers.flow_seconds`           | `A13N_PROVIDERS__FLOW_SECONDS`           | integer         | minimum=30; maximum=1800; default=600              |
+| `providers.operation_seconds`      | `A13N_PROVIDERS__OPERATION_SECONDS`      | number          | minimum=2; maximum=30; default=10                  |
+| `providers.operation_scan_seconds` | `A13N_PROVIDERS__OPERATION_SCAN_SECONDS` | number          | maximum=3600; exclusiveMinimum=0; default=30       |
+| `providers.discovery_ttl`          | `A13N_PROVIDERS__DISCOVERY_TTL`          | integer         | minimum=1; maximum=86400; default=300              |
+| `providers.tool_call_seconds`      | `A13N_PROVIDERS__TOOL_CALL_SECONDS`      | number          | maximum=600; exclusiveMinimum=0; default=60        |
+| `providers.model_timeout`          | `A13N_PROVIDERS__MODEL_TIMEOUT`          | number          | maximum=3600; exclusiveMinimum=0; default=300      |
+| `providers.response_bytes`         | `A13N_PROVIDERS__RESPONSE_BYTES`         | integer         | minimum=65536; maximum=268435456; default=16777216 |
+
+## `plugins`
+
+| Setting        | Environment variable | Type / choices  | Constraints and default |
+| -------------- | -------------------- | --------------- | ----------------------- |
+| `plugins.keys` | `A13N_PLUGINS__KEYS` | array of string | default=[]              |
+
+## `assistant`
+
+| Setting            | Environment variable     | Type / choices  | Constraints and default                                                                |
+| ------------------ | ------------------------ | --------------- | -------------------------------------------------------------------------------------- |
+| `assistant.models` | `A13N_ASSISTANT__MODELS` | array of string | default=["gpt-5.6-luna", "claude-sonnet-5", "deepseek-v4.1-flash", "gemini-3.8-flash"] |
+
+## `telemetry`
+
+| Setting                         | Environment variable                  | Type / choices                | Constraints and default                                         |
+| ------------------------------- | ------------------------------------- | ----------------------------- | --------------------------------------------------------------- |
+| `telemetry.log_format`          | `A13N_TELEMETRY__LOG_FORMAT`          | LogFormat                     | default="json"                                                  |
+| `telemetry.trace_backend`       | `A13N_TELEMETRY__TRACE_BACKEND`       | "none", "langfuse", "logfire" | default="none"                                                  |
+| `telemetry.trace_url`           | `A13N_TELEMETRY__TRACE_URL`           | string or null                | maxLength=2048; `pattern="^https?://[^\\s?#@]+$"`; default=null |
+| `telemetry.langfuse_public_key` | `A13N_TELEMETRY__LANGFUSE_PUBLIC_KEY` | string or null                | maxLength=256; default=null                                     |
+| `telemetry.langfuse_secret_key` | `A13N_TELEMETRY__LANGFUSE_SECRET_KEY` | string or null                | format="password"; default=null                                 |
+| `telemetry.logfire_write_token` | `A13N_TELEMETRY__LOGFIRE_WRITE_TOKEN` | string or null                | format="password"; default=null                                 |
+| `telemetry.logfire_read_token`  | `A13N_TELEMETRY__LOGFIRE_READ_TOKEN`  | string or null                | format="password"; default=null                                 |
+| `telemetry.trace_content`       | `A13N_TELEMETRY__TRACE_CONTENT`       | "none", "standard", "full"    | default="standard"                                              |
+| `telemetry.trace_query_timeout` | `A13N_TELEMETRY__TRACE_QUERY_TIMEOUT` | number                        | maximum=60; exclusiveMinimum=0; default=10                      |

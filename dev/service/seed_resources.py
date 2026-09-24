@@ -1,249 +1,120 @@
-"""Local resources and their versions, lifecycle states, and dependency links."""
+"""Skills with revisions, secrets, environment templates and a webhook subscription."""
 
-import hashlib
+from __future__ import annotations
+
 import io
 import zipfile
-from pathlib import Path
+from dataclasses import dataclass
 
-from a13n_service.settings import Settings
+from dev.service.api import Api, Json
+from dev.service.seed_assets import upload
 
-from .seed_assets import asset_examples
-from .seed_client import Client
-from .seed_environments import local_provider, local_workspace
-from .seed_model_providers import seed_model_providers, seed_provider_models
 
-FIXTURES = Path(__file__).with_name("fixtures")
-AGENT_NAMES = (
-    "Release reviewer",
-    "Documentation assistant",
-    "产品交互评审",
-    "Research notes",
-    "Support triage",
-    "Code review",
-    "Meeting summary",
-    "数据分析助手",
-    "Translation desk",
-    "Onboarding guide",
-    "Weekly report",
-    "Incident review",
-    "Design feedback",
-    "Knowledge search",
-    "Planning assistant",
-    "A deliberately long Agent name for testing truncation and responsive navigation",
+@dataclass(frozen=True, slots=True)
+class Skill:
+    key: str
+    description: str
+    labels: dict[str, str]
+    body: str
+    references: bool = False
+
+
+SKILLS = (
+    Skill(
+        "release-notes",
+        "Turn a list of changes into short, factual release notes.",
+        {"team": "docs"},
+        "Group changes under Added, Changed and Fixed, one line each, without marketing language.",
+    ),
+    Skill(
+        "accessibility-review",
+        "Review a screen for keyboard, focus and contrast problems.",
+        {"team": "design"},
+        "Check keyboard navigation first, then focus order, then contrast. Report each finding with its screen.",
+        references=True,
+    ),
+    Skill(
+        "incident-summary",
+        "Summarize a fictional incident timeline for stakeholders.",
+        {"team": "support"},
+        "State impact, timeline, cause and follow-ups, in that order.",
+    ),
+    Skill(
+        "translation-glossary",
+        "Keep product terms consistent between English and Chinese (中文术语表).",
+        {"team": "docs", "locale": "zh-CN"},
+        "Use the glossary term for every product noun; never translate the product name.",
+    ),
+    Skill(
+        "legacy-style-guide",
+        "A retired style guide, archived.",
+        {},
+        "Prefer title case in headings.",
+    ),
 )
+ARCHIVED_SKILL = "legacy-style-guide"
 
 
-def agent_config(name: str, **values) -> dict:
-    toolsets = {
-        key: {"tools": {tool: {"permission": "allow"} for tool in tools}}
-        for key, tools in {
-            "files": ("view", "write", "edit", "multi_edit", "mkdir", "move", "copy", "delete", "ls", "glob", "grep"),
-            "shell": ("exec", "info", "wait", "input", "signal"),
-        }.items()
+def seed_skills(api: Api, ws: str) -> dict[str, Json]:
+    """Every skill by key. `accessibility-review` gains a newer revision that is not its default."""
+    skills = {
+        skill.key: api.post(
+            f"{ws}/skills",
+            {"source": publish(api, ws, skill, revision=1), "labels": skill.labels},
+        )
+        for skill in SKILLS
     }
-    toolsets.update(values.pop("toolsets", {}))
-    return {
-        "toolsets": toolsets,
-        "model": {"model_key": "local-scripted", "characteristics": {"context_window_tokens": 32768}},
-        "instructions": "Review fictional project materials using the scripted local development model.",
-        "input_adapter": {"adapter_key": "native", "config": {}},
-        "protocol": {"schema_version": "1", "public_name": name, "output_modes": ["text"], "limits": {}},
-        **values,
-    }
+    draft = next(skill for skill in SKILLS if skill.key == "accessibility-review")
+    current = skills[draft.key]
+    api.post(
+        f"{ws}/skills/{current['id']}/revisions",
+        {"source": publish(api, ws, draft, revision=2), "make_default": False, "note": "Draft: adds motion checks"},
+        current=current,
+    )
+    archived = skills[ARCHIVED_SKILL]
+    skills[ARCHIVED_SKILL] = api.post(f"{ws}/skills/{archived['id']}/archive", current=archived)
+    return skills
 
 
-async def resources(client: Client, base: str, model_url: str, settings: Settings):
-    scenarios = {}
-    demo_providers = await seed_model_providers(client, base)
-    await seed_provider_models(client, base, demo_providers)
-    provider = await client.request(
-        "POST",
-        base + "/model-providers",
-        expected=201,
-        json={
-            "type": "openai",
-            "name": "Local scripted model (fictional)",
-            "credential": {"api_key": "public-local-model-token"},
-            "configuration": {"base_url": model_url, "auth_mode": "bearer"},
+def publish(api: Api, ws: str, skill: Skill, *, revision: int) -> Json:
+    """An upload source holding the skill's package at `revision`."""
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+        manifest = f"---\nname: {skill.key}\ndescription: {skill.description}\n---\n"
+        archive.writestr(f"{skill.key}/SKILL.md", f"{manifest}# {skill.key}\n\n{skill.body}\n\nRevision {revision}.\n")
+        if skill.references or revision > 1:
+            archive.writestr(f"{skill.key}/references/checklist.md", "# Checklist\n\n- Navigation\n- Empty states\n")
+    upload_id = upload(api, ws, f"{skill.key}-{revision}.zip", "application/zip", package.getvalue())
+    return {"kind": "upload", "upload_id": upload_id}
+
+
+def seed_configuration(api: Api, ws: str, environment_providers: dict[str, Json], local_template: Json) -> None:
+    """Secrets of both scopes, a template per fictional environment account, a disabled template, and a webhook
+    subscription the scripted model's `/webhooks` route accepts."""
+    api.post(f"{ws}/secrets", {"key": "RELEASE_TOKEN", "value": "fictional-release-token"})
+    api.post(f"{ws}/secrets", {"key": "PERSONAL_NOTES_TOKEN", "value": "fictional-notes-token", "scope": "user"})
+    for provider_type, provider in environment_providers.items():
+        body = {"key": f"{provider_type}-sandbox", "name": f"{provider['name']} sandbox", "provider_id": provider["id"]}
+        api.post(f"{ws}/environment-templates", {**body, "labels": {"runtime": provider_type}})
+    retired = api.post(
+        f"{ws}/environment-templates",
+        {
+            "key": "retired-workspace",
+            "name": "Retired workspace",
+            "description": "Disabled: refuses new environments.",
+            "provider_id": local_template["provider_id"],
+            "config": local_template["config"],
         },
     )
-    model = await client.request(
-        "POST",
-        base + "/models",
-        expected=201,
-        json={
-            "key": "local-scripted",
-            "name": "Local UI development model",
-            "provider_id": provider["id"],
-            "upstream_model": "local-scripted",
-            "model_api": "openai.chat_completions",
-            "settings": {},
-        },
-    )
-    scenarios["model_ready"] = model["id"]
-    for state in ("disabled", "no_auth"):
-        alternate = await client.request(
-            "POST",
-            base + "/model-providers",
-            expected=201,
-            json={
-                "type": "openai",
-                "name": f"Local model provider · {state}",
-                "credential": {"api_key": "public-local-model-token"} if state == "disabled" else None,
-                "configuration": {"base_url": model_url, "auth_mode": "bearer" if state == "disabled" else "none"},
-                "enabled": state != "disabled",
-            },
-        )
-        scenarios[f"model_provider_{state}"] = alternate["id"]
-    disabled = await client.request(
-        "POST",
-        base + "/models",
-        expected=201,
-        json={
-            "key": "local-disabled",
-            "name": "Disabled local model",
-            "provider_id": provider["id"],
-            "upstream_model": "local-scripted",
-            "model_api": "openai.chat_completions",
-            "enabled": False,
-        },
-    )
-    scenarios["model_disabled"] = disabled["id"]
-    for provider_type in ("brave", "exa"):
-        web_provider = await client.request(
-            "POST",
-            base + "/web-providers",
-            expected=201,
-            json={
-                "type": provider_type,
-                "name": f"Local {provider_type.title()} (fictional credential)",
-                "credential": {"api_key": "public-local-web-token"},
-            },
-        )
-        scenarios[f"web_provider_{provider_type}"] = web_provider["id"]
-    provider = await local_provider(client, base)
-    root = settings.filesystem.root / "workspace"
-    workspace = await local_workspace(client, base, provider["id"], root, "Local review workspace")
-    publication_path = Path(workspace["root"]) / "published-review.md"
-    publication_path.write_bytes((FIXTURES / "brief.md").read_bytes())
-    scenarios["environment_shared"] = workspace["environment_id"]
-    scenarios["environment_template"] = workspace["template_id"]
-    assets, skills, agents, skill_keys, asset_checks = [], [], [], [], []
-    examples = asset_examples()
-    for index in range(64):
-        filename, media_type, content = examples[index % len(examples)]
-        asset = await client.request(
-            "POST",
-            base + "/assets",
-            expected=201,
-            params={"filename": f"{index + 1:02d} {filename}", "media_type": media_type},
-            content=content,
-            headers={"Content-Type": "application/octet-stream"},
-        )
-        assets.append(asset["id"])
-        asset_checks.append(
-            {
-                "id": asset["id"],
-                "media_type": media_type,
-                "size": len(content),
-                "sha256": hashlib.sha256(content).hexdigest(),
-            }
-        )
-        response = await client.http.get(f"/api/v1/assets/{asset['id']}/content")
-        if response.status_code != 200 or response.content != content:
-            raise RuntimeError(
-                f"Seed Asset content verification failed: HTTP {response.status_code}, expected {len(content)} bytes, received {len(response.content)}"
-            )
-        upload = await upload_skill(client, base, index + 1)
-        skill = await client.request(
-            "POST",
-            base + "/skills",
-            expected=201,
-            json={
-                "name": f"Local review {index + 1:02d}" if index % 3 else f"产品评审技能 {index + 1:02d}",
-                "source": {"kind": "zip_upload", "upload_id": upload["upload_id"]},
-            },
-        )
-        skills.append(skill["skill"]["id"])
-        skill_keys.append(skill["skill"]["key"])
-    upload = await upload_skill(client, base, 1, version=2)
-    published = await client.request(
-        "POST",
-        f"/api/v1/skills/{skills[0]}/revisions",
-        expected=201,
-        json={"expected_version": 1, "source": {"kind": "zip_upload", "upload_id": upload["upload_id"]}},
-    )
-    scenarios["skill_multiple_revisions"] = skills[0]
-    # Keep an older Revision as the default so the pointer visibly differs from the highest version.
-    head = await client.http.get(f"/api/v1/skills/{skills[0]}")
-    previous_revision_id = published["skill"]["default_revision_id"]
-    await client.request(
-        "POST",
-        f"/api/v1/skills/{skills[0]}/revisions/{previous_revision_id}/default",
-        headers={"If-Match": head.headers["etag"]},
-    )
-    for index in range(56):
-        name = AGENT_NAMES[index % len(AGENT_NAMES)] + (f" · {index + 1}" if index >= len(AGENT_NAMES) else "")
-        config = agent_config(name, skills=[{"skill_key": skill_keys[index], "version": 1}] if index % 4 != 3 else [])
-        created = await client.request(
-            "POST",
-            base + "/agents",
-            expected=201,
-            json={
-                "name": name,
-                "description": None
-                if index % 3 == 0
-                else ("Fictional development Agent. " * (30 if index % 3 == 1 else 1)),
-                "config": config,
-            },
-        )
-        agents.append(created["agent"]["id"])
-    config = {
-        **agent_config("Client review · waiting and feedback"),
-        "client_tools": [
-            {
-                "name": "local_review",
-                "description": "Ask the local client to supply a fictional review decision.",
-                "parameters_json_schema": {
-                    "type": "object",
-                    "properties": {"prompt": {"type": "string"}},
-                    "required": ["prompt"],
-                },
-            }
-        ],
-    }
-    created = await client.request(
-        "POST", base + "/agents", expected=201, json={"name": "Client review · waiting and feedback", "config": config}
-    )
-    scenarios["agent_client_tool"] = created["agent"]["id"]
-    return {
-        "assets": assets,
-        "skills": skills,
-        "agents": agents,
-        "environment_id": workspace["environment_id"],
-        "environment_provider_id": provider["id"],
-        "asset_checks": asset_checks,
-        "publication_path": str(publication_path),
-        "scenarios": scenarios,
-    }
+    api.patch(f"{ws}/environment-templates/{retired['id']}", retired, {"enabled": False})
 
 
-async def upload_skill(client: Client, base: str, number: int, *, version: int = 1) -> dict:
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as target:
-        target.writestr(
-            "SKILL.md",
-            (FIXTURES / "SKILL.md").read_text().replace("local-review", f"local-review-{number}")
-            + f"\nRevision {version}: fictional review criteria.\n",
-        )
-        if number % 2 == 0 or version > 1:
-            target.writestr(
-                "references/checklist.md", "# Review checklist\n\n- Navigation\n- Keyboard focus\n- Empty states\n"
-            )
-    return await client.request(
-        "POST",
-        base + "/skill-uploads",
-        expected=201,
-        content=archive.getvalue(),
-        headers={"Content-Type": "application/zip"},
+def seed_subscription(api: Api, ws: str, model_url: str) -> Json:
+    return api.post(
+        f"{ws}/subscriptions",
+        {
+            "name": "Release notifications",
+            "url": model_url.removesuffix("/v1") + "/webhooks",
+            "kinds": ["run.completed", "run.failed", "run.waiting"],
+        },
     )

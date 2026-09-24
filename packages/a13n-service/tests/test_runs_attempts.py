@@ -1,0 +1,481 @@
+"""Attempts: the worker loop, claims, lease renewal and takeover, checkpoint commits and usage ingestion."""
+
+import asyncio
+from collections.abc import Callable, Iterable
+from dataclasses import replace
+from datetime import timedelta
+
+import pytest
+from a13n_harness.usage import ModelUsageRecord, UsageRecord
+from a13n_service.infra.db import transaction
+from a13n_service.infra.errors import ServiceError
+from a13n_service.resources.models import service as models_service
+from a13n_service.runs import seal as seal_module
+from a13n_service.runs import worker as worker_module
+from a13n_service.runs.attempts import AttemptControl, Lease, LeaseLost, renew
+from a13n_service.runs.checkpoints import FORMAT
+from a13n_service.runs.claim import claim
+from a13n_service.runs.execute import execute
+from a13n_service.runs.runtime import Runtime
+from a13n_service.runs.schemas import Outcome
+from a13n_service.runs.seal import expire_leases, seal_attempt
+from a13n_service.runs.tables import AttemptRow, RunRow, UsageRecordRow
+from a13n_service.runs.usage import UsageBuffer, UsageReport, ingest_late
+from a13n_service.runs.worker import Worker
+from sqlalchemy import select, text, update
+
+pytestmark = pytest.mark.anyio
+
+LEASE = Lease(
+    run_id="run_test",
+    attempt_id="rat_test",
+    thread_id="thread_test",
+    organization_id="org_test",
+    workspace_id="ws_test",
+    number=1,
+    worker_id="worker-test",
+    token="token",
+)
+
+
+def _with_worker(runtime: Runtime, **worker: object) -> Runtime:
+    settings = runtime.settings
+    return replace(runtime, settings=settings.model_copy(update={"worker": settings.worker.model_copy(update=worker)}))
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    async with asyncio.timeout(10):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+async def test_a_claim_failure_keeps_the_worker_and_its_running_attempts(runtime, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Renewal is not due within the test, so only the claim loop is exercised.
+    runtime = _with_worker(runtime, scan_seconds=0.01, authority_seconds=5)
+    claims = 0
+
+    async def flaky_claim(*args, **kwargs) -> list[Lease]:  # type: ignore[no-untyped-def]
+        nonlocal claims
+        claims += 1
+        if claims == 2:
+            raise ConnectionError("database restarted")
+        return [LEASE] if claims == 1 else []
+
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def attempt(runtime, lease, control) -> None:  # type: ignore[no-untyped-def]
+        started.set()
+        await finish.wait()
+
+    monkeypatch.setattr(worker_module, "claim", flaky_claim)
+    worker = Worker(runtime, attempt)
+    loop = asyncio.create_task(worker.run())
+    await started.wait()
+    await _until(lambda: claims >= 4)
+    assert not loop.done() and LEASE.attempt_id in worker.running
+
+    finish.set()
+    await _until(lambda: not worker.running)
+    loop.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await loop
+
+
+async def test_a_renewal_that_never_answers_stops_the_attempt(runtime, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    runtime = _with_worker(runtime, lease_seconds=3, authority_seconds=0.05, scan_seconds=5)
+
+    async def hanging_renew(*args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        await asyncio.Event().wait()
+
+    unclaimed = [LEASE]
+
+    async def claim_once(*args, **kwargs) -> list[Lease]:  # type: ignore[no-untyped-def]
+        return [unclaimed.pop()] if unclaimed else []
+
+    stopped = asyncio.Event()
+
+    async def attempt(runtime, lease, control) -> None:  # type: ignore[no-untyped-def]
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.set()
+            raise
+
+    monkeypatch.setattr(worker_module, "claim", claim_once)
+    monkeypatch.setattr(worker_module, "renew", hanging_renew)
+    worker = Worker(runtime, attempt)
+    loop = asyncio.create_task(worker.run())
+    # The lease can no longer be renewed in time once a third of it is left: the attempt stops then.
+    async with asyncio.timeout(5):
+        await stopped.wait()
+    await _until(lambda: not worker.running)
+    loop.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await loop
+
+
+async def test_no_call_is_sent_once_the_lease_missed_its_renewal(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
+    agent = await runs_kit.create_agent(service, scripted_model)
+    run_id = (await runs_kit.start_thread(service, agent, "hi"))["run"]["id"]
+    scripted_model.say("never sent")
+    (lease,) = await claim(service.runtime, worker_id="worker-test", worker_build="test", limit=1)
+    # Long enough for checkpoint writes, shorter than the renewal margin: the last renewal was missed.
+    control = AttemptControl(deadline=asyncio.get_running_loop().time() + 7, renewal_margin=10)
+
+    with pytest.raises(LeaseLost):
+        await execute(service.runtime, lease, control)
+    assert scripted_model.requests.empty()
+    # The attempt left the run to lease expiry and recovery.
+    assert (await runs_kit.get_run(service, run_id))["status"] == "running"
+
+
+async def test_two_workers_claim_a_run_once(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
+    agent = await runs_kit.create_agent(service, scripted_model)
+    run_id = (await runs_kit.start_thread(service, agent, "hi"))["run"]["id"]
+    claimed = await asyncio.gather(
+        *(claim(service.runtime, worker_id=f"worker-{n}", worker_build="test", limit=4) for n in range(2))
+    )
+    assert [lease.run_id for leases in claimed for lease in leases] == [run_id]
+    attempts = (await service.client.get(f"{service.workspace}/runs/{run_id}/attempts")).json()["items"]
+    assert [item["status"] for item in attempts] == ["leased"]
+
+
+async def test_claim_leaves_newer_checkpoints_and_fails_older_ones(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
+    agent = await runs_kit.create_agent(service, scripted_model)
+    newer = (await runs_kit.start_thread(service, agent, "newer"))["run"]["id"]
+    older = (await runs_kit.start_thread(service, agent, "older"))["run"]["id"]
+    pointer = {"digest": "0" * 64, "size": 1}
+    async with transaction(service.runtime.storage) as session:
+        for run_id, format in ((newer, FORMAT + 1), (older, FORMAT - 1)):
+            await session.execute(
+                update(RunRow)
+                .where(RunRow.id == run_id)
+                .values(
+                    checkpoint={**pointer, "format": format, "seq": 1, "attempt": 1},
+                    display={**pointer, "format": format, "position": {"attempt": 1, "sequence": 1}},
+                )
+            )
+        # The newer one is due first, so filtering after the claim's limit would find nothing to claim.
+        await session.execute(
+            update(RunRow).where(RunRow.id == newer).values(available_at=RunRow.created_at - timedelta(seconds=1))
+        )
+
+    (lease,) = await claim(service.runtime, worker_id="worker-test", worker_build="test", limit=1)
+    assert lease.run_id == older
+    await execute(service.runtime, lease, AttemptControl())
+    failed = await runs_kit.get_run(service, older)
+    assert failed["status"] == "failed" and failed["failure"]["code"] == "checkpoint_incompatible", failed
+    assert (await runs_kit.get_run(service, newer))["status"] == "accepted"
+
+
+async def test_a_successor_waits_for_a_worker_that_reads_its_parents_checkpoint(
+    service, scripted_model, runs_kit
+) -> None:  # type: ignore[no-untyped-def]
+    agent = await runs_kit.create_agent(service, scripted_model)
+    submitted = await runs_kit.start_thread(service, agent, "first")
+    parent_id = submitted["run"]["id"]
+    scripted_model.say("Done")
+    await (await runs_kit.attempt(service))
+    second = await runs_kit.submit(service, submitted["thread"]["id"], runs_kit.message(agent, "second"))
+    successor = second.json()["run"]
+    assert successor["parent_run_id"] == parent_id, second.text
+
+    async def rewrite_parent(checkpoint: dict) -> None:
+        """As a newer worker would have committed it; a sealed run's checkpoint is otherwise immutable."""
+        async with transaction(service.runtime.storage) as session:
+            await session.execute(text("SET LOCAL session_replication_role = replica"))
+            await session.execute(update(RunRow).where(RunRow.id == parent_id).values(checkpoint=checkpoint))
+
+    # The successor has no checkpoint of its own yet: its parent's format decides who may claim it.
+    async with transaction(service.runtime.storage) as session:
+        committed = (await session.get_one(RunRow, parent_id)).checkpoint
+    await rewrite_parent({**committed, "format": FORMAT + 1})
+    assert await claim(service.runtime, worker_id="worker-test", worker_build="test", limit=1) == []
+    await rewrite_parent(committed)
+    (lease,) = await claim(service.runtime, worker_id="worker-test", worker_build="test", limit=1)
+    assert lease.run_id == successor["id"]
+
+
+async def test_a_cancelled_attempt_still_records_its_usage(service, scripted_model, runs_kit, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An inline child's charges wait for its parent's next boundary; cancelling the attempt records them anyway,
+    as the supervisor and shutdown do."""
+    charged: set[str] = set()
+    both = asyncio.Event()
+    add = UsageBuffer.add
+
+    def watched(buffer: UsageBuffer, records: Iterable[UsageRecord]) -> None:
+        records = list(records)
+        add(buffer, records)
+        charged.update(record.record_id for record in records if isinstance(record, ModelUsageRecord))
+        if len(charged) >= 2:
+            both.set()
+
+    monkeypatch.setattr(UsageBuffer, "add", watched)
+    worker = {"toolsets": {"configuration": {"enabled": True}}}
+    agent = await runs_kit.delegating(service, scripted_model, "inline", worker=worker)
+    gate = asyncio.Event()
+    scripted_model.call(
+        "delegate", {"subagent": "helper", "prompt": "compute"}, call_id="call_d", to="Role: coordinator"
+    )
+    scripted_model.call("find_resources", {"kind": "model"}, call_id="call_w", to="Role: worker")
+    scripted_model.say("42", gate=gate, to="Role: worker")
+    run_id = (await runs_kit.start_thread(service, agent, "ask the helper"))["run"]["id"]
+    running = await runs_kit.attempt(service)
+    async with asyncio.timeout(10):
+        await both.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    gate.set()
+    async with transaction(service.runtime.storage) as session:
+        records = (await session.scalars(select(UsageRecordRow).where(UsageRecordRow.run_id == run_id))).all()
+    assert {record.record["record_id"] for record in records} == charged
+
+
+async def test_a_stale_attempt_changes_nothing_after_a_takeover(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
+    runtime = service.runtime
+    agent = await runs_kit.create_agent(service, scripted_model)
+    run_id = (await runs_kit.start_thread(service, agent, "hi"))["run"]["id"]
+    (stale,) = await claim(runtime, worker_id="worker-stale", worker_build="test", limit=1)
+    async with transaction(runtime.storage) as session:
+        await session.execute(
+            update(AttemptRow).where(AttemptRow.run_id == run_id).values(lease_expires_at=AttemptRow.created_at)
+        )
+    await expire_leases(runtime, batch=10)
+    async with transaction(runtime.storage) as session:
+        await session.execute(update(RunRow).where(RunRow.id == run_id).values(available_at=RunRow.created_at))
+    (current,) = await claim(runtime, worker_id="worker-current", worker_build="test", limit=1)
+
+    with pytest.raises(LeaseLost):
+        await seal_attempt(runtime, stale, Outcome.cancelled())
+    with pytest.raises(LeaseLost):
+        await renew(runtime.storage, runtime.access, stale, seconds=30)
+    assert await renew(runtime.storage, runtime.access, current, seconds=30) is None
+    run = await runs_kit.get_run(service, run_id)
+    assert run["status"] == "running" and run["attempts"] == 2
+    attempts = (await service.client.get(f"{service.workspace}/runs/{run_id}/attempts")).json()["items"]
+    assert [(item["status"], item["start_reason"]) for item in attempts] == [
+        ("failed", "initial"),
+        ("leased", "recovery"),
+    ]
+
+
+async def test_the_lease_expiry_sweep_passes_a_run_it_cannot_recover(
+    service, scripted_model, runs_kit, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    await runs_kit.pause_sweeps(service)
+    agent = await runs_kit.create_agent(service, scripted_model)
+    failing, recovered = [(await runs_kit.start_thread(service, agent, text))["run"]["id"] for text in ("one", "two")]
+    assert len(await claim(service.runtime, worker_id="worker-test", worker_build="test", limit=2)) == 2
+    async with transaction(service.runtime.storage) as session:
+        for run_id, expired in ((failing, timedelta(minutes=2)), (recovered, timedelta(minutes=1))):
+            await session.execute(
+                update(AttemptRow)
+                .where(AttemptRow.run_id == run_id)
+                .values(lease_expires_at=AttemptRow.created_at - expired)
+            )
+    recover = seal_module.recover
+
+    async def recover_all_but_one(session, runtime, thread, run, attempt, **fields) -> None:  # type: ignore[no-untyped-def]
+        if run.id == failing:
+            raise RuntimeError("cannot recover")
+        await recover(session, runtime, thread, run, attempt, **fields)
+
+    monkeypatch.setattr(seal_module, "recover", recover_all_but_one)
+    # The sweep visits the longest-expired lease first.
+    await expire_leases(service.runtime, batch=10)
+    assert (await runs_kit.get_run(service, failing))["status"] == "running"
+    assert (await runs_kit.get_run(service, recovered))["status"] == "accepted"
+
+
+class _UndeletableObjects:
+    """An object store whose deletions fail, as they do while the store is briefly unavailable."""
+
+    def __init__(self, objects) -> None:  # type: ignore[no-untyped-def]
+        self.objects = objects
+
+    async def put(self, key: str, data: bytes, *, content_type: str):  # type: ignore[no-untyped-def]
+        return await self.objects.put(key, data, content_type=content_type)
+
+    async def get(self, key: str) -> bytes | None:
+        return await self.objects.get(key)
+
+    async def keys(self, prefix: str, *, limit: int) -> list[str]:
+        return await self.objects.keys(prefix, limit=limit)
+
+    async def delete(self, key: str) -> None:
+        raise ServiceError("unavailable", "Object store unavailable")
+
+
+async def test_a_failed_cleanup_of_replaced_objects_costs_no_attempt(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
+    agent = await runs_kit.create_agent(service, scripted_model)
+    run_id = (await runs_kit.start_thread(service, agent, "hi"))["run"]["id"]
+    scripted_model.say("Done")
+    runtime = replace(service.runtime, objects=_UndeletableObjects(service.runtime.objects))
+    await (await runs_kit.attempt(service, runtime=runtime))
+    run = await runs_kit.get_run(service, run_id)
+    assert run["status"] == "completed" and run["attempts"] == 1, run
+
+
+async def test_a_usage_record_reported_again_with_other_content_is_skipped(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
+    agent = await runs_kit.create_agent(service, scripted_model)
+    run_id = (await runs_kit.start_thread(service, agent, "hi"))["run"]["id"]
+    scripted_model.say("Done")
+    await (await runs_kit.attempt(service))
+    async with transaction(service.runtime.storage) as session:
+        stored = (await session.scalars(select(UsageRecordRow).where(UsageRecordRow.run_id == run_id))).one()
+        digest, model_id = stored.digest, stored.model_id
+
+    # The same record ID now claims no model: the stored fact stays, and reporting it again does not fail.
+    conflicting = UsageReport(ModelUsageRecord.model_validate(stored.record))
+    await ingest_late(service.runtime.storage, run_id, stored.run_attempt_id, [conflicting])
+    async with transaction(service.runtime.storage) as session:
+        kept = (await session.scalars(select(UsageRecordRow).where(UsageRecordRow.run_id == run_id))).one()
+    assert (kept.digest, kept.model_id) == (digest, model_id) and model_id is not None
+
+
+async def _released(service, run_id: str) -> list[dict]:  # type: ignore[no-untyped-def]
+    """The run's attempts, after its only attempt ended without sealing it."""
+    run = await service.client.get(f"{service.workspace}/runs/{run_id}")
+    assert run.json()["status"] == "accepted", run.text
+    return (await service.client.get(f"{service.workspace}/runs/{run_id}/attempts")).json()["items"]
+
+
+async def test_an_unavailable_dependency_ends_a_tool_calls_attempt(
+    service, scripted_model, runs_kit, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """An outage is not the tool call's failure for the model to read: the attempt ends, and a later one retries."""
+    await runs_kit.pause_sweeps(service)
+    agent = await runs_kit.create_agent(service, scripted_model, toolsets={"configuration": {"enabled": True}})
+    scripted_model.call("find_resources", {"kind": "model"}, call_id="call_find")
+    run_id = (await runs_kit.start_thread(service, agent, "look around"))["run"]["id"]
+
+    async def unavailable(*args: object, **kwargs: object) -> None:
+        raise ServiceError("unavailable", "The database is unavailable")
+
+    monkeypatch.setattr(models_service, "list_models", unavailable)
+    await (await runs_kit.attempt(service))
+
+    attempts = await _released(service, run_id)
+    assert [(item["status"], item["failure"]["code"]) for item in attempts] == [("failed", "attempt_failed")]
+    await scripted_model.request()
+    assert scripted_model.requests.empty()
+
+
+async def test_url_input_that_cannot_be_reached_is_fetched_by_a_later_attempt(
+    service, scripted_model, runs_kit
+) -> None:  # type: ignore[no-untyped-def]
+    await runs_kit.pause_sweeps(service)
+    agent = await runs_kit.create_agent(service, scripted_model)
+    offline = {"agent_id": agent["id"], "payload": {"content": [{"type": "url", "url": "http://127.0.0.1:9/page"}]}}
+    response = await service.client.post(f"{service.workspace}/threads", json=offline, headers=runs_kit.fresh_key())
+    assert response.status_code == 201, response.text
+    run_id = response.json()["run"]["id"]
+    await (await runs_kit.attempt(service))
+
+    # A network error is transient: the entry stays with its run for the next attempt, which fetches it again.
+    attempts = await _released(service, run_id)
+    assert [(item["status"], item["failure"]["code"]) for item in attempts] == [("failed", "attempt_failed")]
+    (entry,) = await runs_kit.inbox(service, response.json()["thread"]["id"])
+    assert (entry["status"], entry["assigned_run_id"]) == ("assigned", run_id), entry
+    assert scripted_model.requests.empty()
+
+
+async def test_takeover_keeps_external_answer_without_replaying_local_approval(
+    service, scripted_model, runs_kit, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    import json
+
+    from a13n_service.runs.boundaries import Boundaries
+
+    await runs_kit.pause_sweeps(service)
+    model_id = await runs_kit.create_model(service, scripted_model)
+    agent = await runs_kit.add_agent(
+        service,
+        "mixed",
+        model_id,
+        client_tools=[{"name": "lookup", "description": "External fact", "parameters_json_schema": {"type": "object"}}],
+        toolsets={"configuration": {"enabled": True}},
+    )
+    config = {"model": {"model_id": model_id}}
+    calls = [
+        ("create_agent", {"key": "created", "name": "Created", "config": config}, "call_create"),
+        ("lookup", {}, "call_lookup"),
+    ]
+    scripted_model._script(
+        {
+            "deltas": [
+                {
+                    "tool_calls": [
+                        {
+                            "index": index,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(args)},
+                        }
+                        for index, (name, args, call_id) in enumerate(calls)
+                    ]
+                }
+            ],
+            "interval": 0,
+            "finish": "tool_calls",
+            "gate": None,
+            "to": None,
+        }
+    )
+    first = await runs_kit.start_thread(service, agent, "change and look up")
+    await (await runs_kit.attempt(service))
+    waiting = await runs_kit.get_run(service, first["run"]["id"])
+    assert waiting["status"] == "waiting", waiting
+    response = await service.client.post(
+        f"{service.workspace}/runs/{waiting['id']}/resume",
+        json={
+            "answers": [
+                {"tool_call_id": "call_create", "action": "approve"},
+                {"tool_call_id": "call_lookup", "action": "complete", "result": {"fact": "accepted once"}},
+            ]
+        },
+        headers=runs_kit.fresh_key(),
+    )
+    assert response.status_code == 201, response.text
+    run_id = response.json()["id"]
+    committed = asyncio.Event()
+    before = Boundaries.before_tool_execute
+
+    async def stop_after_commit(self, ctx, *, call, tool_def, args):
+        args = await before(self, ctx, call=call, tool_def=tool_def, args=args)
+        if call.tool_call_id == "call_create":
+            committed.set()
+            await asyncio.Event().wait()
+        return args
+
+    monkeypatch.setattr(Boundaries, "before_tool_execute", stop_after_commit)
+    running = await runs_kit.attempt(service)
+    try:
+        async with asyncio.timeout(10):
+            await committed.wait()
+    finally:
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    monkeypatch.setattr(Boundaries, "before_tool_execute", before)
+    async with transaction(service.runtime.storage) as session:
+        run = await session.get_one(RunRow, run_id)
+        assert run.checkpoint is not None and run.resume is not None
+        await session.execute(
+            update(AttemptRow).where(AttemptRow.run_id == run_id).values(lease_expires_at=AttemptRow.created_at)
+        )
+    await expire_leases(service.runtime, batch=10)
+    async with transaction(service.runtime.storage) as session:
+        await session.execute(update(RunRow).where(RunRow.id == run_id).values(available_at=RunRow.created_at))
+    scripted_model.say("Recovered the known fact")
+    await (await runs_kit.attempt(service))
+    result = await runs_kit.get_run(service, run_id)
+    assert result["status"] == "completed" and result["attempts"] == 2, result
+    assert (await service.client.get(f"{service.workspace}/agents/created")).status_code == 404
+    await scripted_model.request()
+    resumed = await scripted_model.request()
+    returns = [message for message in resumed["messages"] if message["role"] == "tool"]
+    external = [message for message in returns if message["tool_call_id"] == "call_lookup"]
+    assert len(external) == 1 and "accepted once" in external[0]["content"]
+    assert len([message for message in returns if message["tool_call_id"] == "call_create"]) == 1

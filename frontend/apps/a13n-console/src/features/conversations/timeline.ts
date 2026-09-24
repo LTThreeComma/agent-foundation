@@ -94,7 +94,7 @@ export interface EventEntry extends EntryBase {
   /** Only a scheduled model retry reports a budget and a delay. */
   maxAttempts: number | null;
   delaySeconds: number | null;
-  occurredAt: string;
+  occurredAt: string | null;
 }
 
 export interface OtherEntry extends EntryBase {
@@ -139,7 +139,7 @@ export function runTimeline({
   execution,
   coverage,
 }: {
-  run: Schema["RunResource"];
+  run: Schema["RunView"];
   items: readonly PresentedItem[];
   execution: Execution;
   coverage: ExecutionCoverage;
@@ -442,7 +442,7 @@ function editDiff(filePath: string, before: string, after: string) {
  * because it is the same step it specializes.
  */
 function runTotals(
-  run: Schema["RunResource"],
+  run: Schema["RunView"],
   execution: Execution,
   coverage: ExecutionCoverage,
 ): RunTotals {
@@ -465,6 +465,6 @@ function runTotals(
       coverage === "complete" &&
       records.length > 0 &&
       reported === records.length,
-    durationMs: duration(run.started_at ?? run.created_at, run.completed_at),
+    durationMs: duration(run.started_at ?? run.created_at, run.sealed_at),
   };
 }

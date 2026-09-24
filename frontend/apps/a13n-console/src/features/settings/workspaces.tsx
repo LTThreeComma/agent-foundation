@@ -1,5 +1,5 @@
 import { MenuItem } from "a13n-ui";
-import { StackIcon, TrashIcon } from "@phosphor-icons/react";
+import { ArchiveIcon, StackIcon } from "@phosphor-icons/react";
 import type { ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
@@ -31,17 +31,19 @@ export function Workspaces() {
             items={workspaces}
             caption={t("Workspaces")}
             rowMenuLabel={t("Workspace actions")}
-            rowMenu={(item) => (
-              <DeleteWorkspace
-                workspace={item}
-                triggerElement={
-                  <MenuItem closeOnClick={false} variant="destructive">
-                    <TrashIcon size={14} />
-                    {t("Delete")}
-                  </MenuItem>
-                }
-              />
-            )}
+            rowMenu={(item) =>
+              item.archived_at ? null : (
+                <DeleteWorkspace
+                  workspace={item}
+                  triggerElement={
+                    <MenuItem closeOnClick={false} variant="destructive">
+                      <ArchiveIcon size={14} />
+                      {t("Archive")}
+                    </MenuItem>
+                  }
+                />
+              )
+            }
             columns={[
               {
                 label: t("Workspace"),
@@ -83,8 +85,9 @@ export function Workspaces() {
 }
 
 /**
- * Deleting a workspace is only safe from the version the reader saw, so the
- * current representation is read again before the request carries its ETag.
+ * Archiving a workspace leaves it read-only for good, so it is only safe from
+ * the version the reader saw: the current representation is read again
+ * before the request carries its ETag.
  */
 export function DeleteWorkspace({
   workspace,
@@ -100,28 +103,26 @@ export function DeleteWorkspace({
   return (
     <Confirm
       subject={workspace.name}
-      title={t("Delete workspace")}
-      description={t(
-        "This removes the workspace and revokes its access. This cannot be undone.",
-      )}
-      trigger={t("Delete workspace")}
+      title={t("Archive workspace")}
+      description={t("The workspace becomes read-only. This cannot be undone.")}
+      trigger={t("Archive workspace")}
       triggerElement={triggerElement}
       triggerVariant="outline"
       danger
       onSuccess={onSuccess}
       action={async () => {
         const latest = representation(
-          await client.http.GET("/api/v1/workspaces/{workspace}", {
-            params: { path: { workspace: workspace.id } },
+          await client.http.GET("/api/v1/workspaces/{workspace_id}", {
+            params: { path: { workspace_id: workspace.id } },
           }),
         );
         if (latest.value.updated_at !== workspace.updated_at || !latest.etag)
           throw new Error(
-            t("This workspace changed. Reload before deleting it."),
+            t("This workspace changed. Reload before archiving it."),
           );
-        await client.http.DELETE("/api/v1/workspaces/{workspace}", {
+        await client.http.POST("/api/v1/workspaces/{workspace_id}/archive", {
           params: {
-            path: { workspace: workspace.id },
+            path: { workspace_id: workspace.id },
             header: { "If-Match": latest.etag },
           },
         });

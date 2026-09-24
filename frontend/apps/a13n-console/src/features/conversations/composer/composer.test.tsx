@@ -80,7 +80,7 @@ it("retains message and attachment drafts when closing the attachment dialog", a
   await user.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
   expect(submit.mock.calls[0]![0].content).toContainEqual({
-    type: "binary",
-    source: { type: "url", url: "https://example.com/report.pdf" },
+    type: "url",
+    url: "https://example.com/report.pdf",
   });
 });

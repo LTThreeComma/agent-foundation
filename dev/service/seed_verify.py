@@ -1,216 +1,247 @@
-"""Verify retained coverage before a reset can be reported as successful."""
+"""Read the seeded state back through the API; each check names what the Console should show."""
 
-from collections import Counter
-from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, datetime
+from __future__ import annotations
 
-import anyio
+import hashlib
+import re
+from collections.abc import Iterator
 
-from .seed_client import Client
+from dev.service.api import Api, Json
+from dev.service.seed import Seeded
+from dev.service.seed_assets import examples
+from dev.service.seed_conversations import NATIVE, PLACED
+from dev.service.seed_identity import MEMBERS
+from dev.service.seed_providers import KINDS
+from dev.service.seed_resources import SKILLS
 
-
-async def _parallel[Item, Result](items: Sequence[Item], action: Callable[[Item], Awaitable[Result]]) -> list[Result]:
-    limiter = anyio.CapacityLimiter(8)
-    results: dict[int, Result] = {}
-
-    async def collect(index: int, item: Item) -> None:
-        async with limiter:
-            results[index] = await action(item)
-
-    async with anyio.create_task_group() as tasks:
-        for index, item in enumerate(items):
-            tasks.start_soon(collect, index, item)
-    return [results[index] for index in range(len(items))]
-
-
-async def verify(client: Client, manifest: dict) -> dict:
-    base = f"/api/v1/workspaces/{manifest['workspace_id']}"
-    counts = {}
-    sessions = []
-    web_providers = []
-    for resource in (
-        "agents",
-        "skills",
-        "assets",
-        "sessions",
-        "models",
-        "model-providers",
-        "web-providers",
-        "environments",
-        "environment-templates",
-        "environment-providers",
-        "connections",
-        "connector-providers",
-        "application-accounts",
-        "service-accounts",
-    ):
-        params = {"limit": 7}
-        if resource == "agents":
-            params["include_archived"] = True
-        values = await client.collection(base + "/" + resource, params=params)
-        if len({item["id"] for item in values}) != len(values):
-            raise RuntimeError(f"Pagination duplicated {resource} entries")
-        counts[resource] = len(values)
-        if resource in {"agents", "skills", "assets"} and len(values) <= 50:
-            raise RuntimeError(f"The {resource} fixture no longer exercises the default page boundary")
-        if resource == "sessions":
-            sessions = values
-        elif resource == "web-providers":
-            web_providers = values
-    if counts["sessions"] != manifest["session_count"]:
-        raise RuntimeError("Session count changed during seed verification")
-    if {item["type"] for item in web_providers} != {"brave", "exa"} or any(
-        not item["enabled"] or not item["credential_configured"] for item in web_providers
-    ):
-        raise RuntimeError("Built-in Web Provider fixtures are not selectable")
-    for provider_type in ("brave", "exa"):
-        if not any(
-            item["id"] == manifest["scenarios"]["resources"][f"web_provider_{provider_type}"]
-            and item["type"] == provider_type
-            for item in web_providers
-        ):
-            raise RuntimeError(f"Seeded {provider_type} Web Provider is missing")
-
-    async def session_threads(session: dict) -> list[dict]:
-        threads = await client.collection(f"/api/v1/sessions/{session['id']}/threads")
-        if any(thread["session_id"] != session["id"] for thread in threads):
-            raise RuntimeError("Thread belongs to the wrong Session")
-        return threads
-
-    all_threads = [thread for group in await _parallel(sessions, session_threads) for thread in group]
-    all_runs = await client.collection(base + "/runs", params={"limit": 200})
-    threads_by_id = {thread["id"]: thread for thread in all_threads}
-    if len(threads_by_id) != len(all_threads) or len({run["id"] for run in all_runs}) != len(all_runs):
-        raise RuntimeError("Pagination duplicated Thread or Run entries")
-    if any(
-        run["thread_id"] not in threads_by_id or run["session_id"] != threads_by_id[run["thread_id"]]["session_id"]
-        for run in all_runs
-    ):
-        raise RuntimeError("Run belongs to an unexpected Thread or Session")
-    statuses = Counter(item["status"] for item in all_runs)
-    if not {"completed", "failed", "waiting", "cancelled"}.issubset(statuses):
-        raise RuntimeError("Required persisted Run outcomes are missing")
-    if any(item["status"] in {"accepted", "running"} or not item["sealed_at"] for item in all_runs):
-        raise RuntimeError("Seed left an active or unsealed Run")
-    long_runs = [item for item in all_runs if item["thread_id"] == manifest["long_thread_id"]]
-    if len(long_runs) < 13:
-        raise RuntimeError("The long conversation lost its real continuations")
-
-    async def retained_items(retained: dict) -> list[dict] | None:
-        path = f"/api/v1/runs/{retained['id']}/items"
-        for attempt in range(100):
-            response = await client.http.get(path, params={"limit": 100})
-            if response.status_code == 200:
-                page = response.json()
-                items = page["items"]
-                if page.get("next_cursor") is not None:
-                    items.extend(await client.collection(path, params={"limit": 100, "cursor": page["next_cursor"]}))
-                return items
-            if response.status_code != 409:
-                raise RuntimeError(f"Retained transcript verification failed: HTTP {response.status_code}")
-            if retained["status"] not in {"completed", "waiting"}:
-                return None
-            if attempt == 99:
-                raise RuntimeError(
-                    f"Retained transcript missing for {retained['id']} ({retained['status']}); "
-                    f"scenarios: {[name for group in manifest['scenarios'].values() for name, value in group.items() if value == retained['id']]}"
-                )
-            await anyio.sleep(0.1)
-        raise RuntimeError("Retained transcript verification exhausted its retry bound")
-
-    item_kinds = Counter()
-    unavailable = []
-    for retained, items in zip(all_runs, await _parallel(all_runs, retained_items), strict=True):
-        if items is None:
-            unavailable.append(retained["id"])
-        else:
-            item_kinds.update(item["kind"] for item in items)
-    by_id = {item["id"]: item for item in all_runs}
-    scenes = manifest["scenarios"]["conversations"]
-    expected = {
-        "failed_run": "failed",
-        "failed_retry": "failed",
-        "waiting_for_client": "waiting",
-        "feedback_completed": "completed",
-        "interrupted_run": "cancelled",
-        "interrupted_with_queue": "cancelled",
-        "interrupted_retry_completed": "completed",
-        "structured_output": "completed",
-        "malformed_output_failure": "failed",
-    }
-    for name, status in expected.items():
-        if by_id[scenes[name]]["status"] != status:
-            raise RuntimeError(f"Retained scenario {name} has an unexpected outcome")
-    if by_id[scenes["failed_retry"]]["retry_of_run_id"] != scenes["failed_run"]:
-        raise RuntimeError("Retry lineage is missing")
-    if by_id[scenes["feedback_completed"]]["parent_run_id"] != scenes["feedback_source"]:
-        raise RuntimeError("Feedback lineage is missing")
-    first_agent = manifest["agent_ids"][0]
-    agent = await client.request("GET", f"{base}/agents/{first_agent}")
-    if not any(
-        item["agent_id"] == first_agent and item["agent_revision_id"] != agent["default_revision_id"]
-        for item in all_runs
-    ):
-        raise RuntimeError("Historical runs no longer preserve their original Agent revisions")
-    expired = await client.request("GET", f"/api/v1/api-keys/{manifest['scenarios']['identity']['api_key_expired']}")
-    if datetime.fromisoformat(expired["expires_at"]) >= datetime.now(UTC):
-        raise RuntimeError("The naturally expired API key is not expired yet")
-    with client.scope(manifest["empty_workspace_id"]):
-        empty = f"/api/v1/workspaces/{manifest['empty_workspace_id']}"
-        for resource in ("agents", "skills", "assets", "sessions", "environments"):
-            if await client.collection(empty + "/" + resource):
-                raise RuntimeError(f"Empty workspace unexpectedly contains {resource}")
-    audit = await client.collection(base + "/security-audit-events")
-    if not audit:
-        raise RuntimeError("Normal management operations did not produce audit history")
-    return {
-        "resource_counts": counts,
-        "retained_item_kinds": dict(sorted(item_kinds.items())),
-        "unavailable_transcript_runs": unavailable,
-        "run_statuses": dict(sorted(statuses.items())),
-        "thread_origins": dict(sorted(Counter(item["origin_kind"] for item in all_threads).items())),
-        "run_count": len(all_runs),
-        "thread_count": len(all_threads),
-        "long_conversation_runs": len(long_runs),
-        "security_audit_events": len(audit),
-        "verified_at": datetime.now(UTC).isoformat(),
-    }
+type Check = tuple[str, bool]
+# The Console lists 30 agents per page.
+AGENT_PAGE = 30
+DELIVERIES = ("native_files", "inline_files", "placed_files")
+# The heading of the text that delivers an inline or placed attachment.
+ATTACHMENT = re.compile(r'Attachment "(.+?)" \(')
 
 
-def report(manifest: dict) -> str:
-    coverage = manifest["coverage"]
-    lines = [
-        "# Local seed coverage",
-        "",
-        "All content and identities are fictional. Verification completed through the Service API.",
-        "",
-        f"Bulk Sessions use {len(manifest['bulk_environments'])} isolated execution slots; paths are recorded in seed.json.",
-        "",
-        "## Retained resources",
-        "",
-        "| Resource | Count |",
-        "| --- | ---: |",
+def verify(api: Api, seeded: Seeded) -> list[Check]:
+    org, ws, index = seeded.organization, seeded.workspace, seeded.index
+    return [
+        *_identity(api, org, ws, index),
+        *_providers(api, org, ws),
+        *_resources(api, org, ws, index),
+        *_execution(api, ws, index),
     ]
-    lines.extend(f"| {name} | {count} |" for name, count in coverage["resource_counts"].items())
-    lines.extend(["", "## Run outcomes", "", "| Outcome | Count |", "| --- | ---: |"])
-    lines.extend(f"| {name} | {count} |" for name, count in coverage["run_statuses"].items())
-    lines.extend(["", "## Retained transcript content", "", "| Item kind | Count |", "| --- | ---: |"])
-    lines.extend(f"| {name} | {count} |" for name, count in coverage["retained_item_kinds"].items())
-    if coverage["unavailable_transcript_runs"]:
-        lines.extend(["", "Failed or cancelled Runs without retained Items (unavailable-transcript UI):", ""])
-        lines.extend(f"- `{identifier}`" for identifier in coverage["unavailable_transcript_runs"])
-    lines.extend(["", "## Scenario index", "", "| Area | Scenario | Resource |", "| --- | --- | --- |"])
-    for area, scenarios in manifest["scenarios"].items():
-        for name, identifier in scenarios.items():
-            if isinstance(identifier, dict):
-                identifier = identifier["user_id"]
-            lines.append(f"| {area} | {name.replace('_', ' ')} | `{identifier}` |")
-    lines.extend(
-        [
-            "",
-            "Waiting client-tool requests and queued inputs are intentionally retained. No Run remains accepted or running.",
-            "Dates and identifiers are produced normally; no terminal status or timestamp is patched into storage.",
-            "",
-        ]
+
+
+def _identity(api: Api, org: str, ws: str, index: dict[str, str]) -> Iterator[Check]:
+    roles = {grant["principal"]["email"]: grant["role"] for grant in api.items(f"{ws}/grants")}
+    yield (
+        "Members hold builder, runner and viewer grants",
+        all(roles.get(email) == role for role, (email, _) in MEMBERS.items()),
     )
-    return "\n".join(lines)
+    invitations = {item["id"]: item for item in api.items(f"{ws}/invitations")}
+    pending = invitations[index["invitation_pending"]]
+    yield "One invitation is pending", (pending["accepted_at"], pending["revoked_at"]) == (None, None)
+    keys = {key["id"]: key for key in api.items("/api/v1/users/me/keys")}
+    yield (
+        "API keys: active, expiring and revoked",
+        keys[index["api_key_active"]]["revoked_at"] is None
+        and keys[index["api_key_expiring"]]["expires_at"] is not None
+        and keys[index["api_key_revoked"]]["revoked_at"] is not None,
+    )
+    accounts = {account["id"]: account["status"] for account in api.items(f"{ws}/service-accounts")}
+    yield (
+        "Service accounts: one active, one disabled",
+        [accounts[index["service_account_active"]], accounts[index["service_account_disabled"]]]
+        == ["active", "disabled"],
+    )
+    workspaces = {workspace["id"]: workspace for workspace in api.items("/api/v1/workspaces")}
+    yield (
+        "Workspaces: this one, an empty one and an archived one",
+        len(workspaces) == 3
+        and workspaces[index["archived_workspace"]]["archived_at"] is not None
+        and not api.items(f"/api/v1/workspaces/{index['empty_workspace']}/agents"),
+    )
+    yield (
+        "The organization, workspace and administrator have images",
+        all(api.get(path)["image_url"] for path in (org, ws, "/api/v1/users/me")),
+    )
+
+
+def _providers(api: Api, org: str, ws: str) -> Iterator[Check]:
+    for kind in KINDS:
+        offered = {item["type"] for item in api.items(f"/api/v1/provider-types/{kind}")}
+        accounts = {item["type"] for item in api.items(f"{org}/{kind}-providers")}
+        yield f"Every {kind} provider type has an account", offered <= accounts
+    models = {model["key"]: model for model in api.items(f"{org}/models")}
+    fictional = [model for key, model in models.items() if key.startswith("fictional-")]
+    offered_models = len(api.items("/api/v1/provider-types/model"))
+    yield (
+        "Every fictional model provider serves a disabled model, mostly with a catalog reference",
+        len(fictional) == offered_models
+        and not any(model["enabled"] for model in fictional)
+        and sum(model["catalog_ref"] is not None for model in fictional) > offered_models // 2,
+    )
+    media = api.get(f"{ws}/media-understanding-defaults")
+    yield (
+        "The scripted models are enabled, and the media model is every media default",
+        models["local-scripted"]["enabled"]
+        and models["local-scripted-media"]["enabled"]
+        and {media["image"], media["audio"], media["video"]} == {models["local-scripted-media"]["id"]},
+    )
+
+
+def _resources(api: Api, org: str, ws: str, index: dict[str, str]) -> Iterator[Check]:
+    skills = {skill["key"]: skill for skill in api.items(f"{ws}/skills")}
+    draft = skills["accessibility-review"]
+    yield (
+        "Skills: every example, one archived, one whose newest revision is not the default",
+        {skill.key for skill in SKILLS} <= skills.keys()
+        and skills["legacy-style-guide"]["archived_at"] is not None
+        and api.items(f"{ws}/skills/{draft['id']}/revisions")[0]["id"] != draft["default_revision_id"],
+    )
+    agents = {agent["key"]: agent for agent in api.items(f"{ws}/agents")}
+    yield (
+        "Agents: more than a Console page, an archived one, a duplicate and the configuration assistant",
+        len(agents) > AGENT_PAGE
+        and agents["legacy-triage"]["archived_at"] is not None
+        and {"release-writer-copy", "configuration-assistant"} <= agents.keys(),
+    )
+    writer = agents["release-writer"]
+    revisions = api.items(f"{ws}/agents/{writer['id']}/revisions")
+    yield (
+        "The writer has three revisions, and the newest is not the default",
+        len(revisions) == 3 and revisions[0]["id"] != writer["default_revision_id"] == index["writer_default_revision"],
+    )
+    yield (
+        "Secrets of workspace and personal scope",
+        {secret["scope"] for secret in api.items(f"{ws}/secrets")} == {"workspace", "user"},
+    )
+    templates = api.items(f"{ws}/environment-templates")
+    yield (
+        "A template per environment account, and a disabled one",
+        len(templates) == len(api.items(f"{org}/environment-providers")) + 1
+        and [template["enabled"] for template in templates].count(False) == 1,
+    )
+    statuses = {environment["name"]: environment["status"] for environment in api.items(f"{ws}/environments")}
+    yield (
+        "Environments: the shared review workspace is ready, and one is stopped",
+        (statuses.get("Release review workspace"), statuses.get("Sprint archive")) == ("ready", "stopped"),
+    )
+    connections = {(item["type"], item["status"], item["enabled"]) for item in api.items(f"{ws}/connections")}
+    yield (
+        "Connections: ready, pending and disabled MCP servers, and a pending connector account",
+        {("mcp", "ready", True), ("mcp", "pending", True), ("mcp", "ready", False), ("composio", "pending", True)}
+        <= connections,
+    )
+    subscription = api.items(f"{ws}/subscriptions")[0]
+    deliveries = api.items(f"{ws}/subscriptions/{subscription['id']}/deliveries")
+    yield (
+        "The webhook subscription delivered lifecycle events",
+        any(item["status"] == "delivered" for item in deliveries),
+    )
+    stored = {asset["name"]: asset for asset in api.items(f"{ws}/assets")}
+    yield (
+        "Every example file is stored with its bytes",
+        all(
+            stored[example.name]["digest"] == hashlib.sha256(example.data).hexdigest()
+            and api.content(f"{ws}/assets/{stored[example.name]['id']}/content") == example.data
+            for example in examples()
+        ),
+    )
+    yield (
+        "A published asset names the run that published it",
+        any((asset["source"] or {}).get("run_id") == index["published_asset"] for asset in stored.values()),
+    )
+
+
+def _execution(api: Api, ws: str, index: dict[str, str]) -> Iterator[Check]:
+    threads = {thread["id"]: thread for thread in api.items(f"{ws}/threads")}
+    runs = {run["id"]: run for thread in threads for run in api.items(f"{ws}/threads/{thread}/runs")}
+
+    def run(name: str) -> Json:
+        return runs[index[name]]
+
+    def thread_runs(thread_id: str) -> list[Json]:
+        return [item for item in runs.values() if item["thread_id"] == thread_id]
+
+    yield (
+        "Runs completed, waiting, failed and cancelled, and none still active",
+        {item["status"] for item in runs.values()} == {"completed", "waiting", "failed", "cancelled"},
+    )
+    yield (
+        "Waits for an approval, a client tool and a user's answer",
+        [run(name)["wait_reason"] for name in ("approval_waiting", "client_tool_waiting", "question_waiting")]
+        == ["approval", "client_tool", "user_input"],
+    )
+    yield (
+        "An approval and a client tool result resumed their runs",
+        [run(name)["trigger"] for name in ("approval_approved", "client_tool_completed")] == ["resume", "resume"],
+    )
+    steered = run("steered")
+    entries = api.items(f"{ws}/threads/{steered['thread_id']}/inbox")
+    yield (
+        "A running run incorporated a steering message",
+        [entry["assigned_run_id"] for entry in entries] == [steered["id"], steered["id"]],
+    )
+    queued = api.items(f"{ws}/threads/{run('interrupted')['thread_id']}/inbox", status="pending")
+    yield (
+        "An interrupted run keeps its thread's queued message",
+        run("interrupted")["status"] == "cancelled" and len(queued) == 1,
+    )
+    yield (
+        "Failed runs: a model error and malformed structured output",
+        [run("failed")["status"], run("malformed_output")["status"]] == ["failed", "failed"],
+    )
+    yield "Structured output is recorded", isinstance(run("structured_output")["output"], dict)
+    delegated = run("delegated")
+    # The result steers the parent's run while it waits, or starts a successor run once it has ended.
+    results = api.items(f"{ws}/threads/{delegated['thread_id']}/inbox")
+    yield (
+        "A sub-agent ran in a child thread, and its result reached the parent",
+        any(thread["origin_run_id"] == delegated["id"] for thread in threads.values())
+        and ("child_result", "consumed") in {(entry["kind"], entry["status"]) for entry in results},
+    )
+    yield (
+        "A fork branches the multi-turn conversation",
+        threads[index["fork"]]["origin_thread_id"] == index["conversation"]
+        and len(thread_runs(index["conversation"])) == 5,
+    )
+    calls = [
+        (item["content"]["toolCallName"], item["content"]["arguments"])
+        for item in api.get(f"{ws}/runs/{index['skill_and_files']}/items")["items"]
+        if item["kind"] == "tool_call"
+    ]
+    yield (
+        "The shared workspace shows a skill read, a file write and a command",
+        [name for name, _ in calls] == ["view", "write", "shell_exec"] and "/.a13n/skills/" in calls[0][1],
+    )
+    native, inline, placed = (api.get(f"{ws}/runs/{index[name]}/items")["items"] for name in DELIVERIES)
+    media_types = {
+        item["content"]["value"]["event"]["content"]["media_type"]
+        for item in native
+        if item["content"].get("name") == "a13n.input.media"
+    }
+    yield (
+        "Attachments reach the model natively, as inline text, and placed in the environment",
+        media_types == {example.content_type for example in examples() if example.name in NATIVE}
+        and _attached(inline, " bytes):") == {example.name for example in examples()} - {*NATIVE, *PLACED}
+        and _attached(placed, "placed in the environment at: /workspace/.a13n/attachments/") == set(PLACED),
+    )
+    writer_runs = thread_runs(index["conversation"])
+    yield (
+        "Earlier runs keep the writer's first revision, and one run is pinned to it",
+        {item["agent_revision_id"] for item in writer_runs}
+        == {index["writer_first_revision"], index["writer_default_revision"]}
+        and run("run_pinned_to_first_revision")["revision_selection"] == "pinned",
+    )
+    yield (
+        "Another member started a conversation",
+        run("member_conversation")["principal_id"] == index["member_runner"],
+    )
+    yield "Usage is recorded and priced per model", any(model["cost"] for model in api.get(f"{ws}/usage")["models"])
+
+
+def _attached(items: list[Json], marker: str) -> set[str]:
+    """The attachments whose model-facing text in a run's items contains `marker`."""
+    texts = (item["content"]["text"] for item in items if item["kind"] == "text_message")
+    return {found[1] for text in texts if marker in text and (found := ATTACHMENT.match(text))}

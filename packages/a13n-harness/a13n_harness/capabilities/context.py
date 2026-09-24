@@ -50,6 +50,7 @@ from a13n_harness.events import (
     ContextSnapshotPayload,
     emit_harness_event,
 )
+from a13n_harness.model_calls import ModelCallCheckError
 from a13n_harness.model_context import (
     AbstractModelContextCapability,
     ModelContextBlock,
@@ -773,6 +774,8 @@ class CompactionCapability(AbstractCapability[AgentContext]):
                 )
         except asyncio.CancelledError:
             raise
+        except ModelCallCheckError:
+            raise
         except Exception as exc:
             await emit_harness_event(
                 ctx.deps.events,
@@ -831,7 +834,9 @@ async def _compact_with_same_agent(
     with disabled_tool_execution():
         result = await compact_agent.run(
             _COMPACTION_PROMPT,
-            model=request_context.model,
+            # The run's selection when it has one, so the compaction request names the same model as the requests it
+            # summarizes and a Host admits, attributes and prices it as that model.
+            model=request_context.model_id or request_context.model,
             message_history=deepcopy(request_context.messages),
             deps=ctx.deps,
             # This is another model request in the same logical Harness Run,

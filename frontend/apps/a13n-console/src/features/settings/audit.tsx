@@ -4,8 +4,7 @@ import { GearSixIcon, PulseIcon } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { UserAvatar } from "../../layout/avatar";
-import { useAccess } from "../../layout/workspace";
-import { allPages, data } from "../../shared/api";
+import { data } from "../../shared/api";
 import {
   CollectionFooter,
   Empty,
@@ -28,7 +27,6 @@ import type { ProfileTarget } from "./profile";
 export function Audit({ scope }: { scope: ProfileTarget }) {
   const client = useClient(),
     { t } = useTranslation(),
-    { organization } = useAccess(),
     page = useCursor();
   const query = useQuery({
     queryKey: [
@@ -41,38 +39,22 @@ export function Audit({ scope }: { scope: ProfileTarget }) {
       const params = { query: { cursor: page.cursor, limit: 30 } };
       if (scope.kind === "personal")
         return client.http
-          .GET("/api/v1/users/me/security-activity", { params, signal })
+          .GET("/api/v1/users/me/audit-events", { params, signal })
           .then(data);
       if (scope.kind === "workspace")
         return client.http
-          .GET("/api/v1/workspaces/{workspace}/security-audit-events", {
-            params: { ...params, path: { workspace: scope.id } },
+          .GET("/api/v1/workspaces/{workspace_id}/audit-events", {
+            params: { ...params, path: { workspace_id: scope.id } },
             signal,
           })
           .then(data);
       return client.http
-        .GET("/api/v1/organizations/{organization}/security-audit-events", {
-          params: { ...params, path: { organization: scope.id } },
+        .GET("/api/v1/organizations/{organization_id}/audit-events", {
+          params: { ...params, path: { organization_id: scope.id } },
           signal,
         })
         .then(data);
     },
-  });
-  // An actor is a person whenever the organization directory can name one.
-  const people = useQuery({
-    queryKey: ["organization-users", organization.id],
-    queryFn: ({ signal }) =>
-      allPages((cursor) =>
-        client.http
-          .GET("/api/v1/organizations/{organization}/users", {
-            params: {
-              path: { organization: organization.id },
-              query: { cursor, limit: 100 },
-            },
-            signal,
-          })
-          .then(data),
-      ),
   });
   if (query.isPending) return <Loading variant="table" columns={4} rows={5} />;
   if (!query.data)
@@ -98,9 +80,7 @@ export function Audit({ scope }: { scope: ProfileTarget }) {
             label: t("Actor"),
             tone: "primary",
             render: (item) => {
-              const user = item.actor_id
-                ? people.data?.find((person) => person.id === item.actor_id)
-                : undefined;
+              const user = item.actor?.kind === "user" ? item.actor : undefined;
               if (user)
                 return (
                   <ResourceIdentity
@@ -113,14 +93,14 @@ export function Audit({ scope }: { scope: ProfileTarget }) {
                       />
                     }
                     name={user.name}
-                    description={user.email}
+                    description={user.email ?? undefined}
                     resourceId={user.id}
                   />
                 );
               return (
                 <ResourceIdentity
                   icon={<GearSixIcon size={15} aria-hidden="true" />}
-                  name={item.actor_id ? item.actor_type : t("System")}
+                  name={item.actor?.name ?? t("System")}
                   description={item.actor_id ?? undefined}
                   resourceId={item.actor_id ?? undefined}
                 />
@@ -133,15 +113,12 @@ export function Audit({ scope }: { scope: ProfileTarget }) {
           },
           {
             label: t("Resource"),
-            render: (item) =>
-              item.resource_type ? (
-                <span className={settings.stacked}>
-                  <span>{item.resource_type}</span>
-                  {item.resource_id && <CopyableId value={item.resource_id} />}
-                </span>
-              ) : (
-                "—"
-              ),
+            render: (item) => (
+              <span className={settings.stacked}>
+                <span>{item.target_kind}</span>
+                <CopyableId value={item.target_id} />
+              </span>
+            ),
           },
           {
             label: t("When"),

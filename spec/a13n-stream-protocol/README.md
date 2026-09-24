@@ -22,9 +22,9 @@ Read `00`, then [Harness Events and Usage](../a13n-harness/12-events-observabili
 
 Read `00`, then [Harness UI Runtime Subagents and Surfaces](../a13n-harness-ui/05-runtime-subagents-and-surfaces.md). Both local surfaces consume the same post-processor AG-UI events, while Harness UI owns persistence, replay, fan-out, and transport.
 
-### Add Hosted AG-UI Delivery
+### Service observation
 
-Read `00`, then [a13n Service Hosted AG-UI](../a13n-service/22-hosted-ag-ui.md) for input acceptance, durable Harness Run/Service Run binding, event filtering, lifecycle projection, cursor, and SSE. a13n Service uses the same observer while owning lifecycle records, event identities, retention, and delivery.
+The new Service uses AG-UI as an event vocabulary, with its own durable display and attempt stream contract in [facts and delivery](../a13n-service/07-facts-and-delivery.md). It does not expose a hosted AG-UI endpoint or A2A gateway. Shared stream adapters remain available to other Hosts.
 
 ## Authority Rules
 

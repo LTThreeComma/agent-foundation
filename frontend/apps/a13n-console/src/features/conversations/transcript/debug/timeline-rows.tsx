@@ -254,7 +254,8 @@ export function EventRow({
   const notice = lifecycleNotice(entry);
   if (!notice) return null;
   const Glyph = entryGlyph(entry);
-  const offset = Math.max(0, Date.parse(entry.occurredAt) - scope.start);
+  // A fact with no known time has no offset to show.
+  const offset = Math.max(0, Date.parse(entry.occurredAt ?? "") - scope.start);
   return (
     <div className={styles.entry} data-kind="event">
       <div className={styles.eventRow} data-tone={notice.tone}>

@@ -2,18 +2,22 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
+import { ApiError } from "../../service-client";
 import { TemplateConfig } from "./template-config";
 
 const state = vi.hoisted(() => ({
   GET: vi.fn(),
   POST: vi.fn(),
+  PATCH: vi.fn(),
   close: vi.fn(),
 }));
 vi.mock("../../auth/context", () => ({
-  useClient: () => ({ http: { GET: state.GET, POST: state.POST } }),
+  useClient: () => ({
+    http: { GET: state.GET, POST: state.POST, PATCH: state.PATCH },
+  }),
 }));
 vi.mock("../../layout/workspace", () => ({
-  useAccess: () => ({ workspace: { id: "ws_test" } }),
+  useAccess: () => ({ organization: { id: "org_test" } }),
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -90,52 +94,49 @@ beforeEach(() => {
   vi.resetAllMocks();
   state.GET.mockImplementation(async (path: string) => ({
     data: {
-      items: path.endsWith("environment-provider-types")
-        ? [
-            {
-              type: "e2b",
-              supports_managed: true,
-              supports_stop: true,
-              supports_destroy: true,
-              template_configuration_schema: e2bSchema,
-            },
-            {
-              type: "direct_local",
-              supports_managed: true,
-              supports_stop: false,
-              supports_destroy: false,
-              template_configuration_schema: localSchema,
-            },
-            {
-              type: "docker",
-              supports_managed: true,
-              supports_stop: true,
-              supports_destroy: true,
-              template_configuration_schema: dockerSchema,
-            },
-            { type: "http_envd", supports_managed: false },
-          ]
-        : [
-            { id: "envp_e2b", type: "e2b", name: "E2B", enabled: true },
-            {
-              id: "envp_local",
-              type: "direct_local",
-              name: "Local",
-              enabled: true,
-            },
-            {
-              id: "envp_docker",
-              type: "docker",
-              name: "Docker",
-              enabled: true,
-            },
-            {
-              id: "envp_http",
-              type: "http_envd",
-              name: "External",
-              enabled: true,
-            },
-          ],
+      items:
+        path === "/api/v1/provider-types/{kind}"
+          ? [
+              {
+                type: "e2b",
+                environment_schema: e2bSchema,
+                supports_stop: true,
+                supports_destroy: true,
+              },
+              {
+                type: "direct_local",
+                environment_schema: localSchema,
+                supports_stop: false,
+                supports_destroy: false,
+              },
+              {
+                type: "docker",
+                environment_schema: dockerSchema,
+                supports_stop: true,
+                supports_destroy: true,
+              },
+            ]
+          : [
+              { id: "eprov_e2b", type: "e2b", name: "E2B", enabled: true },
+              {
+                id: "eprov_local",
+                type: "direct_local",
+                name: "Local",
+                enabled: true,
+              },
+              {
+                id: "eprov_docker",
+                type: "docker",
+                name: "Docker",
+                enabled: true,
+              },
+              {
+                id: "eprov_retired",
+                type: "retired",
+                name: "Retired",
+                enabled: true,
+              },
+            ],
       next_cursor: null,
     },
   }));
@@ -183,6 +184,7 @@ it("creates an E2B template configuration from ordinary fields without a schema-
     screen.getByRole("textbox", { name: "Name" }),
     "Project template",
   );
+  await user.type(screen.getByRole("textbox", { name: "Key" }), "project");
   expect(
     screen.queryByRole("textbox", { name: "Template configuration (JSON)" }),
   ).toBeNull();
@@ -192,16 +194,48 @@ it("creates an E2B template configuration from ordinary fields without a schema-
   await user.click(screen.getByRole("button", { name: "Create template" }));
   await waitFor(() =>
     expect(state.POST).toHaveBeenCalledWith(
-      "/api/v1/workspaces/{workspace}/environment-templates",
-      expect.objectContaining({
-        body: expect.objectContaining({
+      "/api/v1/workspaces/{workspace_id}/environment-templates",
+      {
+        params: { path: { workspace_id: "ws_test" } },
+        body: {
+          key: "project",
           name: "Project template",
-          provider_id: "envp_e2b",
-          configuration: { template: "my-template" },
-        }),
-      }),
+          description: null,
+          provider_id: "eprov_e2b",
+          config: {
+            recipe: { template: "my-template" },
+            stop_after_seconds: null,
+            delete_after_seconds: null,
+          },
+        },
+      },
     ),
   );
+});
+
+it("offers only providers of an offered type and the idle policy their type supports", async () => {
+  const user = userEvent.setup();
+  await screen.findByRole("button", { name: /^E2B/ });
+  expect(screen.queryByRole("button", { name: /^Retired/ })).toBeNull();
+  await selectProvider(user, "Local");
+  await user.click(screen.getByRole("button", { name: "Lifecycle" }));
+  const stop = screen.getByRole("spinbutton", {
+    name: "Stop after idle seconds",
+  }) as HTMLInputElement;
+  const destroy = screen.getByRole("spinbutton", {
+    name: "Delete after idle seconds",
+  }) as HTMLInputElement;
+  expect(stop.disabled).toBe(true);
+  expect(destroy.disabled).toBe(true);
+  await selectProvider(user, "E2B");
+  await user.click(screen.getByRole("button", { name: "Lifecycle" }));
+  expect(
+    (
+      screen.getByRole("spinbutton", {
+        name: "Stop after idle seconds",
+      }) as HTMLInputElement
+    ).disabled,
+  ).toBe(false);
 });
 
 it("retains per-provider drafts and advanced JSON while switching fields", async () => {
@@ -246,6 +280,7 @@ it("rejects invalid advanced configuration without sending a request", async () 
   const user = userEvent.setup();
   await selectProvider(user, "E2B");
   await user.type(screen.getByRole("textbox", { name: "Name" }), "Invalid");
+  await user.type(screen.getByRole("textbox", { name: "Key" }), "invalid");
   await user.click(screen.getByRole("button", { name: "JSON" }));
   await user.clear(
     screen.getByRole("textbox", { name: "Template configuration (JSON)" }),
@@ -254,6 +289,37 @@ it("rejects invalid advanced configuration without sending a request", async () 
   await user.click(screen.getByRole("button", { name: "Create template" }));
   await screen.findAllByText(/additional properties/);
   expect(state.POST).not.toHaveBeenCalled();
+});
+
+it("shows the Service's refusal of a recipe beside the recipe", async () => {
+  const refusal = "config.recipe: invalid for docker: mounts";
+  state.POST.mockRejectedValue(
+    new ApiError(
+      400,
+      "invalid_argument",
+      refusal,
+      {
+        field: "config.recipe",
+        reason: "invalid for docker: mounts",
+      },
+      "req_test",
+    ),
+  );
+  const user = userEvent.setup();
+  await selectProvider(user, "Docker");
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "Docker");
+  await user.type(screen.getByRole("textbox", { name: "Key" }), "docker");
+  await user.click(screen.getByRole("button", { name: "JSON" }));
+  await user.clear(
+    screen.getByRole("textbox", { name: "Template configuration (JSON)" }),
+  );
+  await user.paste('{"mounts":[{"source":"/etc","target":"/host"}]}');
+  await user.click(screen.getByRole("button", { name: "Create template" }));
+  // The Console holds no Docker policy of its own: the Service decides.
+  await waitFor(() => expect(state.POST).toHaveBeenCalledOnce());
+  expect(await screen.findAllByText(refusal)).toHaveLength(1);
+  expect(screen.queryByText("Something went wrong")).toBeNull();
+  expect(state.close).not.toHaveBeenCalled();
 });
 
 it("resets advanced JSON drafts and their validation state", async () => {
@@ -287,86 +353,66 @@ it("resets advanced JSON drafts and their validation state", async () => {
   ).toBe("{}");
 });
 
-it("tests the selected Docker image on the Worker without saving the template", async () => {
-  const user = userEvent.setup();
-  await selectProvider(user, "Docker");
-  const image = screen.getByRole("textbox", { name: "Image" });
-  await user.clear(image);
-  await user.type(image, "my-env:dev");
-  expect(screen.getByRole("button", { name: "Mounts" })).toBeTruthy();
-  await user.click(screen.getByRole("button", { name: "Test image" }));
-  await waitFor(() =>
-    expect(state.POST).toHaveBeenCalledWith(
-      "/api/v1/environment-providers/{provider_id}/test-image",
-      expect.objectContaining({
-        params: { path: { provider_id: "envp_docker" } },
-        body: expect.objectContaining({
-          workspace_id: "ws_test",
-          configuration: { image: "my-env:dev" },
-          request_id: expect.stringMatching(/^envtest_[0-9a-f]{32}$/),
-        }),
-      }),
-    ),
+it("saves an existing template's recipe and idle policy against its ETag", async () => {
+  unmountEditor?.();
+  state.PATCH.mockResolvedValue({ data: { id: "envtpl_test" } });
+  const template = {
+    id: "envtpl_test",
+    organization_id: "org_test",
+    workspace_id: "ws_test",
+    key: "sandbox",
+    name: "Sandbox",
+    description: null,
+    provider_id: "eprov_e2b",
+    config: {
+      recipe: { template: "base" },
+      stop_after_seconds: 600,
+      delete_after_seconds: null,
+    },
+    enabled: true,
+    labels: {},
+    version: 4,
+    created_by_id: "usr_test",
+    updated_by_id: "usr_test",
+    created_at: "2026-09-18T00:00:00Z",
+    updated_at: "2026-09-18T00:00:00Z",
+  };
+  render(
+    <QueryClientProvider
+      client={
+        new QueryClient({
+          defaultOptions: { queries: { retry: false, gcTime: 0 } },
+        })
+      }
+    >
+      <TemplateConfig
+        scope={{ kind: "workspace", id: "ws_test" }}
+        template={{ value: template, etag: '"envtpl_test:4"' }}
+        close={state.close}
+      />
+    </QueryClientProvider>,
   );
-  expect(state.close).not.toHaveBeenCalled();
-});
-
-it("aborts an image test when its draft changes and ignores a late result", async () => {
-  let finish: ((value: unknown) => void) | undefined;
-  state.POST.mockImplementation((path: string) =>
-    path.endsWith("/cancel")
-      ? Promise.resolve({ data: null })
-      : new Promise((resolve) => {
-          finish = resolve;
-        }),
-  );
   const user = userEvent.setup();
-  await selectProvider(user, "Docker");
-  await user.click(screen.getByRole("button", { name: "Test image" }));
-  await waitFor(() => expect(state.POST).toHaveBeenCalled());
-  const signal = state.POST.mock.calls[0][1].signal as AbortSignal;
-  expect(signal.aborted).toBe(false);
-  await user.type(screen.getByRole("textbox", { name: "Image" }), "changed");
-  expect(signal.aborted).toBe(true);
+  await screen.findByRole("textbox", { name: "E2B template name or ID" });
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
-    expect(state.POST).toHaveBeenCalledWith(
-      "/api/v1/environment-providers/{provider_id}/test-image/{request_id}/cancel",
-      expect.objectContaining({
+    expect(state.PATCH).toHaveBeenCalledWith(
+      "/api/v1/workspaces/{workspace_id}/environment-templates/{template_id}",
+      {
         params: {
-          path: {
-            provider_id: "envp_docker",
-            request_id: expect.stringMatching(/^envtest_[0-9a-f]{32}$/),
+          path: { workspace_id: "ws_test", template_id: "envtpl_test" },
+        },
+        headers: { "If-Match": '"envtpl_test:4"' },
+        body: {
+          provider_id: "eprov_e2b",
+          config: {
+            recipe: { template: "base" },
+            stop_after_seconds: 600,
+            delete_after_seconds: null,
           },
         },
-      }),
+      },
     ),
   );
-  finish?.({ data: { image_id: "sha256:old", checks: ["files"] } });
-  await waitFor(() => expect(screen.queryByText(/sha256:old/)).toBeNull());
-});
-
-it("cancels the Worker request when the editor closes", async () => {
-  state.POST.mockImplementation((path: string) =>
-    path.endsWith("/cancel")
-      ? Promise.resolve({ data: null })
-      : new Promise(() => undefined),
-  );
-  const user = userEvent.setup();
-  await selectProvider(user, "Docker");
-  await user.click(screen.getByRole("button", { name: "Test image" }));
-  await waitFor(() => expect(state.POST).toHaveBeenCalled());
-  const signal = state.POST.mock.calls[0][1].signal as AbortSignal;
-  unmountEditor?.();
-  expect(signal.aborted).toBe(true);
-  expect(state.POST).toHaveBeenCalledWith(
-    "/api/v1/environment-providers/{provider_id}/test-image/{request_id}/cancel",
-    expect.objectContaining({
-      params: {
-        path: {
-          provider_id: "envp_docker",
-          request_id: expect.stringMatching(/^envtest_[0-9a-f]{32}$/),
-        },
-      },
-    }),
-  );
+  await waitFor(() => expect(state.close).toHaveBeenCalledOnce());
 });

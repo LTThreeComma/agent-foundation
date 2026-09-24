@@ -1,4 +1,7 @@
-"""Stable machine-wide port assignments for local source checkouts."""
+"""Stable per-checkout identity and loopback ports, reserved machine-wide.
+
+Stdlib only: `make dev-status` and `make dev-env-list` run it before the repository environment exists.
+"""
 
 from __future__ import annotations
 
@@ -7,14 +10,17 @@ import hashlib
 import json
 import os
 import socket
+from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
-from .state import atomic_write
-from .state import machine_directory as _machine_directory
+from dev.observability.state import atomic_write, machine_directory
 
-PORT_NAMES = ("service", "console", "model", "postgres", "redis", "mem0")
+# Each checkout takes one aligned block below the Linux ephemeral range (32768+).
+FIRST_PORT = 20000
+BLOCK = 8
+BLOCKS = (32768 - FIRST_PORT) // BLOCK
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,10 +30,9 @@ class Ports:
     model: int
     postgres: int
     redis: int
-    mem0: int
 
-    def values(self) -> tuple[int, ...]:
-        return tuple(asdict(self).values())
+    def named(self) -> dict[str, int]:
+        return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,16 +40,78 @@ class Instance:
     id: str
     root: str
     ports: Ports
-    version: int = 1
 
 
-def instance_path(root: Path) -> Path:
+def identity(root: Path) -> str:
+    return hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:12]
+
+
+def instance_file(root: Path) -> Path:
     return root / "var/dev/instance.json"
 
 
+def _registry_file() -> Path:
+    return machine_directory() / "checkouts.json"
+
+
+def _parse(value: object, source: Path) -> Instance:
+    names = [field.name for field in fields(Ports)]
+    ports = value.get("ports") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("id"), str)
+        or not isinstance(value.get("root"), str)
+        or not isinstance(ports, dict)
+        or sorted(ports) != sorted(names)
+        or any(type(ports[name]) is not int or not 1024 <= ports[name] <= 65535 for name in names)
+        or len(set(ports.values())) != len(names)
+    ):
+        raise ValueError(f"Invalid local instance record in {source}")
+    return Instance(value["id"], value["root"], Ports(**ports))
+
+
+def _read(path: Path) -> object:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        raise ValueError(f"Unreadable local instance file: {path}") from None
+
+
+def _write(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, (json.dumps(value, indent=2, sort_keys=True) + "\n").encode())
+
+
+def load_instance(root: Path) -> Instance | None:
+    """This checkout's recorded instance, without creating or reserving anything."""
+    root = root.resolve()
+    path = instance_file(root)
+    if not path.exists():
+        return None
+    instance = _parse(_read(path), path)
+    if instance.root != str(root) or instance.id != identity(root):
+        raise ValueError(f"{path} belongs to another checkout; it was copied or the checkout moved")
+    return instance
+
+
+def registered_instances() -> dict[str, Instance]:
+    path = _registry_file()
+    if not path.exists():
+        return {}
+    records = _read(path)
+    if not isinstance(records, dict):
+        raise ValueError(f"Invalid machine registry: {path}")
+    return {root: _parse(value, path) for root, value in records.items()}
+
+
+def save_registry(records: dict[str, Instance]) -> None:
+    _write(_registry_file(), {root: asdict(instance) for root, instance in sorted(records.items())})
+
+
 @contextmanager
-def _machine_lock():
-    directory = _machine_directory()
+def machine_lock() -> Iterator[None]:
+    """Serialize port reservations across every checkout on this machine."""
+    directory = machine_directory()
     directory.mkdir(parents=True, exist_ok=True)
     fd = os.open(directory / "instances.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
@@ -54,127 +121,75 @@ def _machine_lock():
         os.close(fd)
 
 
-def _read(path: Path) -> dict:
+def _previous_workflow_ports() -> set[int]:
+    # Checkouts still on the previous local workflow record their ports in instances.json (same lock).
+    path = machine_directory() / "instances.json"
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        raise ValueError(f"Invalid local instance file: {path}") from None
-    if not isinstance(value, dict):
-        raise ValueError(f"Invalid local instance file: {path}")
-    return value
+        records = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return set()
+    return {
+        port
+        for record in (records.values() if isinstance(records, dict) else ())
+        if isinstance(record, dict) and isinstance(record.get("ports"), dict)
+        for port in record["ports"].values()
+        if type(port) is int
+    }
 
 
-def _parse_instance(value: object, path: Path) -> Instance:
-    if not isinstance(value, dict):
-        raise ValueError(f"Invalid local instance record: {path}")
-    ports = value.get("ports")
-    if (
-        type(value.get("id")) is not str
-        or type(value.get("root")) is not str
-        or type(value.get("version")) is not int
-        or not isinstance(ports, dict)
-        or set(ports) != set(PORT_NAMES)
-        or any(type(ports.get(name)) is not int for name in PORT_NAMES)
-    ):
-        raise ValueError(f"Invalid local instance record: {path}")
-    instance = Instance(
-        id=value["id"],
-        root=value["root"],
-        ports=Ports(**{name: ports[name] for name in PORT_NAMES}),
-        version=value["version"],
-    )
-    values = instance.ports.values()
-    if instance.version != 1 or len(set(values)) != len(values) or any(not 1024 <= port <= 65535 for port in values):
-        raise ValueError(f"Invalid local instance record: {path}")
-    return instance
-
-
-def load_instance(root: Path) -> Instance | None:
-    path = instance_path(root)
-    if not path.exists():
-        return None
-    instance = _parse_instance(_read(path), path)
-    resolved = str(root.resolve())
-    if instance.root != resolved or instance.id != _identity(root):
-        raise ValueError(f"Local instance ownership does not match this checkout: {path}")
-    return instance
-
-
-def _identity(root: Path) -> str:
-    return hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:12]
-
-
-def _ports_available(ports: tuple[int, ...]) -> bool:
-    sockets: list[socket.socket] = []
-    try:
-        for port in ports:
-            listener = socket.socket()
+def occupied(ports: dict[str, int]) -> list[str]:
+    """The names of ports some other process holds on 127.0.0.1."""
+    taken = []
+    for name, port in ports.items():
+        with socket.socket() as listener:
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listener.bind(("127.0.0.1", port))
-            sockets.append(listener)
-        return True
-    except OSError:
-        return False
-    finally:
-        for listener in sockets:
-            listener.close()
+            try:
+                listener.bind(("127.0.0.1", port))
+            except OSError:
+                taken.append(name)
+    return taken
+
+
+def require_free(ports: dict[str, int]) -> None:
+    taken = occupied(ports)
+    if taken:
+        described = ", ".join(f"{name} 127.0.0.1:{ports[name]}" for name in taken)
+        raise ValueError(
+            f"Assigned port in use ({described}). This checkout keeps its ports stable (var/dev/instance.json); "
+            "stop the process holding it and retry."
+        )
+
+
+def _allocate(root: Path, reserved: set[int]) -> Ports:
+    start = int(identity(root), 16) % BLOCKS
+    for offset in range(BLOCKS):
+        base = FIRST_PORT + (start + offset) % BLOCKS * BLOCK
+        ports = Ports(*range(base, base + len(fields(Ports))))
+        if reserved.isdisjoint(ports.named().values()) and not occupied(ports.named()):
+            return ports
+    raise RuntimeError("No free local development port block is available")
 
 
 def ensure_instance(root: Path) -> Instance:
+    """This checkout's instance; the first call reserves a free port block that never moves afterwards."""
     root = root.resolve()
-    with _machine_lock():
-        registry_path = _machine_directory() / "instances.json"
-        registry = _read(registry_path) if registry_path.exists() else {}
-        records = {}
-        for path, value in registry.items():
-            if not Path(path).exists() and path != str(root):
-                continue
-            record = _parse_instance(value, registry_path)
-            if record.root != path or record.id != _identity(Path(path)):
-                raise ValueError(f"Invalid machine registry ownership for checkout: {path}")
-            records[path] = record
-        if set(records) != set(registry):
-            _write_json(registry_path, {path: asdict(value) for path, value in records.items()})
-        existing = load_instance(root)
+    with machine_lock():
+        # Checkouts deleted from disk release their reservation.
+        records = {path: record for path, record in registered_instances().items() if Path(path).is_dir()}
+        recorded = load_instance(root)
         registered = records.get(str(root))
-        if existing is not None:
-            conflicts = [
-                path
-                for path, value in records.items()
-                if path != str(root) and set(value.ports.values()) & set(existing.ports.values())
-            ]
-            if conflicts:
-                raise ValueError(f"Local instance ports conflict with registered checkout: {conflicts[0]}")
-            if registered is not None and registered != existing:
-                raise ValueError("Local instance file does not match its machine registry record")
-            if registered is None:
-                records[str(root)] = existing
-                _write_json(registry_path, {path: asdict(value) for path, value in records.items()})
-            return existing
-        if registered is not None:
-            if registered.root != str(root) or registered.id != _identity(root):
-                raise ValueError("Machine registry ownership does not match this checkout")
-            path = instance_path(root)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _write_json(path, asdict(registered))
-            return registered
-        reserved = {port for value in records.values() for port in value.ports.values()}
-        start = 20000 + (int(_identity(root), 16) % 4000) * 8
-        for offset in range(4000):
-            base = 20000 + ((start - 20000 + offset * 8) % 32000)
-            ports = Ports(base, base + 1, base + 2, base + 3, base + 4, base + 5)
-            if not reserved.intersection(ports.values()) and _ports_available(ports.values()):
-                break
-        else:
-            raise RuntimeError("No free local development port block is available")
-        instance = Instance(id=_identity(root), root=str(root), ports=ports)
+        if recorded and registered and recorded != registered:
+            raise ValueError(f"{instance_file(root)} does not match this checkout's machine registration")
+        others = {
+            port for path, record in records.items() if path != str(root) for port in record.ports.named().values()
+        }
+        instance = recorded or registered
+        if instance is None:
+            instance = Instance(identity(root), str(root), _allocate(root, others | _previous_workflow_ports()))
+        elif not others.isdisjoint(instance.ports.named().values()):
+            raise ValueError(f"Ports in {instance_file(root)} are reserved by another registered checkout")
         records[str(root)] = instance
-        _write_json(registry_path, {path: asdict(value) for path, value in records.items()})
-        path = instance_path(root)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(path, asdict(instance))
+        save_registry(records)
+        if recorded is None:
+            _write(instance_file(root), asdict(instance))
         return instance
-
-
-def _write_json(path: Path, value: dict) -> None:
-    atomic_write(path, (json.dumps(value, indent=2, sort_keys=True) + "\n").encode())

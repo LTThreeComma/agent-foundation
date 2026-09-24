@@ -1,30 +1,29 @@
 import { describe, expect, it } from "vitest";
 import type { Schema } from "../../shared/api";
 import { observationRows, visibleRows } from "./timeline";
-function observation(
-  id: string,
-  parent_id: string | null,
-): Schema["Observation"] {
+function observation(id: string, parent_id: string | null): Schema["Span"] {
   return {
+    trace_id: "trace",
     id,
     parent_id,
-    type: "span",
+    kind: "span",
     name: id,
     started_at: "2026-09-08T00:00:00Z",
     ended_at: null,
-    status: "unset",
+    status: "ok",
     level: null,
     status_message: null,
     model: null,
-    usage: null,
+    usage: {},
     cost_usd: null,
     input: null,
     output: null,
     attributes: {},
-    resource_attributes: null,
+    resource_attributes: {},
     scope: null,
-    events: null,
-    links: null,
+    events: [],
+    links: [],
+    source_url: null,
   };
 }
 describe("trace topology", () => {

@@ -1,4 +1,5 @@
 # Copy to ~/.a13n/dev-resources.toml and set mode 0600 before entering real credentials.
+# Entries with a blank credential are skipped. `configuration` is the provider's (or template recipe's) `config`.
 version = 1
 
 [[model_providers]]
@@ -7,7 +8,7 @@ name = "OpenRouter (local)"
 credential = { api_key = "" }
 
 [[model_providers.models]]
-key = "openrouter-glm-5.3-flash"
+key = "openrouter-glm-5-3-flash"
 name = "GLM 5.3 Flash"
 upstream_model = "z-ai/glm-5.3-flash"
 
@@ -24,7 +25,6 @@ credential = { api_key = "" }
 [[environment_templates]]
 name = "E2B base"
 provider = "E2B (local)"
-preparation = "on_run"
 stop_after = 3600
 delete_after = 86400
 configuration = { template = "base", root = "/home/user", timeout_seconds = 3600 }

@@ -18,16 +18,14 @@ import { ModelIcon } from "./model-icon";
 import styles from "./models.module.css";
 
 export type MediaKind = "image" | "video" | "audio";
+/** The Model ID chosen for each kind; an unset kind inherits. */
 export type MediaSelection = Schema["MediaUnderstandingSelection"];
 
 /** What a picker needs to show a Model as itself, wherever it was loaded. */
-export type ModelIdentity = {
-  key: string;
-  name: string;
-  upstream_model: string;
-  provider_id: string;
-  catalog_ref?: Schema["CatalogRef"] | null;
-};
+export type ModelIdentity = Pick<
+  Schema["Model"],
+  "id" | "key" | "name" | "provider_id" | "catalog_ref"
+> & { config: Pick<Schema["Model"]["config"], "model_name"> };
 
 /**
  * One row per media kind: its label and the content it covers, the accessible
@@ -102,9 +100,9 @@ export function mediaSelected(value: MediaSelection = {}) {
 }
 
 /** Untranslated badges for the kinds a Model is the current Workspace default for. */
-export function mediaDefaultBadges(key: string, defaults?: MediaSelection) {
+export function mediaDefaultBadges(id: string, defaults?: MediaSelection) {
   return mediaKinds
-    .filter((entry) => defaults?.[entry.kind] === key)
+    .filter((entry) => defaults?.[entry.kind] === id)
     .map((entry) => entry.badge);
 }
 
@@ -122,17 +120,17 @@ export const modelPopupWidth = "min-w-80";
  */
 export function modelOption(model: ModelIdentity, provider?: string) {
   return {
-    value: model.key,
+    value: model.id,
     label: model.name,
     description: [model.key, provider].filter(Boolean).join(" · "),
     icon: (
       <ModelIcon
-        upstream={model.upstream_model}
+        upstream={model.config.model_name}
         catalogRef={model.catalog_ref}
         size={20}
       />
     ),
-    keywords: [model.key, model.upstream_model],
+    keywords: [model.key, model.config.model_name],
   };
 }
 
@@ -154,9 +152,12 @@ export function InheritIcon({
  * understanding capability.
  */
 export function useMediaUnderstandingChoices() {
-  const { workspace } = useWorkspace(),
+  const { workspace, organization } = useWorkspace(),
     client = useClient();
-  const api = modelApi(client, { kind: "workspace", id: workspace.id });
+  const api = modelApi(client, organization.id, {
+    kind: "workspace",
+    id: workspace.id,
+  });
   const models = useQuery({
     queryKey: ["models", "media-understanding", workspace.id],
     queryFn: ({ signal }) => allPages((cursor) => api.models(signal, cursor)),
@@ -179,11 +180,12 @@ export function useMediaUnderstandingChoices() {
     isPending: models.isPending || providers.isPending,
     eligible: (kind: MediaKind) =>
       usable.filter((model) =>
-        model.declarations?.capabilities?.includes(`${kind}_understanding`),
+        model.config.characteristics?.capabilities?.includes(
+          `${kind}_understanding`,
+        ),
       ),
     /** Any known Model, including one a selection kept after it stopped qualifying. */
-    find: (key: string) =>
-      (models.data ?? []).find((model) => model.key === key),
+    find: (id: string) => (models.data ?? []).find((model) => model.id === id),
     providerName: (id: string) =>
       providers.data?.find((provider) => provider.id === id)?.name,
   };
@@ -196,8 +198,8 @@ export function useWorkspaceMediaDefault() {
   const defaults = useQuery(mediaDefaultsQuery(client, workspace.id));
   const { find } = useMediaUnderstandingChoices();
   return (kind: MediaKind) => {
-    const key = defaults.data?.value[kind];
-    return key ? (find(key)?.name ?? key) : undefined;
+    const id = defaults.data?.value[kind];
+    return id ? (find(id)?.name ?? id) : undefined;
   };
 }
 
@@ -207,8 +209,8 @@ export function useMediaSummary() {
   const { find } = useMediaUnderstandingChoices();
   return (value: MediaSelection, inherited: string) => {
     const chosen = mediaKinds.flatMap((entry) => {
-      const key = value[entry.kind];
-      return key ? [`${t(entry.label)} · ${find(key)?.name ?? key}`] : [];
+      const id = value[entry.kind];
+      return id ? [`${t(entry.label)} · ${find(id)?.name ?? id}`] : [];
     });
     if (!chosen.length) return inherited;
     const named = chosen.join(", ");
@@ -264,11 +266,14 @@ export function MediaUnderstandingFields({
         const eligible = choices.eligible(kind);
         const selected = value[kind] ?? "";
         const unavailable =
-          !!selected && !eligible.some((model) => model.key === selected);
+          !!selected && !eligible.some((model) => model.id === selected);
         // A selection the Workspace can no longer honour stays on show, named as far as it can be.
         const stale = unavailable ? choices.find(selected) : undefined;
         const note = unavailable
-          ? { tone: "warning", text: t(entry.unavailable, { key: selected }) }
+          ? {
+              tone: "warning",
+              text: t(entry.unavailable, { key: stale?.key ?? selected }),
+            }
           : !explainEmpty || choices.isPending || eligible.length
             ? undefined
             : { tone: undefined, text: t(entry.empty) };
@@ -323,11 +328,11 @@ export function MediaUnderstandingFields({
                               {
                                 value: selected,
                                 label: stale?.name ?? selected,
-                                description: `${selected} · ${t("Unavailable")}`,
+                                description: `${stale?.key ?? selected} · ${t("Unavailable")}`,
                                 disabled: true,
                                 icon: stale ? (
                                   <ModelIcon
-                                    upstream={stale.upstream_model}
+                                    upstream={stale.config.model_name}
                                     catalogRef={stale.catalog_ref}
                                     size={20}
                                   />

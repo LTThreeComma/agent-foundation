@@ -15,8 +15,8 @@ import { KeyIcon, PlusIcon, ProhibitIcon } from "@phosphor-icons/react";
 import { useTranslation } from "react-i18next";
 import { useClient } from "../../auth/context";
 import { UserAvatar } from "../../layout/avatar";
-import { useAccess, useWorkspace } from "../../layout/workspace";
-import { allPages, data } from "../../shared/api";
+import { useWorkspace } from "../../layout/workspace";
+import { data, ifMatch, rowTag } from "../../shared/api";
 import {
   CollectionFooter,
   Empty,
@@ -71,7 +71,6 @@ export function ApiKeys({
   const client = useClient(),
     { t } = useTranslation(),
     { workspace, can } = useWorkspace(),
-    { organization } = useAccess(),
     page = useCursor();
   const scope: KeyScope = accountId
     ? "account"
@@ -84,45 +83,34 @@ export function ApiKeys({
       const query = { cursor: page.cursor, limit: 30 };
       if (accountId)
         return client.http
-          .GET("/api/v1/service-accounts/{account_id}/api-keys", {
-            signal,
-            params: { path: { account_id: accountId }, query },
-          })
+          .GET(
+            "/api/v1/workspaces/{workspace_id}/service-accounts/{account_id}/keys",
+            {
+              signal,
+              params: {
+                path: { workspace_id: workspace.id, account_id: accountId },
+                query,
+              },
+            },
+          )
           .then(data);
       if (memberKeys)
         return client.http
-          .GET("/api/v1/workspaces/{workspace}/api-keys", {
+          .GET("/api/v1/workspaces/{workspace_id}/keys", {
             signal,
-            params: { path: { workspace: workspace.id }, query },
+            params: { path: { workspace_id: workspace.id }, query },
           })
           .then(data);
       return client.http
-        .GET("/api/v1/workspaces/{workspace}/personal-api-keys", {
+        .GET("/api/v1/users/me/keys", {
           signal,
-          params: { path: { workspace: workspace.id }, query },
+          params: { query: { ...query, workspace_id: workspace.id } },
         })
         .then(data);
     },
   });
-  // Member keys name their owner; a raw principal id is the last resort.
-  const owners = useQuery({
-    queryKey: ["organization-users", organization.id],
-    enabled: scope === "member",
-    queryFn: ({ signal }) =>
-      allPages((cursor) =>
-        client.http
-          .GET("/api/v1/organizations/{organization}/users", {
-            params: {
-              path: { organization: organization.id },
-              query: { cursor, limit: 100 },
-            },
-            signal,
-          })
-          .then(data),
-      ),
-  });
   const creatable =
-    scope === "personal" || (scope === "account" && can("api_key.manage"));
+    scope === "personal" || (scope === "account" && can("admin"));
   const create = creatable ? <CreateKey accountId={accountId} /> : null;
   const items = query.data?.items ?? [];
   return (
@@ -162,9 +150,23 @@ export function ApiKeys({
                     </MenuItem>
                   }
                   action={() =>
-                    client.http.POST("/api/v1/api-keys/{key_id}/revoke", {
-                      params: { path: { key_id: item.id } },
-                    })
+                    scope === "personal"
+                      ? client.http.DELETE("/api/v1/users/me/keys/{key_id}", {
+                          params: { path: { key_id: item.id } },
+                          headers: ifMatch(rowTag(item)),
+                        })
+                      : client.http.DELETE(
+                          "/api/v1/workspaces/{workspace_id}/keys/{key_id}",
+                          {
+                            params: {
+                              path: {
+                                workspace_id: workspace.id,
+                                key_id: item.id,
+                              },
+                            },
+                            headers: ifMatch(rowTag(item)),
+                          },
+                        )
                   }
                 />
               )
@@ -187,24 +189,17 @@ export function ApiKeys({
                       label: t("Owner"),
                       render: (
                         item: NonNullable<typeof query.data>["items"][number],
-                      ) => {
-                        const owner = owners.data?.find(
-                          (user) => user.id === item.principal_id,
-                        );
-                        return owner ? (
-                          <span className={settings.inlineIdentity}>
-                            <UserAvatar
-                              name={owner.name}
-                              id={owner.id}
-                              url={owner.image_url}
-                              className="size-5 rounded-full"
-                            />
-                            {owner.name}
-                          </span>
-                        ) : (
-                          item.principal_id
-                        );
-                      },
+                      ) => (
+                        <span className={settings.inlineIdentity}>
+                          <UserAvatar
+                            name={item.principal.name}
+                            id={item.principal.id}
+                            url={item.principal.image_url}
+                            className="size-5 rounded-full"
+                          />
+                          {item.principal.name}
+                        </span>
+                      ),
                     },
                   ]
                 : []),
@@ -273,15 +268,19 @@ function CreateKey({
       const body = { name, expires_at: expirationTimestamp(expires) };
       return accountId
         ? client.http
-            .POST("/api/v1/service-accounts/{account_id}/api-keys", {
-              params: { path: { account_id: accountId } },
-              body,
-            })
+            .POST(
+              "/api/v1/workspaces/{workspace_id}/service-accounts/{account_id}/keys",
+              {
+                params: {
+                  path: { workspace_id: workspace.id, account_id: accountId },
+                },
+                body,
+              },
+            )
             .then(data)
         : client.http
-            .POST("/api/v1/workspaces/{workspace}/personal-api-keys", {
-              params: { path: { workspace: workspace.id } },
-              body,
+            .POST("/api/v1/users/me/keys", {
+              body: { ...body, workspace_id: workspace.id },
             })
             .then(data);
     },
@@ -318,7 +317,7 @@ function CreateKey({
       {create.data ? (
         <div className={styles.stack}>
           <SecretReveal
-            value={create.data.bearer}
+            value={create.data.secret}
             label={t("API key")}
             caution={t("Copy this key now. It will not be shown again.")}
           />

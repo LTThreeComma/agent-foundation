@@ -1,3 +1,4 @@
+export { ArchivedFilter } from "./archived-filter";
 export { Empty } from "./empty";
 export { ListRow, ListRows, ListRowsEmpty } from "./list-rows";
 export { Pagination } from "./pagination";

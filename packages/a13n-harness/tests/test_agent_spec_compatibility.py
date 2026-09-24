@@ -49,7 +49,11 @@ def test_fixed_agent_spec_preserves_declared_fields_and_legacy_context(tmp_path:
     assert characteristics.context_window_tokens == 128000
     assert characteristics.summary_reminder_tokens == 64000
     assert characteristics.compact_threshold == 0.8
-    assert characteristics.capabilities == frozenset(ModelCapability)
+    assert characteristics.capabilities == {
+        ModelCapability.IMAGE_UNDERSTANDING,
+        ModelCapability.AUDIO_UNDERSTANDING,
+        ModelCapability.VIDEO_UNDERSTANDING,
+    }
     assert "context_window" not in serialized["model_characteristics"]
     assert serialized["model_characteristics"]["context_window_tokens"] == 128000
     assert [(item.name, item.arguments) for item in spec.capabilities] == [

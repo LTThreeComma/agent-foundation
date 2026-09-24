@@ -455,6 +455,8 @@ def steps_for(result: Plan) -> list[Step]:
             command.extend(sorted(result.workflows))
         steps.append(Step("actionlint", command, cwd=REPOSITORY_ROOT))
     python_files = sorted(result.python_files)
+    if any(f.startswith("packages/a13n-service/") for f in python_files):
+        steps.append(Step("Service import boundaries", ["make", "service-boundaries"]))
     if python_files:
         steps.append(Step("ruff check", ["uv", "run", "--locked", "ruff", "check", "--no-fix", *python_files]))
         steps.append(Step("ruff format", ["uv", "run", "--locked", "ruff", "format", "--check", *python_files]))

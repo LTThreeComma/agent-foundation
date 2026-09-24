@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { isRecord } from "../../../service-client";
+import type { Schema } from "../../../shared/api";
 import { jsonObject, validateSettings } from "../../../shared/forms";
 import {
   mediaKinds,
@@ -14,6 +16,21 @@ export function thinkingSelection(value: unknown): string {
   if (value === false) return "false";
   if (typeof value === "string") return value;
   return "true";
+}
+
+/** The effort levels a calling API's settings schema allows for `thinking`. */
+export function thinkingEfforts(
+  settingsSchema: Record<string, Schema["JsonValue"]> | undefined,
+): string[] {
+  const properties = settingsSchema?.properties;
+  const thinking = isRecord(properties) ? properties.thinking : undefined;
+  const variants =
+    isRecord(thinking) && Array.isArray(thinking.anyOf) ? thinking.anyOf : [];
+  return variants
+    .flatMap((variant: unknown) =>
+      isRecord(variant) && Array.isArray(variant.enum) ? variant.enum : [],
+    )
+    .filter((value: unknown): value is string => typeof value === "string");
 }
 
 export type AgentDraft = ReturnType<typeof useAgentDraft>;
@@ -33,7 +50,7 @@ export function useAgentDraft(initial: AgentConfig) {
     typeof initialMaxTokens === "number" ? String(initialMaxTokens) : "";
   const initialSettingsText = JSON.stringify(initialExtraSettings, null, 2);
   const [instructions, setInstructions] = useState(initial.instructions ?? ""),
-    [model, setModel] = useState(initial.model.model_key),
+    [model, setModel] = useState(initial.model.model_id),
     [mediaUnderstanding, setMediaUnderstanding] = useState(
       initial.media_understanding ?? {},
     ),
@@ -45,7 +62,6 @@ export function useAgentDraft(initial: AgentConfig) {
       initial.default_environment_template_id ?? null,
     ),
     [toolsets, setToolsets] = useState(initial.toolsets ?? {}),
-    [memory, setMemory] = useState(initial.memory),
     [skills, setSkills] = useState(initial.skills ?? []),
     [connections, setConnections] = useState(initial.connection_tools ?? []);
   const dirty =
@@ -54,12 +70,11 @@ export function useAgentDraft(initial: AgentConfig) {
         (mediaUnderstanding[kind] ?? null) !==
         (initial.media_understanding?.[kind] ?? null),
     ) ||
-    JSON.stringify(memory) !== JSON.stringify(initial.memory) ||
     environmentTemplateId !==
       (initial.default_environment_template_id ?? null) ||
     JSON.stringify(toolsets) !== JSON.stringify(initial.toolsets ?? {}) ||
     instructions !== (initial.instructions ?? "") ||
-    model !== initial.model.model_key ||
+    model !== initial.model.model_id ||
     thinking !== thinkingSelection(initialThinking) ||
     maxTokens !== initialMaxTokensText ||
     settings !== initialSettingsText ||
@@ -88,8 +103,6 @@ export function useAgentDraft(initial: AgentConfig) {
     setEnvironmentTemplateId,
     toolsets,
     setToolsets,
-    memory,
-    setMemory,
     skills,
     setSkills,
     connections,
@@ -105,7 +118,7 @@ export type DraftBuild =
 /** Validates the draft and produces the configuration a save would publish. */
 export function buildDraftConfig(
   draft: AgentDraft,
-  settingsSchema: Record<string, unknown> | undefined,
+  settingsSchema: Record<string, Schema["JsonValue"]> | undefined,
   t: (value: string) => string,
 ): DraftBuild {
   const { initial } = draft;
@@ -142,12 +155,11 @@ export function buildDraftConfig(
         initial,
         {
           instructions: draft.instructions,
-          memory: draft.memory,
           toolsets: draft.toolsets,
           reviewer: initial.reviewer,
           model: {
             ...initial.model,
-            model_key: draft.model,
+            model_id: draft.model,
             settings: modelSettings,
           },
           skills: draft.skills,
