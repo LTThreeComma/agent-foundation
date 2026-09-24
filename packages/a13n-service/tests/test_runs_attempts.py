@@ -404,17 +404,20 @@ async def test_takeover_keeps_external_answer_without_replaying_local_approval(
     ]
     scripted_model._script(
         {
-            "delta": {
-                "tool_calls": [
-                    {
-                        "index": index,
-                        "id": call_id,
-                        "type": "function",
-                        "function": {"name": name, "arguments": json.dumps(args)},
-                    }
-                    for index, (name, args, call_id) in enumerate(calls)
-                ]
-            },
+            "deltas": [
+                {
+                    "tool_calls": [
+                        {
+                            "index": index,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(args)},
+                        }
+                        for index, (name, args, call_id) in enumerate(calls)
+                    ]
+                }
+            ],
+            "interval": 0,
             "finish": "tool_calls",
             "gate": None,
             "to": None,
