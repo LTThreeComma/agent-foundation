@@ -46,7 +46,7 @@ Failures on these routes still use the JSON [error envelope](#errors). Stored te
 
 A collection answers `{"items": [...], "next_cursor": "…" | null}`; `null` means there is no next page. `limit` is 1 to 100 and defaults to 50. `cursor` is opaque and at most 2048 characters. A cursor is bound to its collection, to the scope that produced it and to every filter of the query that issued it, so it continues only that query; a malformed cursor, or one presented with another collection, scope or filter set, is 400 `invalid_cursor`. Each list's order and filters are in its owning chapter.
 
-Some reads are bounded catalogues and return all their items with `next_cursor: null`, taking no `limit` or `cursor`: provider types, a model provider's catalogue (model discovery), a connection's tools, a connector app's actions and a thread's mounts. Toolsets and a run's attempts return `{"items": [...]}` only, and lineage takes only `cursor`. Trace pages keep the backend's native order, can hold fewer items than the limit, and keep the first page's resolved time window on every later page; their cursor is also bound to the window parameters as given ([07](07-facts-and-delivery.md#trace-query)).
+Some reads are bounded catalogues and return all their items with `next_cursor: null`, taking no `limit` or `cursor`: provider types, a connection's tools, a connector app's actions and a thread's mounts. Toolsets and a run's attempts return `{"items": [...]}` only and the model catalog `{"items": [...], "status": ...}`; lineage takes only `cursor`. Trace pages keep the backend's native order, can hold fewer items than the limit, and keep the first page's resolved time window on every later page; their cursor is also bound to the window parameters as given ([07](07-facts-and-delivery.md#trace-query)).
 
 ### Preconditions
 
@@ -168,16 +168,16 @@ Paths are relative to `/api/v1` unless they start at the root. `{org}` is an org
 
 `{kind}-providers` stands for each of `model-providers`, `environment-providers`, `web-providers` and `connector-providers`.
 
-| Path                                                      | Methods    | Owner                                            |
-| --------------------------------------------------------- | ---------- | ------------------------------------------------ |
-| `/provider-types/{kind}`                                  | GET        | [08](08-providers.md#provider-type-descriptions) |
-| `/organizations/{org}/{kind}-providers`                   | GET, POST  | [04](04-resources.md#provider-resources)         |
-| `/organizations/{org}/{kind}-providers/{provider}`        | GET, PATCH | [04](04-resources.md#provider-resources)         |
-| `/organizations/{org}/{kind}-providers/{provider}/test`   | POST       | [04](04-resources.md#provider-resources)         |
-| `/organizations/{org}/model-providers/{provider}/catalog` | GET        | [04](04-resources.md#models)                     |
-| `/organizations/{org}/models`                             | GET, POST  | [04](04-resources.md#models)                     |
-| `/organizations/{org}/models/{model}`                     | GET, PATCH | [04](04-resources.md#models)                     |
-| `/workspaces/{ws}/media-understanding-defaults`           | GET, PUT   | [04](04-resources.md#models)                     |
+| Path                                                    | Methods    | Owner                                            |
+| ------------------------------------------------------- | ---------- | ------------------------------------------------ |
+| `/provider-types/{kind}`                                | GET        | [08](08-providers.md#provider-type-descriptions) |
+| `/organizations/{org}/{kind}-providers`                 | GET, POST  | [04](04-resources.md#provider-resources)         |
+| `/organizations/{org}/{kind}-providers/{provider}`      | GET, PATCH | [04](04-resources.md#provider-resources)         |
+| `/organizations/{org}/{kind}-providers/{provider}/test` | POST       | [04](04-resources.md#provider-resources)         |
+| `/model-catalog`                                        | GET        | [08](08-providers.md#model-catalog)              |
+| `/organizations/{org}/models`                           | GET, POST  | [04](04-resources.md#models)                     |
+| `/organizations/{org}/models/{model}`                   | GET, PATCH | [04](04-resources.md#models)                     |
+| `/workspaces/{ws}/media-understanding-defaults`         | GET, PUT   | [04](04-resources.md#models)                     |
 
 ### Agents, skills and toolsets
 
@@ -267,15 +267,15 @@ Paths are relative to `/api/v1` unless they start at the root. `{org}` is an org
 
 ### Environments
 
-| Path                                                    | Methods            | Owner                                                                                |
-| ------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------ |
-| `/workspaces/{ws}/environment-templates`                | GET, POST          | [04](04-resources.md#environment-templates)                                          |
-| `/workspaces/{ws}/environment-templates/{template}`     | GET, PATCH         | [04](04-resources.md#environment-templates)                                          |
-| `/workspaces/{ws}/environments`                         | GET, POST          | [06](06-environments.md#mounts), [envd over HTTP](06-environments.md#envd-over-http) |
-| `/workspaces/{ws}/environments/{environment}`           | GET, PATCH, DELETE | [06](06-environments.md#stop-start-and-delete)                                       |
-| `/workspaces/{ws}/environments/{environment}/stop`      | POST               | [06](06-environments.md#stop-start-and-delete)                                       |
-| `/workspaces/{ws}/threads/{thread}/environments`        | GET, POST          | [06](06-environments.md#mounts)                                                      |
-| `/workspaces/{ws}/threads/{thread}/environments/{name}` | DELETE             | [06](06-environments.md#mounts)                                                      |
+| Path                                                    | Methods            | Owner                                                                                                   |
+| ------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------- |
+| `/workspaces/{ws}/environment-templates`                | GET, POST          | [04](04-resources.md#environment-templates)                                                             |
+| `/workspaces/{ws}/environment-templates/{template}`     | GET, PATCH         | [04](04-resources.md#environment-templates)                                                             |
+| `/workspaces/{ws}/environments`                         | GET, POST          | [06](06-environments.md#mounts), [external targets](06-environments.md#external-targets)                |
+| `/workspaces/{ws}/environments/{environment}`           | GET, PATCH, DELETE | [06](06-environments.md#stop-start-and-delete), [external targets](06-environments.md#external-targets) |
+| `/workspaces/{ws}/environments/{environment}/stop`      | POST               | [06](06-environments.md#stop-start-and-delete)                                                          |
+| `/workspaces/{ws}/threads/{thread}/environments`        | GET, POST          | [06](06-environments.md#mounts)                                                                         |
+| `/workspaces/{ws}/threads/{thread}/environments/{name}` | DELETE             | [06](06-environments.md#mounts)                                                                         |
 
 ### Usage and traces
 

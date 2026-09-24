@@ -254,9 +254,6 @@ Host-selected daemon recipe, shared by every Session on this runtime.
 | `max_query_entries`       | false    | integer        | maximum=100000; exclusiveMinimum=0; default=10000      |
 | `max_output_bytes`        | false    | integer        | maximum=16777216; exclusiveMinimum=0; default=1048576  |
 | `snapshot`                | false    | string or null | maxLength=256; default=null                            |
-| `cpu`                     | false    | integer        | minimum=1; maximum=32; default=2                       |
-| `memory`                  | false    | integer        | minimum=1; maximum=128; default=4                      |
-| `disk`                    | false    | integer        | minimum=1; maximum=1024; default=10                    |
 
 ## `ModalEnvironmentConfiguration`
 

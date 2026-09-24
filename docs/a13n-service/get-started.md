@@ -26,7 +26,7 @@ Open Console at the Service's public URL and sign in with that email and passwor
 ## Add a model
 
 1. Open **Models → Add model → Connect a new provider**, choose the provider type (for example OpenAI or Anthropic) and enter its API key.
-2. Choose a model from the provider's catalog, or enter a model ID.
+2. Choose a model from the model catalog, or enter a model ID.
 
 Outbound requests reject private addresses and plain HTTP by default. To use a model server on your own network, allow it first; see [outbound requests](configuration.md#outbound-requests). See [Models](models.md) for every provider type.
 

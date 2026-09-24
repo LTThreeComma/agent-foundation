@@ -305,7 +305,7 @@ The `expire_credentials` sweep runs every `auth.expiry_scan_seconds` and deletes
 
 ## Credential encryption
 
-Every encrypted column (provider credentials and extra request headers; connection credentials, OAuth tokens, client secrets and pending authorization flows; secrets; subscription signing secrets; email outbox payloads and webhook outbox targets) uses one key ring, configured by `encryption.keys` (key ID to base64-encoded 32-byte key) and `encryption.active_key_id`:
+Every encrypted column (provider credentials and extra request headers; external target tokens; connection credentials, OAuth tokens, client secrets and pending authorization flows; secrets; subscription signing secrets; email outbox payloads and webhook outbox targets) uses one key ring, configured by `encryption.keys` (key ID to base64-encoded 32-byte key) and `encryption.active_key_id`:
 
 - `protect(plaintext, location)` encrypts with AES-256-GCM under the active key and a fresh random 96-bit nonce, and returns the envelope `{key_id, nonce, ciphertext}`. Plaintext is at most 65536 bytes (`invalid_argument`). Without an active key it is `unavailable`.
 - The location `(organization_id, table, column, row_id)` is authenticated data: an envelope decrypts only at the exact row and column it was written for. `organization_id` is NULL only for account-wide values such as account mail. Copying a value to another row, such as a subscription's signing secret into a webhook outbox row, reveals it and protects it again for the new location.

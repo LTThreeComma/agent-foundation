@@ -105,22 +105,24 @@ The complete machine-readable validation schema, including named enum/union defi
 
 ## `worker`
 
-| Setting                    | Environment variable             | Type / choices | Constraints and default                          |
-| -------------------------- | -------------------------------- | -------------- | ------------------------------------------------ |
-| `worker.slots`             | `A13N_WORKER__SLOTS`             | integer        | minimum=1; maximum=128; default=4                |
-| `worker.max_attempts`      | `A13N_WORKER__MAX_ATTEMPTS`      | integer        | minimum=1; maximum=20; default=3                 |
-| `worker.lease_seconds`     | `A13N_WORKER__LEASE_SECONDS`     | integer        | minimum=3; maximum=300; default=30               |
-| `worker.scan_seconds`      | `A13N_WORKER__SCAN_SECONDS`      | number         | maximum=30; exclusiveMinimum=0; default=1        |
-| `worker.authority_seconds` | `A13N_WORKER__AUTHORITY_SECONDS` | number         | maximum=30; exclusiveMinimum=0; default=1        |
-| `worker.drain_seconds`     | `A13N_WORKER__DRAIN_SECONDS`     | number         | maximum=300; exclusiveMinimum=0; default=10      |
-| `worker.delivery_count`    | `A13N_WORKER__DELIVERY_COUNT`    | integer        | minimum=1; maximum=128; default=8                |
-| `worker.delivery_bytes`    | `A13N_WORKER__DELIVERY_BYTES`    | integer        | minimum=1024; maximum=16777216; default=262144   |
-| `worker.display_bytes`     | `A13N_WORKER__DISPLAY_BYTES`     | integer        | minimum=65536; maximum=67108864; default=8388608 |
-| `worker.output_bytes`      | `A13N_WORKER__OUTPUT_BYTES`      | integer        | minimum=1024; maximum=16777216; default=1048576  |
-| `worker.stream_length`     | `A13N_WORKER__STREAM_LENGTH`     | integer        | minimum=16; maximum=100000; default=2048         |
-| `worker.stream_ttl`        | `A13N_WORKER__STREAM_TTL`        | integer        | minimum=1; maximum=86400; default=600            |
-| `worker.child_depth`       | `A13N_WORKER__CHILD_DEPTH`       | integer        | minimum=0; maximum=16; default=4                 |
-| `worker.child_count`       | `A13N_WORKER__CHILD_COUNT`       | integer        | minimum=0; maximum=256; default=16               |
+| Setting                          | Environment variable                   | Type / choices | Constraints and default                          |
+| -------------------------------- | -------------------------------------- | -------------- | ------------------------------------------------ |
+| `worker.slots`                   | `A13N_WORKER__SLOTS`                   | integer        | minimum=1; maximum=128; default=4                |
+| `worker.max_attempts`            | `A13N_WORKER__MAX_ATTEMPTS`            | integer        | minimum=1; maximum=20; default=3                 |
+| `worker.lease_seconds`           | `A13N_WORKER__LEASE_SECONDS`           | integer        | minimum=3; maximum=300; default=30               |
+| `worker.scan_seconds`            | `A13N_WORKER__SCAN_SECONDS`            | number         | maximum=30; exclusiveMinimum=0; default=1        |
+| `worker.authority_seconds`       | `A13N_WORKER__AUTHORITY_SECONDS`       | number         | maximum=30; exclusiveMinimum=0; default=1        |
+| `worker.drain_seconds`           | `A13N_WORKER__DRAIN_SECONDS`           | number         | maximum=300; exclusiveMinimum=0; default=10      |
+| `worker.delivery_count`          | `A13N_WORKER__DELIVERY_COUNT`          | integer        | minimum=1; maximum=128; default=8                |
+| `worker.delivery_bytes`          | `A13N_WORKER__DELIVERY_BYTES`          | integer        | minimum=1024; maximum=16777216; default=262144   |
+| `worker.display_bytes`           | `A13N_WORKER__DISPLAY_BYTES`           | integer        | minimum=65536; maximum=67108864; default=8388608 |
+| `worker.output_bytes`            | `A13N_WORKER__OUTPUT_BYTES`            | integer        | minimum=1024; maximum=16777216; default=1048576  |
+| `worker.stream_length`           | `A13N_WORKER__STREAM_LENGTH`           | integer        | minimum=16; maximum=100000; default=10000        |
+| `worker.stream_ttl`              | `A13N_WORKER__STREAM_TTL`              | integer        | minimum=1; maximum=86400; default=600            |
+| `worker.stream_coalesce_seconds` | `A13N_WORKER__STREAM_COALESCE_SECONDS` | number         | minimum=0; maximum=1; default=0.1                |
+| `worker.stream_trim_seconds`     | `A13N_WORKER__STREAM_TRIM_SECONDS`     | number         | minimum=0; maximum=600; default=10               |
+| `worker.child_depth`             | `A13N_WORKER__CHILD_DEPTH`             | integer        | minimum=0; maximum=16; default=4                 |
+| `worker.child_count`             | `A13N_WORKER__CHILD_COUNT`             | integer        | minimum=0; maximum=256; default=16               |
 
 ## `environments`
 
@@ -129,6 +131,7 @@ The complete machine-readable validation schema, including named enum/union defi
 | `environments.scan_seconds`       | `A13N_ENVIRONMENTS__SCAN_SECONDS`       | number          | maximum=300; exclusiveMinimum=0; default=5    |
 | `environments.batch`              | `A13N_ENVIRONMENTS__BATCH`              | integer         | minimum=1; maximum=1000; default=16           |
 | `environments.operation_seconds`  | `A13N_ENVIRONMENTS__OPERATION_SECONDS`  | number          | maximum=3600; exclusiveMinimum=0; default=120 |
+| `environments.renewal_seconds`    | `A13N_ENVIRONMENTS__RENEWAL_SECONDS`    | number          | maximum=60; exclusiveMinimum=0; default=20    |
 | `environments.wait_seconds`       | `A13N_ENVIRONMENTS__WAIT_SECONDS`       | number          | maximum=3600; exclusiveMinimum=0; default=300 |
 | `environments.managed_count`      | `A13N_ENVIRONMENTS__MANAGED_COUNT`      | integer         | minimum=1; maximum=100000; default=100        |
 | `environments.allow_local`        | `A13N_ENVIRONMENTS__ALLOW_LOCAL`        | boolean         | default=false                                 |

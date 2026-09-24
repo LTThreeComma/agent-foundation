@@ -62,7 +62,7 @@ Sandbox timeout defaults to 3,600 seconds (30–86,400); request timeout default
 
 ### Daytona
 
-`DaytonaEnvironmentConfiguration` selects snapshot and resources, defaulting to writable `/home/daytona`. `DaytonaConnectionConfiguration` supplies organization and target region; `TokenCredential` supplies the API key.
+`DaytonaEnvironmentConfiguration` selects a snapshot, which sets the sandbox's resources, defaulting to writable `/home/daytona`. `DaytonaConnectionConfiguration` supplies organization and target region; `TokenCredential` supplies the API key.
 
 ### Modal
 

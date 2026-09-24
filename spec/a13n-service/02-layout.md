@@ -30,7 +30,7 @@ a13n_service/
     agents/           tables  schemas  service  routes  validation  definition  toolsets  assistant
     skills/           tables  schemas  service  routes  package  content  github  pins
     providers/        tables (all four provider tables)  schemas  service  routes  scope  probe
-    models/           tables  schemas  service  routes  catalog  media  runtime
+    models/           tables  schemas  service  routes  catalog  models_dev  media  runtime
     environment_templates/   tables  schemas  service  routes
     connector_providers/     schemas  routes  catalog
     web_providers/    runtime
@@ -43,19 +43,21 @@ a13n_service/
 
   runs/               how input becomes sealed runs
     tables.py         sessions, threads, inbox_entries, runs, run_attempts, usage_records
-    sessions.py  threads.py  archive.py  inbox.py  entries.py  inputs.py
+    sessions.py  threads.py  archive.py  inbox.py  entries.py  inputs.py  attachments.py  placement.py
     submit.py  accept.py  admission.py  resume.py  claim.py  worker.py  attempts.py  execute.py  seal.py
     agent.py  host.py  calls.py  boundaries.py  checkpoints.py  display.py  deferred.py  children.py  subagents.py
     configuration.py  assets.py  skills.py  secrets.py  web.py
     stream.py  webhooks.py  usage.py  traces.py  runs.py  runtime.py
     schemas.py  routes.py  trace_routes.py
     environments/     tables  schemas  service  routes  lifecycle  maintenance  mounts  execution  adapters
+                      external
 
   providers/          what the Service calls
     registry.py       provider definitions by (kind, type)
     endpoints.py      the environment endpoints Service processes dial, checked by the endpoint policy
+    envd.py           external envd targets: endpoint and token rules, device identity, the adapter
     model_settings.py the settings schema of each calling API
-    environments/     the offered environment types; docker.py  local.py
+    environments/     the offered environment types; docker.py  e2b.py  local.py
     tools/            the tool-source contract; mcp.py  oauth.py  connectors.py  discovery.py
                       mcp_catalog.py  mcp_servers.json
     traces/           the trace backend contract; langfuse.py  logfire.py
@@ -75,6 +77,7 @@ The tree fixes responsibilities and boundaries, not a file inventory. A module b
 app.py, cli.py, distribution.py, migrations/  ->  everything   (no infra, business or provider module imports them)
 runs  ->  resources  ->  tenancy  ->  infra
 runs, resources  ->  providers.registry, providers.tools, providers.traces
+runs             ->  providers.envd
 tenancy, resources, runs  ->  settings.py
 settings.py      ->  providers.tools.mcp_catalog, providers.traces
 providers  ->  infra                                          (and the Harness)

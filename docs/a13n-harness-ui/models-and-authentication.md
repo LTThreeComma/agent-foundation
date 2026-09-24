@@ -278,12 +278,12 @@ Grok uses `kind: grok_subscription` and a compatible `grok:` route. API-key auth
 
 Within `model_characteristics`:
 
-| Field                                    | Default when the object is supplied | Meaning                                                                                     |
-| ---------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------- |
-| `capabilities`                           | `[]`                                | Optional native policy: `image_understanding`, `video_understanding`, `audio_understanding` |
-| `context_window_tokens`                  | `null`                              | Positive working context budget; omission retains native/catalog behavior                   |
-| `proactive_context_management_threshold` | `0.65`                              | Fraction 0–1, or `null` to disable the derived proactive threshold                          |
-| `compact_threshold`                      | `0.90`                              | Fraction greater than 0 and at most 1                                                       |
+| Field                                    | Default when the object is supplied | Meaning                                                                                                                                                      |
+| ---------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `capabilities`                           | `[]`                                | Optional native policy: `image_understanding`, `video_understanding`, `audio_understanding`; `document_understanding` is accepted but not used by Harness UI |
+| `context_window_tokens`                  | `null`                              | Positive working context budget; omission retains native/catalog behavior                                                                                    |
+| `proactive_context_management_threshold` | `0.65`                              | Fraction 0–1, or `null` to disable the derived proactive threshold                                                                                           |
+| `compact_threshold`                      | `0.90`                              | Fraction greater than 0 and at most 1                                                                                                                        |
 
 The legacy name `context_window` is still accepted in configuration and saved snapshots. New serialization uses `context_window_tokens`; if both are supplied, the canonical name takes precedence. Existing files do not need to be rewritten for this rename.
 

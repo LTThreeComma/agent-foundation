@@ -160,6 +160,16 @@ A message that cannot run, for example because its agent was archived or an over
 
 Archiving a workspace stops its execution: a queued or newly submitted entry fails in place with `disabled`, and a run already executing fails with `authority_revoked` the next time its worker renews authority, within `worker.authority_seconds`.
 
+### Attached files
+
+An asset or a URL's content reaches the model in one of three ways:
+
+- A JPEG, PNG, GIF or WebP image, a common audio or video format, or a PDF is sent to the model natively when the run's model declares that understanding (`image_understanding`, `audio_understanding`, `video_understanding` or `document_understanding` in its [characteristics](models.md)). Other formats, such as SVG, TIFF, Word or Excel files, are never sent natively, because providers differ on them.
+- A text file of up to 64 KiB is included as text: any `text/*` type, such as plain text, Markdown or CSV, and JSON, XML, YAML or JavaScript. A URL's text is decoded with the charset it declares. When the run has no environment, a longer text from a URL is included cut to its first 64 KiB, and the model is told it was cut.
+- Any other file, such as an archive, a PDF the model cannot read or a larger text file, is written into the run's primary environment (the `workspace` mount) under `/workspace/.a13n/attachments/`, with a name shortened to 200 bytes and cleaned of control characters and `/`. The model is told the file's path, name, media type and size and works on it with its file and shell tools. The same file attached again, in a later message or by a retried attempt, is written only once, unless the run changed the copy's size. The file lives only in that environment, so a thread that replaces its primary environment, or a fork with fresh environments, no longer has it.
+
+When the run can take a file in none of these ways, the message is refused with `400 invalid_argument`, reason `environment_required`, the part's `field` (such as `content.1.asset_id`) and the file's `media_type`. Give the agent an [environment template](environments.md), mount an environment on the thread, or choose a model that understands the media. The same check applies when a queued message is edited, and again when its run starts. A URL's type is known only once it is fetched, so a non-text URL the run cannot read fails its entry then. A file the environment refuses to write fails its entry with `invalid_argument`; other steers carry on.
+
 ### Manage queued messages
 
 `GET …/threads/{thread_id}/inbox` lists entries, and `GET …/inbox/{entry_id}` reads one, with their `status`: `pending` (queued), `assigned` to a run, `consumed`, `failed` or `withdrawn`. Changes to pending entries take the **thread's** `If-Match`:
@@ -271,7 +281,9 @@ The stream is provisional; the run's items are the durable record. To render a t
 2. Apply `delta` frames whose `attempt` and `sequence` come after the items' `position` (`"{attempt}-{sequence}"`).
 3. On `reset` or `gap`, read the items again; on `changed`, read the thread.
 
-`delta` and `boundary` frames carry an SSE `id`. Reconnect with the last one in `Last-Event-ID` to continue after it; if it is no longer retained, the stream starts with a `gap`. The Service keeps the latest `worker.stream_length` entries for `worker.stream_ttl` seconds, sends a keep-alive comment every 15 seconds, and ends the stream when your access to the workspace ends. The frames' JSON Schema is `proto/a13n-service/thread-stream.schema.json`.
+The stream carries only live output the items do not cover yet. Consecutive text, reasoning or tool-argument deltas of one message or tool call that arrive within `worker.stream_coalesce_seconds` come as one `delta` whose event carries their text together. After each checkpoint the Service removes the entries its items now cover, once they are `worker.stream_trim_seconds` old; it also caps a stream at about `worker.stream_length` entries and drops it `worker.stream_ttl` seconds after the last output.
+
+`delta` and `boundary` frames carry an SSE `id`. Reconnect with the last one in `Last-Event-ID` to continue after it. A connection that starts or resumes after removed entries receives a `gap` first, so reading the items again is always enough to recover. The Service sends a keep-alive comment every 15 seconds and ends the stream when your access to the workspace ends. The frames' JSON Schema is `proto/a13n-service/thread-stream.schema.json`.
 
 ## Usage
 

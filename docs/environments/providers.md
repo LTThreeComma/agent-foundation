@@ -123,12 +123,12 @@ Use `make image-docker-environment` to build the image, and follow the [Docker l
 
 ## Cloud providers
 
-E2B (`e2b`), Daytona (`daytona`), Modal (`modal`), Vercel Sandbox (`vercel`), Fly.io Sprites (`sprites`), and Runloop (`runloop`) provide cloud execution without installing envd. All support files and shell commands; E2B additionally supports process observations, stdin, retained SDK text output, and loopback ports. The Service does not offer these types; use them through the Harness.
+E2B (`e2b`), Daytona (`daytona`), Modal (`modal`), Vercel Sandbox (`vercel`), Fly.io Sprites (`sprites`), and Runloop (`runloop`) provide cloud execution without installing envd. All support files and shell commands; E2B additionally supports process observations, stdin, retained SDK text output, and loopback ports. The Service offers all six as environment provider types; its E2B accounts always use the E2B cloud ([Service environments](../a13n-service/environments.md#providers)).
 
 | Provider       | Backend settings                                                               | Credential fields               | Common template settings                                                       |
 | -------------- | ------------------------------------------------------------------------------ | ------------------------------- | ------------------------------------------------------------------------------ |
 | E2B            | `domain`, optional `api_url`                                                   | `api_key`                       | `template`, `user`, `root`, `allow_internet_access`, `timeout_seconds`         |
-| Daytona        | `organization_id`, `target` (default `us`)                                     | `api_key`                       | `snapshot`, `cpu`, `memory`, `disk`                                            |
+| Daytona        | `organization_id`, `target` (default `us`)                                     | `api_key`                       | `snapshot`, which sets the sandbox's resources                                 |
 | Modal          | `workspace`, existing deployed `app_name`, `environment_name` (default `main`) | `token_id`, `token_secret`      | `image` (default `python:3.13-slim`), `cpu`, `memory` (MiB), `timeout_seconds` |
 | Vercel Sandbox | `team_id`, `project_id`                                                        | `api_key` (Vercel access token) | `runtime` (default `python3.13`), `vcpus`, `timeout_seconds`                   |
 | Fly.io Sprites | `organization`                                                                 | `api_key` (Sprites token)       | `region`                                                                       |

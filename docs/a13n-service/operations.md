@@ -51,6 +51,7 @@ Control processes run these sweeps. Each pass handles a bounded batch (`control.
 | `expire_leases`                 | `worker.authority_seconds`         | Ends attempts whose lease expired, so the run continues on another worker or fails.                                        |
 | `expire_credentials`            | `auth.expiry_scan_seconds`         | Deletes expired or revoked login sessions, mail links and unaccepted invitations.                                          |
 | `maintain_environments`         | `environments.scan_seconds`        | Stops or deletes managed environments idle past their template's thresholds, and continues unfinished provider operations. |
+| `renew_environments`            | `environments.scan_seconds`        | Renews ready hosted sandboxes that would otherwise end, each call bounded by `environments.renewal_seconds`.               |
 | `recover_connection_operations` | `providers.operation_scan_seconds` | Settles connection authorization operations whose owner disappeared past their deadline.                                   |
 | `deliver_outbox`                | `control.scan_seconds`             | Delivers webhooks, identity mail and subagent results.                                                                     |
 | `purge_outbox`                  | hourly                             | Removes settled deliveries older than `control.outbox_retention_days`.                                                     |

@@ -19,7 +19,7 @@ An asset is immutable content with a name, usable in messages and published by a
 - **Read** with `GET …/assets`, `GET …/assets/{asset_id}`, and `GET …/assets/{asset_id}/content`, which returns the bytes as an attachment.
 - **Retire** with `DELETE …/assets/{asset_id}` and its `If-Match`. A retired asset cannot be attached to new messages, but its content stays readable for the history that references it.
 
-Attach an asset to a message as a content part `{"type": "asset", "asset_id": "ast_..."}`; see [messages](agents-and-runs.md#submit-a-message). The run reads the content with the submitter's access and passes it to the model.
+Attach an asset to a message as a content part `{"type": "asset", "asset_id": "ast_..."}`; see [messages](agents-and-runs.md#submit-a-message). The run reads the content with the submitter's access and gives it to the model as media, as text, or as a file in the run's environment; see [attached files](agents-and-runs.md#attached-files).
 
 Agents with the `assets` toolset enabled can publish a file from their environment with `publish_asset`. The new asset records the run, attempt and tool call that produced it in `source`, and is bounded by `objects.max_bytes`.
 

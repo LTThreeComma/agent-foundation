@@ -247,4 +247,4 @@ A revoked credential is not silently replaced. If you intentionally want to enro
 
 ## Connect to the Service
 
-The Service does not accept self-registration. Run an HTTP daemon, add an `http_envd` provider with its endpoint and a write-only `{"token": "..."}` credential, then [register the device](../a13n-service/environments.md#register-a-device). Remote providers are connect-only and cannot back managed templates.
+The Service does not accept self-registration. Run an HTTP daemon, then [register it as an external target](../a13n-service/environments.md#register-an-external-target) with its endpoint and token. The Service only connects to it and never manages its lifecycle.

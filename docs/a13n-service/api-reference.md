@@ -1054,7 +1054,7 @@ Responses:
 
 Create Environment.
 
-Reserve a managed sandbox from a template (`creating`), or register a connect-only device (`ready`).
+Reserve a managed sandbox from a template (`creating`), or register an external envd target (`ready`).
 
 | Parameter      | Location | Required | Type / schema | Constraints and default |
 | -------------- | -------- | -------- | ------------- | ----------------------- |
@@ -1062,7 +1062,7 @@ Reserve a managed sandbox from a template (`creating`), or register a connect-on
 
 Request body: required.
 
-- `application/json`: `ManagedEnvironmentCreate or DeviceRegistration`.
+- `application/json`: `ManagedEnvironmentCreate or ExternalTargetCreate`.
 
 Responses:
 
@@ -1103,7 +1103,7 @@ Responses:
 
 ### `PATCH /api/v1/workspaces/{workspace_id}/environments/{environment_id}`
 
-Rename Environment.
+Update Environment.
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default |
 | ---------------- | -------- | -------- | -------------- | ----------------------- |
@@ -1191,19 +1191,15 @@ Responses:
 
 ## models
 
-### `GET /api/v1/organizations/{organization_id}/model-providers/{provider_id}/catalog`
+### `GET /api/v1/model-catalog`
 
-List Catalog.
+Get Model Catalog.
 
-| Parameter         | Location | Required | Type / schema | Constraints and default |
-| ----------------- | -------- | -------- | ------------- | ----------------------- |
-| `organization_id` | path     | true     | string        | —                       |
-| `provider_id`     | path     | true     | string        | —                       |
+The models.dev models the registered model provider types serve, for any signed-in principal.
 
 Responses:
 
-- **200** — Successful Response (`application/json: CatalogPage`).
-- **400** — .
+- **200** — Successful Response (`application/json: ModelCatalog`).
 - **default** — .
 
 ### `GET /api/v1/organizations/{organization_id}/models`
