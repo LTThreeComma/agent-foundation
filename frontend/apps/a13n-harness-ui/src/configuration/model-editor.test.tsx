@@ -372,7 +372,9 @@ it("cannot save the previous recipe after changing the visible connection or mod
   });
   await waitFor(() => expect(save.disabled).toBe(false));
   await user.click(screen.getByRole("combobox", { name: "Model connection" }));
-  await user.click(screen.getByRole("option", { name: "Grok subscription" }));
+  await user.click(
+    await screen.findByRole("option", { name: "Grok subscription" }),
+  );
   await waitFor(() => expect(save.disabled).toBe(true));
   await user.click(save);
   expect(mocks.put).not.toHaveBeenCalled();
