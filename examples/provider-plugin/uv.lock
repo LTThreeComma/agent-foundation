@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -41,7 +41,6 @@ dependencies = [
     { name = "google-genai" },
     { name = "httpx2" },
     { name = "jsonschema" },
-    { name = "markdown-it-py" },
     { name = "openai" },
     { name = "opentelemetry-api" },
     { name = "pathspec" },
@@ -72,8 +71,6 @@ requires-dist = [
     { name = "google-genai", specifier = ">=1.0,<3" },
     { name = "httpx2", specifier = ">=2.5,<3" },
     { name = "jsonschema", specifier = ">=4.25,<5" },
-    { name = "markdown-it-py", specifier = ">=4,<5" },
-    { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=2.0.19,<3" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.5,<2" },
     { name = "openai", specifier = ">=3.5,<4" },
     { name = "opentelemetry-api", specifier = ">=1.39,<2" },
@@ -90,7 +87,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.15,<5" },
     { name = "websockets", specifier = ">=15,<16" },
 ]
-provides-extras = ["docker", "e2b", "modal", "mem0"]
+provides-extras = ["docker", "e2b", "modal"]
 
 [package.metadata.requires-dev]
 test = [
@@ -115,12 +112,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "a13n-harness" },
-    { name = "a13n-logging" },
-    { name = "anyio" },
-    { name = "httpx2" },
-    { name = "openai" },
     { name = "pydantic" },
-    { name = "pydantic-ai" },
 ]
 
 [package.dev-dependencies]
@@ -133,12 +125,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "a13n-harness", editable = "../../packages/a13n-harness" },
-    { name = "a13n-logging", editable = "../../packages/a13n-logging" },
-    { name = "anyio", specifier = ">=4,<5" },
-    { name = "httpx2", specifier = ">=2,<3" },
-    { name = "openai", specifier = ">=3.8,<4" },
     { name = "pydantic", specifier = ">=2.12,<3" },
-    { name = "pydantic-ai", specifier = ">=2.46.0,<3" },
 ]
 
 [package.metadata.requires-dev]

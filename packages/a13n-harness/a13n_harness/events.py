@@ -34,9 +34,6 @@ type HarnessExtensionKind = Literal[
 ]
 
 
-USAGE_SCHEMA_VERSION = "1"
-
-
 class HarnessExtensionEvent(BaseModel):
     """One small Harness-owned observation absent from Pydantic AI's event vocabulary."""
 
@@ -94,34 +91,6 @@ class ContextSnapshotPayload(_FirstPartyPayload):
     request_index: int = Field(ge=0)
     request_tokens: int = Field(ge=0)
     trigger_tokens: int = Field(gt=0)
-
-
-class MemoryRecallStartedPayload(_FirstPartyPayload):
-    type: Literal["memory_recall_started"] = "memory_recall_started"
-    operation_id: str = Field(pattern=r"^memory-recall-[A-Za-z0-9_-]+$", max_length=128)
-    scopes: tuple[Literal["thread", "agent", "user"], ...] = Field(min_length=1, max_length=3)
-
-
-class MemoryRecallCompletedPayload(_FirstPartyPayload):
-    type: Literal["memory_recall_completed"] = "memory_recall_completed"
-    operation_id: str = Field(pattern=r"^memory-recall-[A-Za-z0-9_-]+$", max_length=128)
-    scopes: tuple[Literal["thread", "agent", "user"], ...] = Field(min_length=1, max_length=3)
-    result_count: int = Field(ge=0, le=100)
-
-
-class MemoryRecallFailedPayload(_FirstPartyPayload):
-    type: Literal["memory_recall_failed"] = "memory_recall_failed"
-    operation_id: str = Field(pattern=r"^memory-recall-[A-Za-z0-9_-]+$", max_length=128)
-    scopes: tuple[Literal["thread", "agent", "user"], ...] = Field(min_length=1, max_length=3)
-    error_code: str = Field(pattern=r"^[a-z][a-z0-9_]*$", max_length=128)
-    retryable: bool
-
-
-class MemoryRecallSkippedPayload(_FirstPartyPayload):
-    type: Literal["memory_recall_skipped"] = "memory_recall_skipped"
-    operation_id: str = Field(pattern=r"^memory-recall-[A-Za-z0-9_-]+$", max_length=128)
-    scopes: tuple[Literal["thread", "agent", "user"], ...] = Field(min_length=1, max_length=3)
-    reason: Literal["continuation", "empty_query"]
 
 
 class ContextOperationStartedPayload(_FirstPartyPayload):
@@ -332,10 +301,6 @@ type FirstPartyEventPayload = (
     | ModelRequestCompletedPayload
     | ModelRequestFailedPayload
     | ContextSnapshotPayload
-    | MemoryRecallStartedPayload
-    | MemoryRecallCompletedPayload
-    | MemoryRecallFailedPayload
-    | MemoryRecallSkippedPayload
     | ContextOperationStartedPayload
     | ContextOperationPreparedPayload
     | ContextOperationCompletedPayload
@@ -449,7 +414,6 @@ async def emit_harness_event(
     """Emit one first-party event from a validated typed payload."""
     await emitter.emit(
         HarnessExtensionEvent(
-            schema_version=USAGE_SCHEMA_VERSION if kind == "usage" else "1",
             kind=kind,
             payload=payload.model_dump(mode="json"),
         )
