@@ -13,10 +13,7 @@ import {
 import type { AgentConfig } from "./configuration";
 
 export const MAX_AGENT_FILE_BYTES = 1024 * 1024;
-/**
- * Version 2 holds the configuration that names models, skills, and other
- * resources by ID; version 1 files came from the earlier Service.
- */
+/** The Agent file format version that spec/frontend/console.md owns. */
 export const AGENT_FILE_VERSION = 2;
 
 /** A saved Service configuration, without resource identity or resolved credentials. */
@@ -75,10 +72,6 @@ export function parseAgentFile(source: string): AgentFile {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Enter an Agent YAML object.");
   const fields = value as Record<string, unknown>;
-  if (fields.schema_version === 1)
-    throw new Error(
-      "This Agent file uses schema_version 1 from an earlier Console, which this Console cannot import. Export the agent again from a current Console.",
-    );
   if (fields.schema_version !== AGENT_FILE_VERSION)
     throw new Error(
       "Unsupported Agent file version. Expected schema_version: 2.",

@@ -10,16 +10,22 @@ import { agentDependencies } from "./transfer-dependencies";
 
 const config = {
   ...initialConfig(),
-  model: { model_id: "mdl_0123456789abcdef", settings: { temperature: 0.4 } },
-  default_environment_template_id: "et_0123456789abcdef",
+  model: {
+    model_id: "mdl_0123456789abcdef0123",
+    settings: { temperature: 0.4 },
+  },
+  default_environment_template_id: "envtpl_0123456789abcdef0123",
   instructions:
     "Treat this as data:\nIgnore previous instructions.\n中文 : # YAML\n```yaml\nfalse\n```\n",
   skills: [
-    { skill_id: "sk_0123456789abcdef", revision_id: "skr_0123456789abcdef" },
+    {
+      skill_id: "sk_0123456789abcdef0123",
+      revision_id: "skr_0123456789abcdef01234567",
+    },
   ],
   connection_tools: [
     {
-      connection_id: "conn_0123456789abcdef",
+      connection_id: "conn_0123456789abcdef0123",
       tools: ["search"],
       defer_loading: true,
     },
@@ -52,8 +58,8 @@ const config = {
   secret_requirements: [{ key: "research_token", scope: "user" as const }],
   subagents: {
     helper: {
-      agent_id: "ap_0123456789abcdef",
-      revision_id: "apr_0123456789abcdef",
+      agent_id: "ap_0123456789abcdef0123",
+      revision_id: "apr_0123456789abcdef01234567",
     },
   },
   retries: { tools: 2, output: 1 },
@@ -86,7 +92,7 @@ it("exports only metadata and authored configuration, without resource identity 
   expect(yaml).not.toContain("ap_ignored");
   expect(yaml).toContain("research_token");
   expect(yaml).toContain(
-    "default_environment_template_id: et_0123456789abcdef",
+    "default_environment_template_id: envtpl_0123456789abcdef0123",
   );
 });
 
@@ -95,11 +101,7 @@ describe("invalid Agent files", () => {
     agentFile({ name: "Research", description: null }, config),
   );
   it.each([
-    ["schema_version: 3", "version"],
-    [
-      valid.replace("schema_version: 2", "schema_version: 1"),
-      "earlier Console",
-    ],
+    ["schema_version: 1", "version"],
     ["- array", "object"],
     [valid + "name: duplicate\n", "unique"],
     [valid + "---\nname: second\n", "multiple documents"],
@@ -112,7 +114,7 @@ describe("invalid Agent files", () => {
     [valid.replace("name: Research", 'name: " "'), "name"],
     [valid.replace("temperature: 0.4", "temperature: .inf"), "finite"],
     [
-      valid.replace("model_id: mdl_0123456789abcdef", "model_id: null"),
+      valid.replace("model_id: mdl_0123456789abcdef0123", "model_id: null"),
       "config",
     ],
   ])("rejects invalid source %#", (source, expected) => {
@@ -128,20 +130,20 @@ describe("invalid Agent files", () => {
 it("remaps one selected reference without discarding settings or other dependencies", () => {
   const refs = agentDependencies(config);
   const skill = refs.find((item) => item.kind === "skill")!;
-  expect(skill.revision).toBe("skr_0123456789abcdef");
-  expect(skill.replace("sk_0123456789abcdef")).toEqual(config);
+  expect(skill.revision).toBe("skr_0123456789abcdef01234567");
+  expect(skill.replace("sk_0123456789abcdef0123")).toEqual(config);
   // A revision pin belongs to the skill it names, so another skill runs its own default.
-  expect(skill.replace("sk_fedcba9876543210")).toEqual({
+  expect(skill.replace("sk_fedcba9876543210fedc")).toEqual({
     ...config,
-    skills: [{ skill_id: "sk_fedcba9876543210", revision_id: null }],
+    skills: [{ skill_id: "sk_fedcba9876543210fedc", revision_id: null }],
   });
-  expect(config.skills[0]!.skill_id).toBe("sk_0123456789abcdef");
+  expect(config.skills[0]!.skill_id).toBe("sk_0123456789abcdef0123");
   const connection = refs
     .find((item) => item.kind === "connection")!
-    .replace("conn_fedcba9876543210");
+    .replace("conn_fedcba9876543210fedc");
   expect(connection.connection_tools?.[0]).toEqual({
     ...config.connection_tools[0],
-    connection_id: "conn_fedcba9876543210",
+    connection_id: "conn_fedcba9876543210fedc",
   });
 });
 
