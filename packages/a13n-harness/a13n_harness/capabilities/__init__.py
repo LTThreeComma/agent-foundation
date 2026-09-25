@@ -47,6 +47,16 @@ if TYPE_CHECKING:
         MediaReadRequest,
         MediaResource,
     )
+    from .memory import (
+        DEFAULT_FILE_GUIDE,
+        FILE_MEMORY_CAPABILITY_ID,
+        FILE_TOOL_KEYS,
+        FileMemoryCapability,
+        FileMemoryLimits,
+        FileMount,
+        FileToolKey,
+        MemoryCursors,
+    )
     from .native_image_generation import NativeImageGenerationCapability, NativeImageSaver
     from .skills import (
         BoundSkillCatalog,
@@ -190,6 +200,16 @@ _EXPORTS = {
         "MediaReadRequest",
         "MediaReader",
         "MediaResource",
+    ),
+    "a13n_harness.capabilities.memory": (
+        "DEFAULT_FILE_GUIDE",
+        "FILE_MEMORY_CAPABILITY_ID",
+        "FILE_TOOL_KEYS",
+        "FileMemoryCapability",
+        "FileMemoryLimits",
+        "FileMount",
+        "FileToolKey",
+        "MemoryCursors",
     ),
     "a13n_harness.capabilities.native_image_generation": (
         "NativeImageGenerationCapability",

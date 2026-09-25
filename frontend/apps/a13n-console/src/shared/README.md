@@ -72,6 +72,18 @@ Overlays and the state behind them.
 - `DirectoryList` / `DirectoryGroup` / `DirectoryRow` / `DirectoryEmpty` — the searchable, grouped list for a large catalog. A `disabled` row stays visible and legible but cannot be chosen.
 - `CatalogStep` — the chosen step: a way back to the catalog, then the form.
 
+## `shared/files`
+
+Text files addressed by path, such as a skill package or a memory.
+
+- `FileBrowser` — the tree at the left, with the file count and optional actions beside its heading and an optional `marker` after a file's name, and the chosen file at the right.
+- `FileHeader`, `FileBody`, `FileText`, `FileNotice` — the chosen file: its path and size, the Preview/Source switch for Markdown and the file's actions, then its text as rendered Markdown or as source, or a notice in its place.
+- `fileTree`, `isMarkdown`, `markdownBody` — the tree built from paths, directories first; a preview renders Markdown without its frontmatter.
+
+## `shared/diff`
+
+- `Patch` — unified diff hunks, read by tint and sign.
+
 ## `shared/identity`
 
 How a resource presents itself.
@@ -89,7 +101,7 @@ How a resource presents itself.
 
 ## `shared/` root
 
-Infrastructure with no visual surface: `api.ts` (typed request helpers and pagination), `idempotency.ts`, `keys.ts` (derived keys for new agents and workspaces), `download.ts`, `paths.ts`, `time.ts`, `local-date-time.ts`, `markdown.tsx`, `cost.ts`, `unknown.ts` (the one mark for a value the service never reported), `authorization-link.tsx`, `configuration-summary.tsx`, and `shared.module.css` — layout utilities (`stack`, `form`, `twoColumns`, `filters`, `cardGrid`, `card`, `muted`) that feature screens reuse.
+Infrastructure with no visual surface: `api.ts` (typed request helpers and pagination), `idempotency.ts`, `keys.ts` (readable keys suggested from names, and derived keys for new agents and workspaces), `download.ts`, `paths.ts`, `time.ts`, `local-date-time.ts`, `markdown.tsx`, `cost.ts`, `unknown.ts` (the one mark for a value the service never reported), `authorization-link.tsx`, `configuration-summary.tsx`, and `shared.module.css` — layout utilities (`stack`, `form`, `twoColumns`, `filters`, `cardGrid`, `card`, `muted`) that feature screens reuse.
 
 ## Page anatomies
 

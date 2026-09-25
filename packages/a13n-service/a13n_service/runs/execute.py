@@ -32,6 +32,7 @@ from a13n_harness import (
     RunModelResolver,
     RunPreparationContext,
 )
+from a13n_harness.capabilities import MemoryCursors
 from a13n_harness.capabilities.steering import steering_input_ids
 from a13n_harness.environment.providers import BoundEnvironment
 from a13n_harness.identity import AgentIdentityRef, AgentInstanceContext
@@ -298,7 +299,9 @@ class _Attempt:
         self.recipient = Recipient(
             plan.agent.model.config.characteristics.capabilities, primary=has_primary(plan.run.environment_mounts)
         )
-        self.boundaries = Boundaries()
+        # The memory cursors the run's history holds context as of; recovery starts from the committed ones.
+        self.cursors = MemoryCursors(plan.run.memory_cursors)
+        self.boundaries = Boundaries(self.cursors.snapshot)
         models = {model.id: model for model in plan.agent.models()}
         self.check = CallCheck(runtime, control, self._call_context(), models=models, used=plan.used, limit=plan.limit)
         self.usage = UsageBuffer(self.check.calls)
@@ -347,12 +350,15 @@ class _Attempt:
                     run=run,
                     principal=self.plan.principal,
                     authority=self.plan.authority,
+                    cursors=self.cursors,
                 )
             )
             executable = agent.build(
                 root,
                 capabilities=lambda node: (
-                    [self.boundaries, *host.capabilities(node)] if node is root else host.capabilities(node)
+                    [self.boundaries, *host.capabilities(node), *host.memory]
+                    if node is root
+                    else host.capabilities(node)
                 ),
                 child_bindings=host.bindings,
                 operators=self._operator,
@@ -440,7 +446,8 @@ class _Attempt:
         if boundary.at == "model":
             self.offers.requested = True
         output.flush()  # The checkpoint's display covers every event observed before the boundary.
-        await self._commit(self.boundaries.take(boundary.token))
+        staged = self.boundaries.take(boundary.token)
+        await self._commit(staged.state, cursors=staged.cursors)
         output.boundary()
         if boundary.at == "model" and self.control.handoff.is_set():
             # Yield where the request in flight is simply sent again; at a tool boundary recovery would have to
@@ -452,7 +459,14 @@ class _Attempt:
         await self._deliver(stream)
         self.boundaries.acknowledge(boundary.token)
 
-    async def _commit(self, state: HarnessState, *, outcome: Outcome | None = None, deferred: JsonValue = None) -> None:
+    async def _commit(
+        self,
+        state: HarnessState,
+        *,
+        cursors: dict[str, str | None],
+        outcome: Outcome | None = None,
+        deferred: JsonValue = None,
+    ) -> None:
         if self._near_deadline():
             raise LeaseLost()
         consumed = self.offers.incorporated(state)
@@ -465,6 +479,7 @@ class _Attempt:
                 harness=state, seq=self.seq + 1, attempt=self.lease.number, outcome=outcome, deferred=deferred
             ),
             display=self.fold.snapshot(),
+            memory_cursors=cursors,
             consumed=consumed,
             usage=usage,
         )
@@ -552,11 +567,16 @@ class _Attempt:
         assert result.state is not None
         if result.status == "completed":
             outcome = Outcome(status="completed", output=self._output(result.output))
-            await self._commit(result.state, outcome=outcome)
+            await self._commit(result.state, cursors=self.cursors.snapshot(), outcome=outcome)
         else:
             assert result.deferred is not None
             outcome = Outcome(status="waiting", pending=deferred.pending(result.deferred))
-            await self._commit(result.state, outcome=outcome, deferred=deferred.dump(result.deferred))
+            await self._commit(
+                result.state,
+                cursors=self.cursors.snapshot(),
+                outcome=outcome,
+                deferred=deferred.dump(result.deferred),
+            )
         await seal_attempt(self.runtime, self.lease, outcome, committed=self.committed)
 
     async def _seal_interrupted(self, outcome: Outcome) -> None:
