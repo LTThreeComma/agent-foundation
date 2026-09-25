@@ -292,7 +292,7 @@ Public key: lf_pk_agent_foundation_local
 Secret key: lf_sk_agent_foundation_local
 ```
 
-`make langfuse-up` uses the machine-shared stack and public test configuration in `dev/observability/langfuse.py`. It does not read Service settings or the root `.env`. Harness and Harness UI explicitly load their own development `.env` files. The Service exports and queries traces through its own `telemetry` settings; see [Service logging and traces](../a13n-service/configuration.md#logging-and-traces).
+`make langfuse-up` uses the machine-shared stack and public test configuration in `dev/observability/langfuse.py`. It does not read Service settings or the root `.env`. Harness and Harness UI explicitly load their own development `.env` files. The Service exports and queries traces through its own `telemetry` settings; see [Service logs, metrics and traces](../a13n-service/configuration.md#logs-metrics-and-traces).
 
 For an **embedded Harness Host**, explicitly export the following trace-only profile instead. You may keep Host-specific values in a private `.env` and load it explicitly with `uv run --env-file .env ...`; `.env.harness.example` documents optional debugging settings. Harness UI uses its normal YAML configuration plus the process environment and does not implicitly load this file.
 
@@ -405,6 +405,8 @@ A supplied meter provider enables these low-cardinality Harness instruments unde
 | `a13n.harness.run.active`         | UpDownCounter | `{run}`     | none                  |
 | `a13n.harness.run.model_attempts` | Histogram     | `{attempt}` | `a13n.run.outcome`    |
 | `a13n.harness.operation.duration` | Histogram     | `s`         | `a13n.operation.kind` |
+
+The duration histograms advise bucket boundaries in seconds, from 1 s to 1 h for runs and from 5 ms to 5 min for operations, instead of the OpenTelemetry defaults sized for milliseconds; a Host's metric views can replace them.
 
 Pydantic AI separately owns native token usage, cost, and time-to-first-chunk metrics. The Harness does not duplicate them. IDs, Agent names, failure codes, content, paths, and error text are never Harness metric dimensions.
 
