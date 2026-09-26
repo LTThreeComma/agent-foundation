@@ -6,7 +6,6 @@ import json
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -25,7 +24,7 @@ from .tool_rows import (
 from .transcript import Transcript
 
 if TYPE_CHECKING:
-    from a13n_harness.usage import BoundedRequestUsage, ModelUsageRecord
+    from a13n_harness.usage import BoundedRequestUsage
 
     from a13n_harness_ui.goal import GoalView
     from a13n_harness_ui.storage.usage import UsageTotals
@@ -78,13 +77,11 @@ class Status:
     requests: int = 0
     unknown_costs: int = 0
     notices: list[str] = field(default_factory=list)
-    _usage_ids: set[str] = field(default_factory=set)
 
     def reset_usage(self) -> None:
         self.usage = None
         self.requests = 0
         self.unknown_costs = 0
-        self._usage_ids.clear()
 
     def restore_usage(self, totals: UsageTotals) -> None:
         """Replace the Thread baseline; live IDs belong only to the next operation."""
@@ -96,29 +93,11 @@ class Status:
         if self.requests:
             self.usage = BoundedRequestUsage.model_validate({**dict(totals.tokens), "cost": totals.model_cost_usd})
 
-    def record_usage(self, record: ModelUsageRecord) -> None:
-        from a13n_harness.usage import BoundedRequestUsage
-
-        if record.record_id in self._usage_ids:
-            return
-        self._usage_ids.add(record.record_id)
-        current = record.request_usage
-        previous = self.usage
-        self.requests += 1
-        counters = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
-        values = current.model_dump(include=set(counters))
-        if previous is not None:
-            old = previous.model_dump(include=set(counters))
-            values = {key: values[key] + old[key] for key in counters}
-        self.unknown_costs += current.cost is None
-        cost = (current.cost or Decimal(0)) + (previous.cost or Decimal(0) if previous is not None else Decimal(0))
-        self.usage = BoundedRequestUsage(**values, cost=cost)
-
     @property
     def cache_rate(self) -> float | None:
         if self.usage is None:
             return None
-        total = self.usage.input_tokens + self.usage.output_tokens
+        total = self.usage.input_tokens
         return 100 * self.usage.cache_read_tokens / total if total else None
 
     def usage_details(self) -> str:

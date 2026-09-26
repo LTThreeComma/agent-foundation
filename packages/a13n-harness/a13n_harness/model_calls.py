@@ -34,6 +34,7 @@ class ModelCall:
     source: str
     tool_id: str | None
     tool_call_id: str | None
+    continuation_of: str | None = None
 
 
 @runtime_checkable
@@ -51,6 +52,7 @@ async def _check_model_call(
     source: str,
     tool_id: str | None = None,
     tool_call_id: str | None = None,
+    continuation_of: str | None = None,
 ) -> ModelCall:
     """Allocate once at the native wrapper boundary, after request preparation."""
     call = ModelCall(
@@ -66,6 +68,7 @@ async def _check_model_call(
         source=source,
         tool_id=tool_id,
         tool_call_id=tool_call_id,
+        continuation_of=continuation_of,
     )
     if owner.model_call_check is not None:
         try:

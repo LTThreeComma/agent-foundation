@@ -68,42 +68,25 @@ async def test_input_appears_before_admission_and_rejection_preserves_draft() ->
         assert "not admitted" in _text(shell.renderer)
 
 
-def test_status_keeps_native_cache_counters_decimal_cost_and_unknown_cost() -> None:
-    def record(identifier: str, cost: Decimal | None):
-        return ModelUsageRecord(
-            call_id="call_fixture",
-            record_id=identifier,
-            run_id="run-one",
-            response_ordinal=0,
-            agent_instance_id="root",
-            response_state="complete",
-            response_timestamp=datetime.now(UTC),
-            request_usage=BoundedRequestUsage(
-                input_tokens=100, output_tokens=20, cache_read_tokens=80, cache_write_tokens=10, cost=cost
+def test_status_renders_canonical_cache_counters_and_unknown_cost() -> None:
+    status = Status()
+    status.restore_usage(
+        replace(
+            _usage_totals(cost=Decimal("0.012346"), unknown=1),
+            tokens=(
+                ("input_tokens", 200),
+                ("output_tokens", 40),
+                ("cache_read_tokens", 160),
+                ("cache_write_tokens", 20),
             ),
-            cost_source="unknown",
-            pricing_status="not_reached",
         )
-
-    status = Status(model="openai-codex:gpt-test")
-    first = record("one", Decimal("0.012345"))
-    status.record_usage(first)
-    status.record_usage(first)
-    status.record_usage(record("two", Decimal("0.000001")))
-    assert status.requests == 2
-    assert status.total_tokens == 240  # Cache read/write are subsets, not extra tokens.
-    assert "240 total tokens" in status.usage_details()
-    assert status.usage.cost == Decimal("0.012346")
-    assert status.usage.input_tokens == 200 and status.usage.cache_read_tokens == 160
+    )
+    assert status.total_tokens == 240
+    assert status.cache_rate == 80
     assert "cache write 20" in status.usage_details().lower()
-    assert "$0.0123" in status.line(80)
-    status.record_usage(record("three", None))
-    assert status.usage.cost == Decimal("0.012346")
-    assert status.unknown_costs == 1
     assert "$0.0123+" in status.line()
     assert "1 unknown-cost responses" in status.usage_details()
     status.reset_usage()
-    assert status.usage is None and status.requests == 0
     assert status.total_tokens is None
 
 
@@ -114,9 +97,8 @@ def _usage_totals(*, requests: int = 3, cost: Decimal = Decimal("0.3"), unknown:
         tokens=(("input_tokens", 300), ("output_tokens", 60), ("cache_read_tokens", 180)),
         model_cost_usd=cost,
         unknown_model_costs=unknown,
-        provider_costs=(("USD", Decimal("99")),),
+        provider_cost_usd=Decimal("99"),
         unknown_provider_costs=0,
-        omitted_currency_receipts=0,
     )
 
 
@@ -127,7 +109,7 @@ def test_status_restores_ledger_cost_coverage_without_provider_costs(cost: Decim
     status.restore_usage(totals)
     assert status.requests == 3
     assert status.usage.cost == totals.model_cost_usd
-    assert status.cache_rate == 50
+    assert status.cache_rate == 60
     assert status.total_tokens == 360
     assert "Observed conversation" in status.usage_details()
     # Reconciliation replaces rather than adds the same durable observations.
@@ -301,6 +283,7 @@ async def test_live_cost_and_zero_context_are_projected_before_completion(
         agent_instance_id="root",
         response_state="complete",
         response_timestamp=datetime.now(UTC),
+        request_started_at=datetime.now(UTC),
         request_usage=BoundedRequestUsage(input_tokens=100, output_tokens=20, cost=Decimal("0.125")),
         cost_source="unknown",
         pricing_status="disabled",
@@ -385,7 +368,7 @@ async def test_live_cost_and_zero_context_are_projected_before_completion(
         assert not renderer.gap
         assert status.requests == 6  # Three historical + two root + one child; duplicate excluded.
         assert status.usage.cost == Decimal("0.55")
-        assert status.cache_rate == 30  # Weighted counters, not average percentages.
+        assert status.cache_rate == 36  # Weighted counters, not average percentages.
         assert status.context_tokens == 0
         assert "Working" in status.line(60) and "$0.5500" in status.line(60)
         assert "ctx 0 (0%)" in status.line(60)
@@ -403,9 +386,8 @@ async def test_live_cost_and_zero_context_are_projected_before_completion(
     # The terminal ledger also contains a response missed by the live stream.
     assert status.requests == 7
     assert status.usage.cost == Decimal("0.625")
-    assert status.cache_rate == 30
+    assert status.cache_rate == 36
     assert status.context_tokens == 0
-    assert not status._usage_ids
     assert app.thread_usage.call_count == 3  # One cached projection refresh per complete live report.
 
 

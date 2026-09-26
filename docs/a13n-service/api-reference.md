@@ -2817,6 +2817,7 @@ Summarize Usage.
 | Parameter         | Location | Required | Type / schema  | Constraints and default                                        |
 | ----------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
 | `workspace_id`    | path     | true     | string         | —                                                              |
+| `scope`           | query    | false    | "self", "tree" | default="self"                                                 |
 | `run_id`          | query    | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
 | `thread_id`       | query    | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
 | `session_id`      | query    | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |

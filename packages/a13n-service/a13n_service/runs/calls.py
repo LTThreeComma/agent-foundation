@@ -10,6 +10,7 @@ from dataclasses import replace
 from typing import NoReturn
 
 from a13n_harness.model_calls import ModelCall
+from a13n_harness.usage import ModelUsageRecord, UsageRecord
 
 from a13n_service.infra.db import transaction
 from a13n_service.infra.errors import ServiceError
@@ -28,8 +29,8 @@ class Refused(Exception):
 
 class CallCheck:
     """`used` counts the run's model requests so far, including those earlier attempts recorded. `models` are
-    the models of the agent graph by ID, the ID each model call selects its model by; `calls` keeps the model of
-    each call admitted, by call ID, for its usage records."""
+    the models of the agent graph by ID. Pending requests reserve slots; received model facts replace those
+    slots, with repeated revisions of a background generation counted only once."""
 
     def __init__(
         self,
@@ -42,31 +43,48 @@ class CallCheck:
         limit: int | None,
     ):
         self.runtime, self.control, self.context, self.models = runtime, control, context, models
-        self.calls: dict[str, ResolvedModel] = {}
-        self.used, self.limit = used, limit
+        self._baseline, self.limit = used, limit
+        self._pending: set[str] = set()
+        self._recorded: set[str] = set()
         self.refusal: Outcome | None = None
         self.lease_missed = False
 
+    @property
+    def used(self) -> int:
+        return self._baseline + len(self._pending) + len(self._recorded)
+
+    def recorded(self, records: tuple[UsageRecord, ...], owned: frozenset[str]) -> None:
+        for record in records:
+            if isinstance(record, ModelUsageRecord):
+                if record.call_id is not None:
+                    self._pending.discard(record.call_id)
+                if record.record_id in owned:
+                    self._recorded.add(record.record_id)
+
     async def check(self, call: ModelCall) -> None:
         self._continuing()
-        if self.limit is not None and self.used >= self.limit:
+        if call.continuation_of is None and self.limit is not None and self.used >= self.limit:
             self.refuse(Outcome.failed("usage_limit_exceeded", f"The run used its {self.limit} model requests"))
-        self.used += 1
-        # Every model of the graph is selected by its ID; a call that names none of them cannot be admitted.
-        model = self.models.get(call.model_id or "")
-        if model is None:
-            self.refuse(Outcome.failed("model_call_unknown", "A model call named no model of the agent"))
-        self.calls[call.call_id] = model
-        await self._admit(
-            replace(
-                self.context,
-                call_id=call.call_id,
-                source=call.source,
-                provider_id=model.provider.id,
-                model_id=model.id,
-                price_snapshot=price_snapshot(model),
+        if call.continuation_of is None:
+            self._pending.add(call.call_id)
+        try:
+            # Every model of the graph is selected by its ID; a call that names none of them cannot be admitted.
+            model = self.models.get(call.model_id or "")
+            if model is None:
+                self.refuse(Outcome.failed("model_call_unknown", "A model call named no model of the agent"))
+            await self._admit(
+                replace(
+                    self.context,
+                    call_id=call.call_id,
+                    source=call.source,
+                    provider_id=model.provider.id,
+                    model_id=model.id,
+                    price_snapshot=price_snapshot(model),
+                )
             )
-        )
+        except BaseException:
+            self._pending.discard(call.call_id)
+            raise
 
     async def tool_call(
         self,

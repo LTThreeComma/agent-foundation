@@ -23,9 +23,9 @@ const root: Schema<"UsageTotals"> = {
   ],
   model_cost_usd: "0.125",
   unknown_model_costs: 0,
-  provider_costs: [],
+  provider_cost_usd: null,
+  audio_seconds: "0",
   unknown_provider_costs: 0,
-  omitted_currency_receipts: 0,
 };
 const zero = { ...root, model_requests: 0, tokens: [], model_cost_usd: "0" };
 const usage: Schema<"ThreadUsageView"> = {

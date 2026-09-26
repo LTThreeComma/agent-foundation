@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from a13n_harness.tools.permission_gate import PermissionCheck
     from a13n_harness.toolsets.documents import DocumentConverter
     from a13n_harness.toolsets.file_media import MediaUnderstandingProvider
-    from a13n_harness.usage import ProviderUsage, ProviderUsageRecord, RunUsageLedger, UsageRecord
+    from a13n_harness.usage import ProviderUsage, ProviderUsageRecord, RunUsageLedger, UsageRecord, UsageReporter
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -147,6 +147,7 @@ class RunBindings:
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
     model_context: ModelContextMiddleware | None = None
     model_call_check: ModelCallCheck | None = None
+    usage_reporter: UsageReporter | None = None
     observation: HarnessObservationContext | None = None
     tool_result_directory: str | None = None
     _inherited_model_cost: AbstractModelCostCapability | None = field(
@@ -156,6 +157,10 @@ class RunBindings:
     )
 
     def __post_init__(self) -> None:
+        from a13n_harness.usage import UsageReporter
+
+        if self.usage_reporter is not None and not isinstance(self.usage_reporter, UsageReporter):
+            raise TypeError("RunBindings.usage_reporter must implement UsageReporter")
         if self.model_call_check is not None and not isinstance(self.model_call_check, ModelCallCheck):
             raise TypeError("RunBindings.model_call_check must implement ModelCallCheck")
         if not isinstance(self.deferred_tools_supported, bool):
@@ -208,6 +213,7 @@ class RunBindings:
         deferred_tools_supported: bool = True,
         model_context: ModelContextMiddleware | None = None,
         model_call_check: ModelCallCheck | None = None,
+        usage_reporter: UsageReporter | None = None,
         capabilities: Sequence[AbstractCapability[AgentContext]] = (),
         web: WebBinding | None = None,
         media_reader: MediaReader | None = None,
@@ -234,6 +240,7 @@ class RunBindings:
             deferred_tools_supported=deferred_tools_supported,
             model_context=model_context,
             model_call_check=model_call_check,
+            usage_reporter=usage_reporter,
             capabilities=tuple(capabilities),
             web=web,
             media_reader=media_reader,
@@ -368,6 +375,7 @@ class AgentContext:
     _model_recovery: ModelRecoveryState = field(default_factory=ModelRecoveryState, repr=False, compare=False)
     model_context: ModelContextMiddleware | None = None
     model_call_check: ModelCallCheck | None = None
+    usage_reporter: UsageReporter | None = None
     _inherited_model_cost: AbstractModelCostCapability | None = field(
         default=None,
         repr=False,

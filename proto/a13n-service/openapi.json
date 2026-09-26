@@ -7039,12 +7039,32 @@
         "type": "object"
       },
       "ModelUsage": {
+        "additionalProperties": false,
         "properties": {
+          "audio_seconds": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Audio Seconds",
+            "type": "string"
+          },
+          "cache_audio_read_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Cache Audio Read Tokens",
+            "type": "integer"
+          },
           "cache_read_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
             "title": "Cache Read Tokens",
             "type": "integer"
           },
           "cache_write_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
             "title": "Cache Write Tokens",
             "type": "integer"
           },
@@ -7060,7 +7080,22 @@
             ],
             "title": "Cost"
           },
+          "incomplete_requests": {
+            "default": 0,
+            "title": "Incomplete Requests",
+            "type": "integer"
+          },
+          "input_audio_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Input Audio Tokens",
+            "type": "integer"
+          },
           "input_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
             "title": "Input Tokens",
             "type": "integer"
           },
@@ -7075,23 +7110,33 @@
             ],
             "title": "Model Id"
           },
+          "output_audio_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Output Audio Tokens",
+            "type": "integer"
+          },
           "output_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
             "title": "Output Tokens",
             "type": "integer"
           },
           "requests": {
+            "default": 0,
             "title": "Requests",
+            "type": "integer"
+          },
+          "unknown_cost_records": {
+            "default": 0,
+            "title": "Unknown Cost Records",
             "type": "integer"
           }
         },
         "required": [
-          "model_id",
-          "requests",
-          "input_tokens",
-          "output_tokens",
-          "cache_read_tokens",
-          "cache_write_tokens",
-          "cost"
+          "model_id"
         ],
         "title": "ModelUsage",
         "type": "object"
@@ -8260,6 +8305,47 @@
           "updated_at"
         ],
         "title": "Provider",
+        "type": "object"
+      },
+      "ProviderCost": {
+        "properties": {
+          "cost": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "receipts": {
+            "title": "Receipts",
+            "type": "integer"
+          },
+          "unknown_cost_records": {
+            "title": "Unknown Cost Records",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "provider",
+          "product",
+          "receipts",
+          "cost",
+          "unknown_cost_records"
+        ],
+        "title": "ProviderCost",
         "type": "object"
       },
       "ProviderCreate": {
@@ -12741,17 +12827,118 @@
         "type": "object"
       },
       "UsageSummary": {
+        "additionalProperties": false,
         "properties": {
+          "active_runs": {
+            "default": 0,
+            "title": "Active Runs",
+            "type": "integer"
+          },
+          "audio_seconds": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Audio Seconds",
+            "type": "string"
+          },
+          "cache_audio_read_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Cache Audio Read Tokens",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Cache Read Tokens",
+            "type": "integer"
+          },
+          "cache_write_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Cache Write Tokens",
+            "type": "integer"
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost"
+          },
+          "incomplete_requests": {
+            "default": 0,
+            "title": "Incomplete Requests",
+            "type": "integer"
+          },
+          "input_audio_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Input Audio Tokens",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
           "models": {
             "items": {
               "$ref": "#/components/schemas/ModelUsage"
             },
             "title": "Models",
             "type": "array"
+          },
+          "output_audio_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Output Audio Tokens",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "provider_receipts": {
+            "default": 0,
+            "title": "Provider Receipts",
+            "type": "integer"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderCost"
+            },
+            "title": "Providers",
+            "type": "array"
+          },
+          "requests": {
+            "default": 0,
+            "title": "Requests",
+            "type": "integer"
+          },
+          "unknown_cost_records": {
+            "default": 0,
+            "title": "Unknown Cost Records",
+            "type": "integer"
           }
         },
         "required": [
-          "models"
+          "models",
+          "providers"
         ],
         "title": "UsageSummary",
         "type": "object"
@@ -29014,6 +29201,20 @@
             "required": true,
             "schema": {
               "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": "self",
+              "enum": [
+                "self",
+                "tree"
+              ],
+              "title": "Scope",
               "type": "string"
             }
           },

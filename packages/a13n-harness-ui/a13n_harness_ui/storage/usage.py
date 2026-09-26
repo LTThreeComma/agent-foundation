@@ -10,11 +10,13 @@ from typing import Annotated
 
 from a13n_harness import HarnessRunResultEvent
 from a13n_harness.events import HarnessEvent, HarnessExtensionEvent, UsageReportPayload
+from a13n_harness.money import sum_decimal
 from a13n_harness.usage import ModelUsageRecord, ProviderUsageRecord, UsageRecord
 from anyio import Lock
 from pydantic import Field, TypeAdapter
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from a13n_harness_ui.errors import StoreIntegrityError
 
@@ -40,11 +42,11 @@ class UsageTotals:
     model_requests: int
     provider_receipts: int
     tokens: tuple[tuple[str, int], ...]
-    model_cost_usd: Decimal
+    model_cost_usd: Decimal | None
     unknown_model_costs: int
-    provider_costs: tuple[tuple[str, Decimal], ...]
+    provider_cost_usd: Decimal | None
     unknown_provider_costs: int
-    omitted_currency_receipts: int
+    audio_seconds: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,9 +98,9 @@ class _Totals:
     tokens: dict[str, int] = field(default_factory=lambda: dict.fromkeys(_COUNTERS, 0))
     cost: Decimal = Decimal(0)
     unknown: int = 0
-    currencies: dict[str, Decimal] = field(default_factory=dict)
+    provider_cost: Decimal = Decimal(0)
+    audio_seconds: Decimal = Decimal(0)
     unknown_provider: int = 0
-    omitted_currency: int = 0
 
     def add(self, record: UsageRecord) -> None:
         if isinstance(record, ModelUsageRecord):
@@ -110,27 +112,26 @@ class _Totals:
             if usage.cost is None:
                 self.unknown += 1
             else:
-                self.cost += usage.cost
+                self.cost = sum_decimal((self.cost, usage.cost))
+            self.audio_seconds = sum_decimal((self.audio_seconds, usage.audio_seconds))
         else:
             self.receipts += 1
             receipt = record.usage
-            if receipt.cost is None or receipt.currency is None:
+            if receipt.cost is None:
                 self.unknown_provider += 1
-            elif receipt.currency in self.currencies or len(self.currencies) < _GROUPS:
-                self.currencies[receipt.currency] = self.currencies.get(receipt.currency, Decimal(0)) + receipt.cost
             else:
-                self.omitted_currency += 1
+                self.provider_cost = sum_decimal((self.provider_cost, receipt.cost))
 
     def view(self) -> UsageTotals:
         return UsageTotals(
             model_requests=self.requests,
             provider_receipts=self.receipts,
             tokens=tuple(self.tokens.items()),
-            model_cost_usd=self.cost,
+            model_cost_usd=self.cost if self.requests > self.unknown else None,
             unknown_model_costs=self.unknown,
-            provider_costs=tuple(sorted(self.currencies.items())),
+            provider_cost_usd=self.provider_cost if self.receipts > self.unknown_provider else None,
             unknown_provider_costs=self.unknown_provider,
-            omitted_currency_receipts=self.omitted_currency,
+            audio_seconds=self.audio_seconds,
         )
 
 
@@ -257,6 +258,7 @@ class ThreadUsageRepository:
                     select(ThreadUsageRecord).where(
                         ThreadUsageRecord.root_thread_id == root_id,
                         ThreadUsageRecord.record_id == record.record_id,
+                        ThreadUsageRecord.revision == record.revision,
                     )
                 )
                 if existing is not None:
@@ -275,6 +277,7 @@ class ThreadUsageRepository:
                         root_thread_id=root_id,
                         origin_thread_id=thread_id,
                         record_id=record.record_id,
+                        revision=record.revision,
                         run_id=record.run_id,
                         descendant=thread_id != root_id or record.parent_agent_instance_id is not None,
                         payload_json=record.model_dump_json(),
@@ -285,7 +288,13 @@ class ThreadUsageRepository:
 
     async def latest_root_request(self, *, thread_id: str, run_id: str | None = None) -> ModelUsageRecord | None:
         """Read request-local usage already committed during execution, not Run totals."""
+        newer = aliased(ThreadUsageRecord)
         query = select(ThreadUsageRecord.payload_json).where(
+            ~exists().where(
+                newer.root_thread_id == ThreadUsageRecord.root_thread_id,
+                newer.record_id == ThreadUsageRecord.record_id,
+                newer.revision > ThreadUsageRecord.revision,
+            ),
             ThreadUsageRecord.root_thread_id == thread_id,
             ThreadUsageRecord.descendant.is_(False),
             func.json_extract(ThreadUsageRecord.payload_json, "$.kind") == "model",
@@ -330,9 +339,26 @@ class ThreadUsageRepository:
                 ).all()
             )
         aggregate = self._cache.pop(thread_id, None)
+        newer = aliased(ThreadUsageRecord)
+        if aggregate is not None and aggregate.cursor < high_water:
+            async with short_session(self._sessions) as session:
+                revised = await session.scalar(
+                    select(
+                        exists().where(
+                            ThreadUsageRecord.root_thread_id == root_id,
+                            ThreadUsageRecord.sequence <= aggregate.cursor,
+                            newer.root_thread_id == root_id,
+                            newer.record_id == ThreadUsageRecord.record_id,
+                            newer.revision > ThreadUsageRecord.revision,
+                            newer.sequence > aggregate.cursor,
+                            newer.sequence <= high_water,
+                        )
+                    )
+                )
+            if revised:
+                aggregate = None
         if aggregate is None or aggregate.cursor > high_water or set(aggregate.recent_ids) != set(recent_ids):
-            # A changed recent-Run window can change first-observed currency attribution
-            # in 'other'; rebuild instead of subtracting lossy capped groups.
+            # Rebuild capped groups when their membership or a retained fact changes.
             aggregate = _Aggregation(recent_ids=recent_ids)
         aggregate.recent_ids = recent_ids
         while aggregate.cursor < high_water:
@@ -349,6 +375,12 @@ class ThreadUsageRepository:
                             ThreadUsageRecord.root_thread_id == root_id,
                             ThreadUsageRecord.sequence > aggregate.cursor,
                             ThreadUsageRecord.sequence <= high_water,
+                            ~exists().where(
+                                newer.root_thread_id == root_id,
+                                newer.record_id == ThreadUsageRecord.record_id,
+                                newer.revision > ThreadUsageRecord.revision,
+                                newer.sequence <= high_water,
+                            ),
                         )
                         .order_by(ThreadUsageRecord.sequence)
                         .limit(_BATCH)
@@ -358,6 +390,7 @@ class ThreadUsageRepository:
                 break
             for sequence, descendant, payload, observed in rows:
                 aggregate.add(sequence, descendant, payload, observed)
+        aggregate.cursor = high_water
         self._cache[thread_id] = aggregate
         while len(self._cache) > 16:
             self._cache.popitem(last=False)

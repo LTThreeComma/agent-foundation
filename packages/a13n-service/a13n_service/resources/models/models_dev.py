@@ -8,6 +8,7 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import date
+from decimal import Decimal
 
 from a13n_harness import ModelCapability
 from a13n_harness.pricing import ModelPriceRule, ModelPricingEntry, PriceComponent, PriceTier
@@ -42,7 +43,7 @@ type Identities = Mapping[str, tuple[str, str]]
 
 def parse_catalog(document: bytes, channels: frozenset[str]) -> list[CatalogModel]:
     """The offered models of a catalog document, ordered by channel and model ID."""
-    payload = json.loads(document)
+    payload = json.loads(document, parse_float=Decimal)
     if not isinstance(payload, dict) or not isinstance(providers := payload.get("providers"), dict):
         raise ValueError("The model catalog lists no providers")
     if len(providers) > MAX_PROVIDERS:

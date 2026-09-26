@@ -61,6 +61,7 @@ export function usageSummary(
       ? total
       : undefined;
   const cache = tokens.get("cache_read_tokens");
+  const input = tokens.get("input_tokens");
   const used = context?.latest_request_tokens;
   const window = context?.context_window;
   return {
@@ -79,8 +80,8 @@ export function usageSummary(
         : "—",
     cost: modelCost(usage?.first_observed_at ? usage.combined : undefined),
     cache:
-      usage?.first_observed_at && total > 0 && cache != null
-        ? `${((100 * cache) / total).toFixed(1)}%`
+      usage?.first_observed_at && input != null && input > 0 && cache != null
+        ? `${((100 * cache) / input).toFixed(1)}%`
         : "—",
   };
 }

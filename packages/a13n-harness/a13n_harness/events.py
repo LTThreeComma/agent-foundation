@@ -208,7 +208,7 @@ class SteeringInputEnqueuedPayload(_FirstPartyPayload):
 class UsageReportPayload(_FirstPartyPayload):
     type: Literal["usage_report"] = "usage_report"
     report_id: str = Field(min_length=1, max_length=128)
-    reason: Literal["model_request", "terminal"]
+    reason: Literal["model_request", "provider", "terminal"]
     trigger_record_id: str | None = Field(default=None, min_length=1, max_length=128)
     chunk_index: int = Field(ge=0)
     chunk_count: int = Field(gt=0)

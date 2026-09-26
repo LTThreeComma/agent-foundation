@@ -22,7 +22,7 @@ from a13n_service.runs.attempts import Lease, lock_thread_lease
 from a13n_service.runs.runtime import Runtime
 from a13n_service.runs.schemas import Failure, Outcome, Sealed
 from a13n_service.runs.tables import AttemptRow, RunRow, ThreadRow
-from a13n_service.runs.usage import totals
+from a13n_service.runs.usage_query import totals
 from a13n_service.runs.webhooks import LifecycleKind, notify_subscribers
 
 logger = get_logger(__name__)

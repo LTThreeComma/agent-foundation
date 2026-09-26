@@ -35,18 +35,24 @@ def _usage_summary(view: ThreadUsageView) -> str:
         [
             f"Tokens       {total:,}  ·  in {tokens['input_tokens']:,} / out {tokens['output_tokens']:,}",
             f"Responses    {totals.model_requests:,}  ·  root {view.root.model_requests:,} / children {view.descendants.model_requests:,}",
-            f"Model cost   USD {totals.model_cost_usd:.6f} known subtotal"
+            (
+                f"Model cost   USD {totals.model_cost_usd:.6f} known subtotal"
+                if totals.model_cost_usd is not None
+                else "Model cost   unknown"
+            )
             + (f" · {totals.unknown_model_costs:,} unknown-cost responses" if totals.unknown_model_costs else ""),
             f"Cache read   {tokens['cache_read_tokens']:,}"
-            + (f" ({100 * tokens['cache_read_tokens'] / total:.1f}%)" if total else ""),
+            + (
+                f" ({100 * tokens['cache_read_tokens'] / tokens['input_tokens']:.1f}%)"
+                if tokens["input_tokens"]
+                else ""
+            ),
         ]
     )
-    for currency, cost in totals.provider_costs:
-        lines.append(f"Provider     {currency} {cost} · separate known subtotal")
-    if totals.unknown_provider_costs or totals.omitted_currency_receipts:
-        lines.append(
-            f"Provider cost incomplete · {totals.unknown_provider_costs} unknown / {totals.omitted_currency_receipts} currency entries omitted"
-        )
+    if totals.provider_cost_usd is not None:
+        lines.append(f"Provider     USD {totals.provider_cost_usd} · known subtotal")
+    if totals.unknown_provider_costs:
+        lines.append(f"Provider cost incomplete · {totals.unknown_provider_costs} unknown-cost receipts")
     lines.append("By model · root + subagents + auxiliary models:")
     lines.extend(_model_table(view.models))
     if view.other_models.model_requests:
@@ -111,7 +117,7 @@ def _usage_details(view: ThreadUsageView) -> str:
     lines.extend(
         [
             "Cache/audio counters are subsets of input/output, not extra tokens.",
-            "Cache rate = cache-read / (input + output), matching the status bar.",
+            "Cache rate = cache-read / input, matching the status bar.",
             "Provider receipts are deduplicated across Runs and attributed to first observation.",
             "Context occupancy: /status. Codex subscription limits: /usage subscription; reset credits: /usage reset.",
         ]
@@ -139,11 +145,18 @@ def _model_table(models: tuple[tuple[str, UsageTotals], ...]) -> list[str]:
 def _total_lines(title: str, totals: UsageTotals, *, details: bool = True) -> list[str]:
     tokens = dict(totals.tokens)
     total = tokens["input_tokens"] + tokens["output_tokens"]
-    cache_rate = f"{100 * tokens['cache_read_tokens'] / total:.1f}%" if total else "--"
+    cache_rate = (
+        f"{100 * tokens['cache_read_tokens'] / tokens['input_tokens']:.1f}%" if tokens["input_tokens"] else "--"
+    )
     lines = [
         f"{title}: {totals.model_requests:,} model responses · {total:,} tokens"
         f" (in {tokens['input_tokens']:,} / out {tokens['output_tokens']:,})",
-        f"  Model cost: USD {totals.model_cost_usd:.6f} known subtotal · {totals.unknown_model_costs:,} unknown-cost responses",
+        (
+            f"  Model cost: USD {totals.model_cost_usd:.6f} known subtotal"
+            if totals.model_cost_usd is not None
+            else "  Model cost: unknown"
+        )
+        + f" · {totals.unknown_model_costs:,} unknown-cost responses",
     ]
     if details:
         lines.extend(
@@ -153,12 +166,8 @@ def _total_lines(title: str, totals: UsageTotals, *, details: bool = True) -> li
                 f"  Provider receipts: {totals.provider_receipts:,} · {totals.unknown_provider_costs:,} unknown-cost receipts",
             ]
         )
-        for currency, cost in totals.provider_costs:
-            lines.append(f"    {currency} {cost} known provider subtotal (separate from model costs)")
-        if totals.omitted_currency_receipts:
-            lines.append(
-                f"    {totals.omitted_currency_receipts:,} receipts omitted from currency breakdown (32-currency limit)"
-            )
+        if totals.provider_cost_usd is not None:
+            lines.append(f"    USD {totals.provider_cost_usd} known provider subtotal")
     return lines
 
 

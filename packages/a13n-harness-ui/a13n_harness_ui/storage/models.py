@@ -258,7 +258,7 @@ class ThreadUsageRecord(Base):
     """First observed canonical usage contribution within one root Thread family."""
 
     __tablename__ = "thread_usage"
-    __table_args__ = (UniqueConstraint("root_thread_id", "record_id", name="identity"),)
+    __table_args__ = (UniqueConstraint("root_thread_id", "record_id", "revision", name="identity"),)
 
     sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     root_thread_id: Mapped[str] = mapped_column(
@@ -268,6 +268,7 @@ class ThreadUsageRecord(Base):
         String(80), ForeignKey("thread.thread_id", ondelete="CASCADE"), nullable=False
     )
     record_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
     run_id: Mapped[str] = mapped_column(String(256), nullable=False)
     descendant: Mapped[bool] = mapped_column(Boolean, nullable=False)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)

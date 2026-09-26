@@ -98,6 +98,7 @@ Advanced integrations can replace the environment-configured default for one run
 
 ```python
 from a13n_harness import RunBindings
+from a13n_harness.metering import ModelUsageBinding
 from a13n_harness.toolsets import (
     MediaUnderstandingRequest,
     MediaUnderstandingResult,
@@ -108,9 +109,11 @@ class CustomMediaUnderstandingProvider:
     async def understand(
         self,
         request: MediaUnderstandingRequest,
+        *,
+        usage: ModelUsageBinding | None = None,
     ) -> MediaUnderstandingResult:
-        text, usage = await analyze_with_custom_model(request)
-        return MediaUnderstandingResult(text=text, usage=usage)
+        text, receipts = await analyze_with_custom_model(request)
+        return MediaUnderstandingResult(text=text, usage=receipts)
 
 
 bindings = RunBindings.embedded(
@@ -131,7 +134,7 @@ Dedicated-Agent and custom-provider usage is recorded separately with:
 - the active tool-call ID;
 - provider, model product, request count, and available token counters.
 
-This nested model work does not change the active Agent's Pydantic AI `RunUsage` or native `UsageLimits`. If analysis fails or times out after model responses have already contributed counters, those proven counters are still recorded; a failure before any measured request does not invent usage.
+This nested work enters the owning Run's canonical usage and cumulative budget through the same model collector as primary requests. Native Pydantic execution counters remain local to each Agent. Failed or cancelled calls preserve observed usage; an entered call with no supplied usage is marked unavailable with unknown cost.
 
 `view` returns stable bounded failures instead of attaching unsupported media or exposing provider exceptions. Each failure is an ordinary tool result visible to the active Agent, not a Pydantic AI retry prompt, so it does not consume the main Agent's function-tool retry allowance. Common codes include:
 

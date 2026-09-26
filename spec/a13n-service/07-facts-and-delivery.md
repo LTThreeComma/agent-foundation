@@ -23,20 +23,22 @@ There is no lifecycle event log and no workspace-ordered lifecycle cursor. Run a
 
 ## Usage records
 
-```
+```text
 usage_records
-  id  organization_id  workspace_id  run_id  run_attempt_id  harness_run_id  call_id NULL
-  digest  record  model_id NULL  price_snapshot NULL  ingested_at
-  PRIMARY KEY (id)          -- the stable Harness usage record ID
+  id  revision  organization_id  workspace_id  run_id  run_attempt_id  harness_run_id  call_id NULL
+  digest  record  model_id NULL  price_snapshot NULL  cost NUMERIC NULL  ingested_at
+  PRIMARY KEY (id, workspace_id, revision)
 ```
 
-A record is one Harness usage record of a run's attempt: a model request or a provider operation. Records of an inline subagent are stored under the parent run with the child's `harness_run_id`. A model record carries the `model_id` of the model its call selected, which the call check kept under the record's `call_id`, and that model's `price_snapshot` at dispatch; a record without a `call_id`, or with one the check never saw, is stored unattributed with an unknown price. Changing a model's pricing never rewrites history.
+The worker supplies one optional Harness usage reporter that persists already captured canonical facts in short transactions. Checkpoints, terminal result events and live-stream forwarding do not independently ingest usage. There is no durable pre-call registration. Ingestion remains allowed after cancellation, lease loss or seal because it records past work; it must name the Run's actual attempt.
 
-**Ingestion** happens in the checkpoint commit ([05](05-runs.md#assignment-and-incorporation)), and when an attempt ends with records not yet committed. Late ingestion is not fenced by the worker lease, because it records a past charge; it is scoped to the run's own attempt. Each record is inserted once; the digest covers the record, run, attempt, model and price snapshot. A duplicate ID with an equal digest is a no-op. A record over 65536 bytes, or an existing ID with a different digest, is logged as an integrity error and skipped: the stored fact is never overwritten and the carrying commit does not fail.
+Each version is immutable. Equal workspace/record/revision deliveries are idempotent; conflicting content, model selection, ownership or price policy raises an integrity error and never silently skips a charge. Reports larger than 65536 bytes are rejected. Receipt ingestion serializes only the corresponding tenant/record keys. Higher revisions retain first ownership; queries select the highest revision per identity before aggregation. Inline child records retain child `harness_run_id` under the executing Service Run. Asynchronous children own separate Service Runs. Selected model identity and the attempt's resolved price snapshot are retained; prices are never read from mutable catalog state when aggregating history.
 
-`runs.usage_at_seal` is the total visible to the sealing transaction (`requests`, `input_tokens`, `output_tokens` of model records); it is not corrected by later arrivals. `max_usage.requests` counts model records ([05](05-runs.md#execute)).
+`GET /workspaces/{ws}/usage` (`read`) returns total model requests, input/output/cache/audio counters, audio seconds, provider receipt count, known USD `cost`, `unknown_cost_records`, `incomplete_requests`, model breakdowns and provider/product breakdowns. Decimal amounts are JSON strings; no known cost means null, and zero means observed zero. Received non-model provider receipts contribute cost but never model counters. Cache hit rate is summed cache-read tokens divided by summed input tokens; input already includes cache. Unknown cost counts describe received records only, not undiscovered vendor fees.
 
-`GET /workspaces/{ws}/usage` (`read`) sums model records per `model_id`, including late arrivals: `requests`, input, output, cache-read and cache-write tokens, and `cost`, the sum of each record's own priced cost (null when no record of that model was priced). It filters by `run_id`, `thread_id`, `session_id`, `ingested_after` and `ingested_before`. `model_id` is null for unattributed records. A crash before a provider report reaches the Service can leave an unknown charge; ingestion preserves received facts, not discovery of every billable operation.
+Filters are `run_id`, `thread_id`, `session_id`, `ingested_after` and `ingested_before`; ingestion time filters apply to selected latest versions. `scope=self` is the default. `scope=tree` requires `run_id` and includes that Run plus descendants linked by child Threads (`origin=child`, `origin_run_id`), including later segments in those child Threads. Run `parent_run_id` describes historical continuation/fork and does not establish delegation. Unrelated root continuations and fork Threads are excluded. Descendant facts are counted once; `active_runs` counts accepted/running Runs in the selected scope. Requerying a sealed parent can return increasing tree usage while a child continues.
+
+`runs.usage_at_seal` remains a frozen requests/input/output snapshot, not a live tree total. Run request limits count latest model identities plus in-memory pending reservations, including auxiliary and inline calls; tree queries do not impose a shared asynchronous budget. A crash before delivery can lose an observation. Received facts do not guarantee vendor-invoice completeness or discovery of every billable operation.
 
 ## Objects
 

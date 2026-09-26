@@ -25,6 +25,7 @@ def upgrade() -> None:
         sa.Column("root_thread_id", sa.String(length=80), nullable=False),
         sa.Column("origin_thread_id", sa.String(length=80), nullable=False),
         sa.Column("record_id", sa.String(length=128), nullable=False),
+        sa.Column("revision", sa.Integer(), nullable=False),
         sa.Column("run_id", sa.String(length=256), nullable=False),
         sa.Column("descendant", sa.Boolean(), nullable=False),
         sa.Column("payload_json", sa.Text(), nullable=False),
@@ -42,7 +43,7 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("sequence", name=op.f("pk_thread_usage")),
-        sa.UniqueConstraint("root_thread_id", "record_id", name="identity"),
+        sa.UniqueConstraint("root_thread_id", "record_id", "revision", name="identity"),
     )
     with op.batch_alter_table("thread_usage", schema=None) as batch_op:
         batch_op.create_index(batch_op.f("ix_thread_usage_root_thread_id"), ["root_thread_id"], unique=False)

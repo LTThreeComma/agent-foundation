@@ -28,7 +28,6 @@ from a13n_service.runs import inbox
 from a13n_service.runs.attempts import Lease, LeaseLost
 from a13n_service.runs.display import Display, StreamPosition
 from a13n_service.runs.tables import AttemptRow, RunRow
-from a13n_service.runs.usage import UsageReport, ingest
 
 if TYPE_CHECKING:
     from a13n_service.runs.runtime import Runtime
@@ -180,14 +179,13 @@ async def commit(
     committed: Committed,
     memory_cursors: dict[str, str | None],
     consumed: Sequence[str],
-    usage: Sequence[UsageReport],
     at: datetime,
 ) -> None:
     """The checkpoint commit, in the caller's transaction under the thread → run → attempt lease locks: move the
     pointers to the published objects.
 
     The transaction also stores the memory cursors the state's history was delivered, consumes the entries the
-    state incorporated and ingests pending usage, so pointers, cursors, consumption and usage move together or
+    state incorporated, so pointers, cursors and consumption move together or
     not at all; it is the checkpoint's durability point. `previous` must still be the run's pointers: any other
     value means another writer moved them, which the lease predicate already rules out, but consuming input
     against the wrong state would break at-most-once incorporation. The caller stages reclamation in the same transaction; no object I/O runs here.
@@ -198,7 +196,6 @@ async def commit(
     run.display = committed.display.model_dump(mode="json")
     run.memory_cursors = memory_cursors
     await inbox.consume(session, run.id, consumed, checkpoint_seq=committed.state.seq, at=at)
-    await ingest(session, run, attempt, usage)
 
 
 CLEANUP: OutboxKind = "checkpoint_cleanup"

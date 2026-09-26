@@ -733,7 +733,7 @@ async def test_native_cancellation_becomes_a_cancelled_result() -> None:
         assert stream.result is terminal.result
 
 
-async def test_prestart_cancellation_never_calls_the_model_and_preserves_supplied_usage() -> None:
+async def test_prestart_cancellation_never_calls_the_model_or_counts_budget_baseline() -> None:
     calls: list[tuple[ModelMessage, ...]] = []
     executable = _build(_turn_model(calls))
     supplied_usage = RunUsage(requests=7, details={"cached": 2})
@@ -751,8 +751,8 @@ async def test_prestart_cancellation_never_calls_the_model_and_preserves_supplie
     assert terminal.result.state is not None
     assert terminal.result.state.message_history == ()
     assert await stream.export_state() == terminal.result.state
-    assert terminal.result.usage.requests == 7
-    assert terminal.result.usage.details == {"cached": 2}
+    assert terminal.result.usage.requests == 0
+    assert terminal.result.usage.details == {}
     assert calls == []
 
 

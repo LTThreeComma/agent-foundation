@@ -17,13 +17,11 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from functools import partial
 
-import anyio
 from a13n_harness import (
     AgentContext,
     DeferredToolResume,
     HarnessError,
     HarnessEvent,
-    HarnessExtensionEvent,
     HarnessRunResult,
     HarnessRunStream,
     HarnessState,
@@ -38,6 +36,7 @@ from a13n_harness.capabilities.steering import steering_input_ids
 from a13n_harness.environment.providers import BoundEnvironment
 from a13n_harness.identity import AgentIdentityRef, AgentInstanceContext
 from a13n_harness.providers.environment.errors import EnvironmentProviderError, EnvironmentProviderErrorCategory
+from a13n_harness.usage import UsageReportError
 from a13n_logging import exception_details, get_logger
 from pydantic import JsonValue
 from pydantic_ai.capabilities import AbstractCapability
@@ -87,7 +86,8 @@ from a13n_service.runs.secrets import require_secrets
 from a13n_service.runs.stream import ThreadStream
 from a13n_service.runs.subagents import ChildRuns
 from a13n_service.runs.tables import RunRow, ThreadRow
-from a13n_service.runs.usage import UsageBuffer, ingest_late, totals
+from a13n_service.runs.usage import DatabaseUsageReporter
+from a13n_service.runs.usage_query import totals
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, WorkspaceScope
 
 logger = get_logger(__name__)
@@ -168,6 +168,8 @@ def _failure(lease: Lease, error: Exception) -> Outcome | None:
 def _own(error: Exception) -> Exception:
     """The Service's own failure inside a Harness hook, such as a skill package read or a lease proof, which the
     Harness wraps and keeps as the cause; it keeps its meaning. Any other error is itself."""
+    if isinstance(error, UsageReportError):
+        return error
     cause = error.__cause__
     return cause if isinstance(error, HarnessError) and isinstance(cause, ServiceError | LeaseLost) else error
 
@@ -311,7 +313,7 @@ class _Attempt:
         self.boundaries = Boundaries(self.cursors.snapshot)
         models = {model.id: model for model in plan.agent.models()}
         self.check = CallCheck(runtime, control, self._call_context(), models=models, used=plan.used, limit=plan.limit)
-        self.usage = UsageBuffer(self.check.calls)
+        self.usage_reporter = DatabaseUsageReporter(runtime.storage, lease.run_id, lease.attempt_id, self.check)
         self.yielding = False
 
     async def run(self) -> None:
@@ -324,10 +326,8 @@ class _Attempt:
             await self._end(result)
         except (LeaseLost, asyncio.CancelledError):
             # Neither seals the run, but its charges so far stay recorded, even while the task is cancelled.
-            await self._record_usage()
             raise
         except Exception as wrapped:
-            await self._record_usage()
             error = _own(wrapped)
             if isinstance(error, LeaseLost):
                 raise error from None
@@ -445,8 +445,6 @@ class _Attempt:
 
     async def _observe(self, item: HarnessStreamEvent, stream: HarnessRunStream, output: Coalescer) -> None:
         event = item.event if isinstance(item, HarnessEvent) else None
-        if isinstance(event, HarnessExtensionEvent) and event.kind == "usage":
-            self.usage.report(event.payload)  # Every charge of the run, an inline child run's included.
         if item.run_id != stream.run_id:
             return  # Other output of an inline child run belongs to that child's own observation.
         if isinstance(event, SafeBoundary):
@@ -484,7 +482,6 @@ class _Attempt:
         if self._near_deadline():
             raise LeaseLost()
         consumed = self.offers.incorporated(state)
-        usage = self.usage.pending()
         committed = await checkpoints.publish_checkpoint(
             self.runtime,
             self.lease,
@@ -504,7 +501,6 @@ class _Attempt:
                 committed=committed,
                 memory_cursors=cursors,
                 consumed=consumed,
-                usage=usage,
                 at=current,
             )
             checkpoints.retire(session, run, self.committed, committed)
@@ -522,7 +518,6 @@ class _Attempt:
                 steers = [Offered.of(entry) for entry in entries]
         self.committed, self.seq = committed, self.seq + 1
         self.offers.consumed(consumed)
-        self.usage.ingested(usage)
         if outcome is not None:
             await advance(self.runtime, self.lease.thread_id)
         return steers
@@ -577,15 +572,12 @@ class _Attempt:
         stream.cancel()
 
     async def _end(self, result: HarnessRunResult) -> None:
-        self.usage.add(result.usage_records)
         if result.status == "failed":
             assert result.failure is not None
-            await self._record_usage()
             failed = Outcome.failed(result.failure.code, result.failure.message)
             await self._seal_interrupted(self._refusal() or failed)
             return
         if result.status == "cancelled":
-            await self._record_usage()
             # The stream is cancelled only to yield at a boundary or because the run was stopped.
             refusal = self._refusal()
             if self.yielding and refusal is None and not self.control.stopped.is_set():
@@ -630,21 +622,6 @@ class _Attempt:
             raise LeaseLost()
         return self.check.refusal
 
-    async def _record_usage(self) -> None:
-        """Usage not committed with a checkpoint is a past charge: recorded even when the lease is gone or the
-        attempt is being cancelled, within one bounded database operation."""
-        reports = self.usage.pending()
-        with anyio.CancelScope(shield=True), anyio.move_on_after(self.runtime.settings.database.statement_timeout):
-            try:
-                await ingest_late(self.runtime.storage, self.lease.run_id, self.lease.attempt_id, reports)
-            except Exception as error:
-                logger.error(
-                    "Usage could not be recorded",
-                    extra={"run_id": self.lease.run_id, "exception_details": exception_details(error)},
-                )
-            else:
-                self.usage.ingested(reports)
-
     def _output(self, output: JsonValue) -> JsonValue:
         limit = self.runtime.settings.worker.output_bytes
         if len(canonical_json(output)) > limit:
@@ -683,6 +660,7 @@ class _Attempt:
             ),
             model_resolver=resolver,
             model_call_check=self.check,
+            usage_reporter=self.usage_reporter,
             capabilities=policies,
             observation=attempt_observation(
                 organization_id=lease.organization_id,

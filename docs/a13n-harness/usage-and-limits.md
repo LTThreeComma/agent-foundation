@@ -18,11 +18,49 @@ A Run may replace the complete `UsageLimits` value; it does not merge individual
 
 ## Usage
 
-`result.usage` and `stream.usage` use Pydantic AI's native `RunUsage`. `result.usage_records` additionally contains detached Harness attribution records for committed model requests and provider-reported usage.
+`stream.usage` is a live `RunUsageSummary`; `result.usage` is its terminal snapshot. Both derive from the same canonical `UsageRecord` union exposed by `stream.usage_records` and `result.usage_records`. They cover the local Run, including main LLM, review, compaction and auxiliary media models. Inline and asynchronous children own separate Harness Runs; their records are available to the Host for tree aggregation.
 
-Model records have an optional `call_id` correlating the committed response with its native model-handler invocation, including the Host's optional [pre-dispatch check](hosting.md#check-model-calls-before-dispatch). Usage reports remain at schema version `1`; older records without the field load with `call_id=None`. That value means unknown dispatch correlation, not proof that no provider call occurred. The ID is not an HTTP request ID or an exactly-once billing key, and it does not change existing record deduplication. Interrupted calls retain only actually observed usage; a check or allocated ID alone does not establish a charge.
+Requests and token/audio counters sum model records; cost includes model records and explicit provider receipts. Native model support for media creates no additional media request. Input tokens already include cache tokens. Cache hit rate is `sum(cache_read_tokens) / sum(input_tokens)`; zero input means unavailable.
 
-Provider integrations can record stable non-model receipts through `AgentContext.record_provider_usage()`.
+For example, one agent request, one review and one separately billed search receipt can produce this summary (other counters are zero):
+
+```json
+{
+  "requests": 2,
+  "input_tokens": 1500,
+  "cache_read_tokens": 900,
+  "output_tokens": 200,
+  "provider_receipts": 1,
+  "cost": "0.0035",
+  "unknown_cost_records": 0,
+  "incomplete_requests": 0,
+  "tool_calls": 1
+}
+```
+
+The cache hit rate is 60%. Amounts are USD only: Python uses `Decimal`, JSON uses decimal strings, unknown cost is `null`, and known zero is `"0"`. A subtotal with unknown records is explicitly incomplete. Built-in pricing uses 80 significant decimal digits and half-even rounding; adding stored amounts preserves precision.
+
+Each actual public Model invocation is measured even if output validation later retries, the caller discards the response, or execution fails or is cancelled. A dispatched request with no supplied usage has `usage_status="unavailable"` and unknown cost. Refused calls and unused lazy streams have no record. Hidden SDK retries cannot be individually measured without provider support.
+
+A normal record has `revision=1`. Polls of the same suspended provider generation retain its record identity and owner and increment the version. Consumers aggregate the highest version once, not every delivered snapshot. Bounded response metadata carries this identity across resume; ordinary imported history creates no charge. A resumed generation whose price policy changes reports unknown cumulative cost. Repeating a delivery is safe; conflicting content at the same version fails explicitly.
+
+Provider integrations call `AgentContext.record_provider_usage()`. Hosts can persist all sources through one optional collaborator:
+
+```python
+from a13n_harness import RunBindings
+from a13n_harness.usage import UsageRecord
+
+class UsageStore:
+    async def report(self, records: tuple[UsageRecord, ...]) -> None:
+        # Atomically insert by tenant, record_id and revision in your database.
+        await save_usage_records(records)
+
+bindings = RunBindings.embedded(usage_reporter=UsageStore())
+```
+
+No registration is needed before a call. Omitting the reporter still provides the complete embedded ledger. Reporting failures preserve local records and fail delivery; they never retry model execution. Cancellation shields cleanup for at most five seconds. Abrupt process loss before reporting can lose observations; this is not an invoice or zero-loss billing pipeline. Usage events and terminal records repeat the same facts and must not be charged separately.
+
+Cumulative Run limits include auxiliary model requests and known provider cost. Pending in-memory reservations protect request limits under concurrency; token and cost limits are checked after capture and may be exceeded by calls already in flight. An unknown cost cannot prove a hard spending ceiling. The [pre-dispatch check](hosting.md#check-model-calls-before-dispatch) remains available for Host admission policy. Budget baselines do not become new Run usage.
 
 Model-cost valuation is enabled by default. `HarnessBuilder` inserts `CatalogModelCostCapability`, which freezes the current valid pricing catalog for the built Agent. Without Host-enabled updates this is bundled `genai-prices` data plus Harness supplements. `get_default_pricing_catalog()` always reads that bundled baseline; `get_current_pricing_catalog()` additionally adopts successful upstream updates. Both return immutable catalogs without downloading anything. Read or export the current snapshot:
 
@@ -106,7 +144,7 @@ Pricing failure or model lookup miss does not fail the Agent run. Usage records 
 
 ## Design boundary
 
-- Pydantic AI owns native usage accumulation and limit checks.
+- Pydantic AI supplies request counters and local execution checks; the Harness ledger owns public summaries and cumulative limits.
 - Harness attributes root, child, and provider work and captures a pricing policy for the executable.
 - The Host owns durable aggregation, billing, negotiated prices, and whether to enable background catalog updates.
 

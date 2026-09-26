@@ -223,25 +223,14 @@ export function UsageDetails({ usage }: { usage?: ThreadUsage }) {
             Non-model providers · {totals.provider_receipts.toLocaleString()}{" "}
             receipts
           </summary>
-          <p className={styles.scope}>
-            Separate from model costs; currencies are not converted.
-          </p>
+          <p className={styles.scope}>Known provider costs in USD.</p>
           <dl className={styles.numbers}>
-            {totals.provider_costs.map(([currency, cost]) => (
-              <Fragment key={String(currency)}>
-                <dt>{String(currency)}</dt>
-                <dd>{String(cost)}</dd>
-              </Fragment>
-            ))}
+            <dt>USD</dt>
+            <dd>{totals.provider_cost_usd ?? "Unknown"}</dd>
           </dl>
           {!!totals.unknown_provider_costs && (
             <p className={styles.scope}>
               {totals.unknown_provider_costs} unknown-cost receipts
-            </p>
-          )}
-          {!!totals.omitted_currency_receipts && (
-            <p className={styles.scope}>
-              {totals.omitted_currency_receipts} currency entries omitted
             </p>
           )}
         </details>

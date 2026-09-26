@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -24,7 +24,7 @@ from a13n_service.runs.runtime import Runtime
 from a13n_service.runs.schemas import Outcome
 from a13n_service.runs.seal import expire_leases, seal_attempt
 from a13n_service.runs.tables import AttemptRow, RunRow, UsageRecordRow
-from a13n_service.runs.usage import UsageBuffer, UsageReport, ingest_late
+from a13n_service.runs.usage import DatabaseUsageReporter, UsageReport, persist
 from a13n_service.runs.worker import Worker
 from a13n_service.tenancy.access import RoleGrant
 from a13n_service.tenancy.authorize import Principal
@@ -308,16 +308,15 @@ async def test_a_cancelled_attempt_still_records_its_usage(service, scripted_mod
     as the supervisor and shutdown do."""
     charged: set[str] = set()
     both = asyncio.Event()
-    add = UsageBuffer.add
+    report = DatabaseUsageReporter.report
 
-    def watched(buffer: UsageBuffer, records: Iterable[UsageRecord]) -> None:
-        records = list(records)
-        add(buffer, records)
+    async def watched(reporter: DatabaseUsageReporter, records: tuple[UsageRecord, ...]) -> None:
+        await report(reporter, records)
         charged.update(record.record_id for record in records if isinstance(record, ModelUsageRecord))
         if len(charged) >= 2:
             both.set()
 
-    monkeypatch.setattr(UsageBuffer, "add", watched)
+    monkeypatch.setattr(DatabaseUsageReporter, "report", watched)
     worker = {"toolsets": {"configuration": {"enabled": True}}}
     agent = await runs_kit.delegating(service, scripted_model, "inline", worker=worker)
     gate = asyncio.Event()
@@ -563,7 +562,7 @@ async def test_a_failed_cleanup_of_replaced_objects_costs_no_attempt(service, sc
     assert run["status"] == "completed" and run["attempts"] == 1, run
 
 
-async def test_a_usage_record_reported_again_with_other_content_is_skipped(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
+async def test_a_usage_record_reported_again_with_other_content_is_rejected(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
     agent = await runs_kit.create_agent(service, scripted_model)
     run_id = (await runs_kit.start_thread(service, agent, "hi"))["run"]["id"]
     scripted_model.say("Done")
@@ -572,9 +571,10 @@ async def test_a_usage_record_reported_again_with_other_content_is_skipped(servi
         stored = (await session.scalars(select(UsageRecordRow).where(UsageRecordRow.run_id == run_id))).one()
         digest, model_id = stored.digest, stored.model_id
 
-    # The same record ID now claims no model: the stored fact stays, and reporting it again does not fail.
+    # The same revision now claims no model: reject the conflict and retain the stored fact.
     conflicting = UsageReport(ModelUsageRecord.model_validate(stored.record))
-    await ingest_late(service.runtime.storage, run_id, stored.run_attempt_id, [conflicting])
+    with pytest.raises(ServiceError, match="selected model"):
+        await persist(service.runtime.storage, run_id, stored.run_attempt_id, [conflicting])
     async with transaction(service.runtime.storage) as session:
         kept = (await session.scalars(select(UsageRecordRow).where(UsageRecordRow.run_id == run_id))).one()
     assert (kept.digest, kept.model_id) == (digest, model_id) and model_id is not None

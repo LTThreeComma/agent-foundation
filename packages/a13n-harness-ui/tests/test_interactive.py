@@ -466,6 +466,7 @@ def test_context_samples_replace_root_requests_without_double_counting_cache_or_
         agent_instance_id="agent-root",
         response_state="complete",
         response_timestamp=datetime.now(UTC),
+        request_started_at=datetime.now(UTC),
         request_usage=BoundedRequestUsage(input_tokens=100, cache_read_tokens=80, output_tokens=20),
         cost_source="unknown",
         pricing_status="disabled",

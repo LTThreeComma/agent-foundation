@@ -5218,18 +5218,18 @@ export interface components {
                 number
             ][];
             /** Model Cost Usd */
-            model_cost_usd: string;
+            model_cost_usd: string | null;
             /** Unknown Model Costs */
             unknown_model_costs: number;
-            /** Provider Costs */
-            provider_costs: [
-                string,
-                string
-            ][];
+            /** Provider Cost Usd */
+            provider_cost_usd: string | null;
             /** Unknown Provider Costs */
             unknown_provider_costs: number;
-            /** Omitted Currency Receipts */
-            omitted_currency_receipts: number;
+            /**
+             * Audio Seconds
+             * @default 0
+             */
+            audio_seconds?: string;
         };
         /** ValidationError */
         ValidationError: {

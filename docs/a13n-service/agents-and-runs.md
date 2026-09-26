@@ -289,18 +289,17 @@ The stream carries only live output the items do not cover yet. Consecutive text
 
 ## Usage
 
-Every model request is recorded with its token counts and a snapshot of the model's pricing. `GET …/usage` sums the records per model:
+Main LLM, review and auxiliary media calls report canonical usage to the same store. Inline child work belongs to the executing Service Run; asynchronous children own separate Runs. `GET …/usage` returns model counters, received provider charges, known USD cost and explicit unknown counts:
 
 ```sh
-curl "$A13N_URL/api/v1/workspaces/$WORKSPACE/usage?thread_id=$THREAD" -H "Authorization: Bearer $A13N_API_KEY"
+curl "$A13N_URL/api/v1/workspaces/$WORKSPACE/usage?run_id=$RUN&scope=tree" -H "Authorization: Bearer $A13N_API_KEY"
 ```
 
-```json
-{"models": [{"model_id": "mdl_...", "requests": 12, "input_tokens": 48210, "output_tokens": 3104,
-             "cache_read_tokens": 30112, "cache_write_tokens": 0, "cost": "0.0931"}]}
-```
+Filter by `run_id`, `thread_id`, `session_id`, and `ingested_after`/`ingested_before`. The default `scope=self` selects only the requested Run. `scope=tree` requires `run_id` and follows actual delegation through child Threads, including their later segments. It excludes unrelated root continuations and forks even when their historical `parent_run_id` matches. Tree totals can grow after the parent ends; `active_runs` shows accepted/running Runs in the selected scope.
 
-Filter by `run_id`, `thread_id`, `session_id`, and `ingested_after`/`ingested_before`. `cost` is `null` when no record of the model was priced. A run's `usage_at_seal` is its usage when it ended; reports that arrive later still count in `/usage`.
+`requests` and token/cache/audio counters count each model generation's latest record version once. Input includes cache tokens, so cache rate is `cache_read_tokens / input_tokens`. `providers` groups existing non-model receipts by provider/product; these contribute cost and `provider_receipts`, not model tokens. `models` retains per-model totals. USD amounts are decimal strings: `cost=null` means no known amount and `cost="0"` means observed zero. `unknown_cost_records` marks how many received records lack cost; `incomplete_requests` counts partial/unavailable model usage. These counts cannot discover fees the provider never reported.
+
+Records and their price snapshots are immutable; later versions revise a cumulative observation without double-counting it. A run's `usage_at_seal` is its frozen usage at completion; later reports and asynchronous children change the query result, not that snapshot. Usage delivery is independent of checkpoint commits. Delivery failure stops the Run with `usage_report_failed` after bounded receipt retries and never triggers a second model execution solely to reproduce a receipt.
 
 ## Traces
 

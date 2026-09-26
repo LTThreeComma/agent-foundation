@@ -84,7 +84,7 @@
           "format": "time_series",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT date_trunc('day', u.ingested_at) AS time,\n  sum((u.record->'request_usage'->>'input_tokens')::bigint) AS input_tokens,\n  sum((u.record->'request_usage'->>'output_tokens')::bigint) AS output_tokens\nFROM usage_records u\nWHERE u.record->>'kind' = 'model' AND $__timeFilter(u.ingested_at)\nGROUP BY 1\nORDER BY 1"
+          "rawSql": "SELECT date_trunc('day', u.ingested_at) AS time,\n  sum((u.record->'request_usage'->>'input_tokens')::bigint) AS input_tokens,\n  sum((u.record->'request_usage'->>'output_tokens')::bigint) AS output_tokens\nFROM (SELECT DISTINCT ON (workspace_id, id) * FROM usage_records ORDER BY workspace_id, id, revision DESC) u\nWHERE u.record->>'kind' = 'model' AND $__timeFilter(u.ingested_at)\nGROUP BY 1\nORDER BY 1"
         }
       ],
       "fieldConfig": {
@@ -181,7 +181,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT o.name AS organization, w.name AS workspace, coalesce(m.key, 'unattributed') AS model,\n  count(*) AS requests,\n  sum((u.record->'request_usage'->>'input_tokens')::bigint) AS input_tokens,\n  sum((u.record->'request_usage'->>'output_tokens')::bigint) AS output_tokens,\n  sum((u.record->'request_usage'->>'cost')::numeric) AS cost\nFROM usage_records u\nJOIN workspaces w ON w.id = u.workspace_id\nJOIN organizations o ON o.id = u.organization_id\nLEFT JOIN models m ON m.id = u.model_id\nWHERE u.record->>'kind' = 'model' AND $__timeFilter(u.ingested_at)\nGROUP BY o.name, w.name, m.key\nORDER BY requests DESC\nLIMIT 100"
+          "rawSql": "SELECT o.name AS organization, w.name AS workspace, coalesce(m.key, 'unattributed') AS model,\n  count(*) AS requests,\n  sum((u.record->'request_usage'->>'input_tokens')::bigint) AS input_tokens,\n  sum((u.record->'request_usage'->>'output_tokens')::bigint) AS output_tokens,\n  sum(u.cost) AS cost,\n  count(*) FILTER (WHERE u.cost IS NULL) AS unknown_cost_records\nFROM (SELECT DISTINCT ON (workspace_id, id) * FROM usage_records ORDER BY workspace_id, id, revision DESC) u\nJOIN workspaces w ON w.id = u.workspace_id\nJOIN organizations o ON o.id = u.organization_id\nLEFT JOIN models m ON m.id = u.model_id\nWHERE u.record->>'kind' = 'model' AND $__timeFilter(u.ingested_at)\nGROUP BY o.name, w.name, m.key\nORDER BY requests DESC\nLIMIT 100"
         }
       ],
       "fieldConfig": {

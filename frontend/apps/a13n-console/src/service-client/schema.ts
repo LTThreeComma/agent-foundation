@@ -5181,20 +5181,65 @@ export interface components {
     };
     /** ModelUsage */
     ModelUsage: {
-      /** Cache Read Tokens */
-      cache_read_tokens: number;
-      /** Cache Write Tokens */
-      cache_write_tokens: number;
+      /**
+       * Audio Seconds
+       * @default 0
+       */
+      audio_seconds?: string;
+      /**
+       * Cache Audio Read Tokens
+       * @default 0
+       */
+      cache_audio_read_tokens?: number;
+      /**
+       * Cache Read Tokens
+       * @default 0
+       */
+      cache_read_tokens?: number;
+      /**
+       * Cache Write Tokens
+       * @default 0
+       */
+      cache_write_tokens?: number;
       /** Cost */
-      cost: string | null;
-      /** Input Tokens */
-      input_tokens: number;
+      cost?: string | null;
+      /**
+       * Incomplete Requests
+       * @default 0
+       */
+      incomplete_requests?: number;
+      /**
+       * Input Audio Tokens
+       * @default 0
+       */
+      input_audio_tokens?: number;
+      /**
+       * Input Tokens
+       * @default 0
+       */
+      input_tokens?: number;
       /** Model Id */
       model_id: string | null;
-      /** Output Tokens */
-      output_tokens: number;
-      /** Requests */
-      requests: number;
+      /**
+       * Output Audio Tokens
+       * @default 0
+       */
+      output_audio_tokens?: number;
+      /**
+       * Output Tokens
+       * @default 0
+       */
+      output_tokens?: number;
+      /**
+       * Requests
+       * @default 0
+       */
+      requests?: number;
+      /**
+       * Unknown Cost Records
+       * @default 0
+       */
+      unknown_cost_records?: number;
     };
     /** MountCreate */
     MountCreate: {
@@ -5602,6 +5647,19 @@ export interface components {
       version: number;
       /** Workspace Id */
       workspace_id: string | null;
+    };
+    /** ProviderCost */
+    ProviderCost: {
+      /** Cost */
+      cost: string | null;
+      /** Product */
+      product: string;
+      /** Provider */
+      provider: string;
+      /** Receipts */
+      receipts: number;
+      /** Unknown Cost Records */
+      unknown_cost_records: number;
     };
     /** ProviderCreate */
     ProviderCreate: {
@@ -7051,8 +7109,77 @@ export interface components {
     };
     /** UsageSummary */
     UsageSummary: {
+      /**
+       * Active Runs
+       * @default 0
+       */
+      active_runs?: number;
+      /**
+       * Audio Seconds
+       * @default 0
+       */
+      audio_seconds?: string;
+      /**
+       * Cache Audio Read Tokens
+       * @default 0
+       */
+      cache_audio_read_tokens?: number;
+      /**
+       * Cache Read Tokens
+       * @default 0
+       */
+      cache_read_tokens?: number;
+      /**
+       * Cache Write Tokens
+       * @default 0
+       */
+      cache_write_tokens?: number;
+      /** Cost */
+      cost?: string | null;
+      /**
+       * Incomplete Requests
+       * @default 0
+       */
+      incomplete_requests?: number;
+      /**
+       * Input Audio Tokens
+       * @default 0
+       */
+      input_audio_tokens?: number;
+      /**
+       * Input Tokens
+       * @default 0
+       */
+      input_tokens?: number;
       /** Models */
       models: components["schemas"]["ModelUsage"][];
+      /**
+       * Output Audio Tokens
+       * @default 0
+       */
+      output_audio_tokens?: number;
+      /**
+       * Output Tokens
+       * @default 0
+       */
+      output_tokens?: number;
+      /**
+       * Provider Receipts
+       * @default 0
+       */
+      provider_receipts?: number;
+      /** Providers */
+      providers: components["schemas"]["ProviderCost"][];
+      /**
+       * Requests
+       * @default 0
+       */
+      requests?: number;
+      /**
+       * Unknown Cost Records
+       * @default 0
+       */
+      unknown_cost_records?: number;
     };
     /** UserKeyCreate */
     UserKeyCreate: {
@@ -13503,6 +13630,7 @@ export interface operations {
   summarize_usage_api_v1_workspaces__workspace_id__usage_get: {
     parameters: {
       query?: {
+        scope?: "self" | "tree";
         run_id?: string | null;
         thread_id?: string | null;
         session_id?: string | null;

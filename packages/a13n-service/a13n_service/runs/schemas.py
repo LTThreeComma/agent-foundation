@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
+from a13n_harness.usage import UsageCounters
 from pydantic import (
     AfterValidator,
     AwareDatetime,
@@ -509,6 +510,14 @@ class Submitted(BaseModel):
 
 
 class UsageFilter(_Frozen):
+    scope: Literal["self", "tree"] = "self"
+
+    @model_validator(mode="after")
+    def _tree_root(self) -> "UsageFilter":
+        if self.scope == "tree" and self.run_id is None:
+            raise ValueError("tree usage requires run_id")
+        return self
+
     run_id: ObjectId | None = None
     thread_id: ObjectId | None = None
     session_id: ObjectId | None = None
@@ -516,17 +525,26 @@ class UsageFilter(_Frozen):
     ingested_before: AwareDatetime | None = None
 
 
-class ModelUsage(BaseModel):
-    # None for records of a model since deleted.
+class UsageTotals(UsageCounters):
+    requests: int = 0
+    unknown_cost_records: int = 0
+    incomplete_requests: int = 0
+
+
+class ModelUsage(UsageTotals):
     model_id: str | None
-    requests: int
-    input_tokens: int
-    output_tokens: int
-    cache_read_tokens: int
-    cache_write_tokens: int
-    # The sum of the costs priced at dispatch; None when no record of the model was priced.
+
+
+class ProviderCost(BaseModel):
+    provider: str
+    product: str
+    receipts: int
     cost: Decimal | None
+    unknown_cost_records: int
 
 
-class UsageSummary(BaseModel):
+class UsageSummary(UsageTotals):
+    provider_receipts: int = 0
     models: list[ModelUsage]
+    providers: list[ProviderCost]
+    active_runs: int = 0

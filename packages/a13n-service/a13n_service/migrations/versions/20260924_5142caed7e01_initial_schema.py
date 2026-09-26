@@ -1452,6 +1452,8 @@ def upgrade() -> None:
         sa.Column("id", sa.String(), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
         sa.Column("workspace_id", sa.String(), nullable=False),
+        sa.Column("revision", sa.BigInteger(), nullable=False),
+        sa.Column("cost", sa.Numeric(), nullable=True),
         sa.Column("run_id", sa.String(), nullable=False),
         sa.Column("run_attempt_id", sa.String(), nullable=False),
         sa.Column("harness_run_id", sa.String(), nullable=False),
@@ -1480,7 +1482,7 @@ def upgrade() -> None:
             ["runs.workspace_id", "runs.id"],
             name=op.f("fk_usage_records_workspace_id_runs"),
         ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_usage_records")),
+        sa.PrimaryKeyConstraint("id", "workspace_id", "revision", name=op.f("pk_usage_records")),
     )
     op.create_index("ix_usage_records_run", "usage_records", ["run_id"], unique=False)
     op.create_index(

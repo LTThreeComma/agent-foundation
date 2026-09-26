@@ -5,6 +5,7 @@ selections, immutable facts) and cross-row pointer agreement are the triggers de
 """
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -14,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Numeric,
     String,
     UniqueConstraint,
     func,
@@ -568,7 +570,9 @@ class UsageRecordRow(Base):
     )
     id: Mapped[str] = mapped_column(primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))
-    workspace_id: Mapped[str]
+    workspace_id: Mapped[str] = mapped_column(primary_key=True)
+    revision: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    cost: Mapped[Decimal | None] = mapped_column(Numeric)
     run_id: Mapped[str]
     run_attempt_id: Mapped[str]
     harness_run_id: Mapped[str]

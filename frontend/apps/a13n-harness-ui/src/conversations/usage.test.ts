@@ -13,9 +13,9 @@ const totals: Schema<"UsageTotals"> = {
   ],
   model_cost_usd: "0.025",
   unknown_model_costs: 0,
-  provider_costs: [],
+  provider_cost_usd: null,
+  audio_seconds: "0",
   unknown_provider_costs: 0,
-  omitted_currency_receipts: 0,
 };
 const usage: Schema<"ThreadUsageView"> = {
   thread_id: "thread-one",

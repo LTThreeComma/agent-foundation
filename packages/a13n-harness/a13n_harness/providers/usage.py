@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -34,7 +35,12 @@ class ProviderUsage(BaseModel):
     timestamp: datetime
     measures: tuple[UsageMeasure, ...] = Field(default=(), max_length=64)
     cost: Decimal | None = None
-    currency: str | None = Field(default=None, min_length=3, max_length=8)
+    currency: Literal["USD"] = "USD"
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _usd(cls, value: str) -> str:
+        return value.upper() if isinstance(value, str) else value
 
     @field_validator("usage_id", "provider", "product")
     @classmethod
@@ -51,11 +57,6 @@ class ProviderUsage(BaseModel):
             raise ValueError("provider usage must contain a measure or cost")
         if len({item.unit for item in self.measures}) != len(self.measures):
             raise ValueError("provider usage measure units must be unique")
-        if self.cost is None:
-            if self.currency is not None:
-                raise ValueError("provider usage currency requires a cost")
-        else:
-            if not self.cost.is_finite() or self.cost < 0 or self.currency is None:
-                raise ValueError("provider usage cost is invalid")
-            object.__setattr__(self, "currency", self.currency.upper())
+        if self.cost is not None and (not self.cost.is_finite() or self.cost < 0):
+            raise ValueError("provider usage cost is invalid")
         return self

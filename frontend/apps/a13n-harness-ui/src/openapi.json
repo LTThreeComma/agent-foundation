@@ -14857,39 +14857,42 @@
             "title": "Tokens"
           },
           "model_cost_usd": {
-            "type": "string",
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Model Cost Usd"
           },
           "unknown_model_costs": {
             "type": "integer",
             "title": "Unknown Model Costs"
           },
-          "provider_costs": {
-            "items": {
-              "prefixItems": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "string",
-                  "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
-                }
-              ],
-              "type": "array",
-              "maxItems": 2,
-              "minItems": 2
-            },
-            "type": "array",
-            "title": "Provider Costs"
+          "provider_cost_usd": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Cost Usd"
           },
           "unknown_provider_costs": {
             "type": "integer",
             "title": "Unknown Provider Costs"
           },
-          "omitted_currency_receipts": {
-            "type": "integer",
-            "title": "Omitted Currency Receipts"
+          "audio_seconds": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Audio Seconds",
+            "default": "0"
           }
         },
         "type": "object",
@@ -14899,9 +14902,8 @@
           "tokens",
           "model_cost_usd",
           "unknown_model_costs",
-          "provider_costs",
-          "unknown_provider_costs",
-          "omitted_currency_receipts"
+          "provider_cost_usd",
+          "unknown_provider_costs"
         ],
         "title": "UsageTotals"
       },

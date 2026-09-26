@@ -14,12 +14,12 @@ from a13n_harness import HarnessState
 from a13n_harness.capabilities.context import ContextRestoredEvent
 from a13n_harness.context import AgentContext
 from a13n_harness.state import AgentContextStateSnapshot, CapabilityState
+from a13n_harness.usage import RunUsageSummary
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import AgentStreamEvent, ModelRequest, TextContent, UserPromptPart
 from pydantic_ai.models import ModelRequestContext
-from pydantic_ai.usage import RunUsage
 
 from a13n_harness_ui.goal_prompts import goal_check_prompt, has_completion_marker, post_restore_audit_prompt
 
@@ -122,7 +122,7 @@ class GoalCapability(AbstractCapability[AgentContext]):
                 self._completion_candidate = False
                 self.goal = self.goal.model_copy(update={"status": "working"})
                 await self._publish(ctx)
-            self._usage(ctx.usage)
+            self._usage(ctx.deps.usage_attribution.summary())
             await self._save(ctx)
         return request_context
 
@@ -176,7 +176,7 @@ class GoalCapability(AbstractCapability[AgentContext]):
                         "restore_source": None if audit else goal.restore_source,
                     }
                 )
-        self._usage(ctx.usage)
+        self._usage(ctx.deps.usage_attribution.summary())
         await self._publish(ctx)
         return output
 
@@ -185,7 +185,7 @@ class GoalCapability(AbstractCapability[AgentContext]):
         state: HarnessState,
         *,
         status: Literal["completed", "suspended", "cancelled", "failed"],
-        usage: RunUsage | None = None,
+        usage: RunUsageSummary | None = None,
     ) -> HarnessState:
         """Finalize the portable candidate before the Host publishes its head."""
         if self.goal is None:
@@ -204,7 +204,7 @@ class GoalCapability(AbstractCapability[AgentContext]):
             await self._changed(self.goal)
         return with_goal(state, self.goal)
 
-    def _usage(self, usage: RunUsage) -> None:
+    def _usage(self, usage: RunUsageSummary) -> None:
         if self.goal is not None:
             self.goal = self.goal.model_copy(
                 update={

@@ -70,9 +70,9 @@ Saved messages and Capability state never restore these values. A resume must re
 
 ### Check Model Calls Before Dispatch
 
-A Host can supply a collaborator implementing `ModelCallCheck.check(ModelCall)` from `a13n_harness.model_calls` through fresh `RunBindings.model_call_check`. Harness allocates a call ID and awaits this check after model preparation and before the native model-request handler. Returning permits the call; raising prevents dispatch. The value contains model, source, and lineage correlation, not messages, arguments, or credentials. Inline children inherit the check, and supported built-in auxiliary calls such as compaction and tool review cannot soften a Host refusal into an optional failure.
+A Host can supply a collaborator implementing `ModelCallCheck.check(ModelCall)` from `a13n_harness.model_calls` through fresh `RunBindings.model_call_check`. Harness allocates a call ID and awaits this check immediately before a public `Model.request` invocation or entry into `Model.request_stream`. Returning permits the call; raising prevents dispatch. The value contains model, source, and lineage correlation, not messages, arguments, or credentials. Inline children inherit the check, and supported built-in auxiliary calls such as compaction and tool review cannot soften a Host refusal into an optional failure.
 
-The boundary is one native handler invocation, not each HTTP request or hidden SDK retry. Passing the check does not prove provider execution or a charge. A committed usage record can carry the same optional `call_id`; see [usage correlation](usage-and-limits.md#usage). The Host owns current authorization, admission, and durable reconciliation; the collaborator and its authority never enter `HarnessState`.
+The boundary is one actual public Model invocation, not each HTTP request or hidden SDK retry. Unentered lazy streams and synthetic responses bypassing the Model create no call. Passing the check does not prove provider execution or a charge. A captured usage record carries the call identity; a suspended generation retains its original identity across polls. See [usage correlation](usage-and-limits.md#usage). The Host owns current authorization, admission, and durable reconciliation; the collaborator and its authority never enter `HarnessState`.
 
 ## Durable State Boundary
 
