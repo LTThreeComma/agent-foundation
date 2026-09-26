@@ -15,6 +15,7 @@ from a13n_service.infra.crypto import KeyRing
 from a13n_service.infra.db import Storage, after_commit
 from a13n_service.infra.objects.interface import ObjectStore
 from a13n_service.infra.redis import wake
+from a13n_service.infra.tasks import Tasks
 from a13n_service.providers.registry import Registry
 from a13n_service.providers.traces import TraceProvider
 from a13n_service.runs.admission import AdmissionPolicy
@@ -32,6 +33,7 @@ class Runtime:
     registry: Registry
     # Who may call and what their grants mean: the distribution's authenticator, roles and grant sources.
     access: Access
+    tasks: Tasks
     admission: AdmissionPolicy | None = None
     # Records Harness spans and metrics of worker attempts; None when tracing and metrics are both off.
     instrumentation: HarnessInstrumentation | None = None

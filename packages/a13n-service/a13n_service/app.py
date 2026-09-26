@@ -32,6 +32,7 @@ from a13n_service.infra.objects.interface import ObjectStore
 from a13n_service.infra.objects.local import LocalObjects
 from a13n_service.infra.objects.s3 import open_s3
 from a13n_service.infra.sweeps import require_unique, run_sweeps
+from a13n_service.infra.tasks import Tasks
 from a13n_service.infra.telemetry import open_instrumentation
 from a13n_service.migrations.runner import heads, upgrade
 from a13n_service.providers.environments import offered
@@ -165,9 +166,13 @@ async def open_runtime(
             content=HarnessTraceContent(telemetry.trace_content),
         )
     )
+    objects = await open_objects(stack, config.objects)
+    tasks = Tasks()
+    stack.push_async_callback(tasks.close, timeout=config.server.shutdown_timeout)
     return Runtime(
         storage=storage,
-        objects=await open_objects(stack, config.objects),
+        objects=objects,
+        tasks=tasks,
         redis=redis,
         keys=_key_ring(config.encryption),
         settings=config,
@@ -244,8 +249,7 @@ def build_app(
             runtime = await open_runtime(stack, distribution, config, executes=executes)
             app.state.runtime = runtime
             app.state.started = False
-            background: list[asyncio.Task[None]] = []
-            app.state.background = background
+            app.state.background = runtime.tasks.services
             try:
                 async with asyncio.timeout(config.server.readiness_timeout):
                     await check_schema(runtime.storage, expected)
@@ -254,22 +258,18 @@ def build_app(
                         catalog_channels(runtime.registry.models.values()), runtime.endpoint_policy
                     )
                     app.state.model_catalog = catalog
-                    background.append(asyncio.create_task(catalog.run(), name="model-catalog"))
+                    runtime.tasks.start(catalog.run(), name="model-catalog", service=True)
                     app.state.thread_hub = ThreadHub(runtime)
-                    background.append(asyncio.create_task(app.state.thread_hub.run(), name="thread-hub"))
+                    runtime.tasks.start(app.state.thread_hub.run(), name="thread-hub", service=True)
                     sweeps = [factory(runtime) for factory in distribution.sweeps]
                     require_unique(sweeps)
-                    background.append(asyncio.create_task(run_sweeps(sweeps), name="control-sweeps"))
+                    runtime.tasks.start(run_sweeps(sweeps), name="control-sweeps", service=True)
                 if executes:
-                    background.append(asyncio.create_task(Worker(runtime, execute).run(), name="worker"))
+                    runtime.tasks.start(Worker(runtime, execute).run(), name="worker", service=True)
                 app.state.started = True
                 yield
             finally:
                 app.state.started = False
-                for task in background:
-                    task.cancel()
-                async with asyncio.timeout(config.server.shutdown_timeout):
-                    await asyncio.gather(*background, return_exceptions=True)
 
     app = FastAPI(
         title="a13n Service",

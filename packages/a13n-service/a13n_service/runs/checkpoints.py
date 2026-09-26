@@ -5,31 +5,33 @@ them reachable, and only a transaction proving the worker lease moves those poin
 late bytes are garbage, never state.
 """
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 from collections.abc import Sequence
 from datetime import datetime
-from functools import partial
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
+import anyio
 from a13n_harness import HarnessState
-from a13n_logging import get_logger
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
-from sqlalchemy import ColumnElement, and_, exists, or_
+from sqlalchemy import ColumnElement, and_, exists, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from a13n_service.infra.db import after_commit
+from a13n_service.infra.db import transaction
 from a13n_service.infra.errors import conflict
 from a13n_service.infra.objects.interface import ObjectRef, ObjectStore, read
+from a13n_service.infra.outbox import Claim, OutboxKind, OutboxRow, enqueue, settle
 from a13n_service.runs import inbox
 from a13n_service.runs.attempts import Lease, LeaseLost
 from a13n_service.runs.display import Display, StreamPosition
-from a13n_service.runs.runtime import Runtime
 from a13n_service.runs.tables import AttemptRow, RunRow
 from a13n_service.runs.usage import UsageReport, ingest
 
-logger = get_logger(__name__)
+if TYPE_CHECKING:
+    from a13n_service.runs.runtime import Runtime
 
 # Bumped only with an explicit migration or rejection plan for outstanding checkpoints.
 FORMAT = 1
@@ -81,18 +83,13 @@ async def publish(objects: ObjectStore, organization_id: str, run_id: str, kind:
     return await objects.put(f"{prefix(organization_id, run_id, kind)}/{digest}", data, content_type="application/json")
 
 
-def _ref(run: RunRow, kind: ObjectKind, pointer: Pointer) -> ObjectRef:
+def _ref(organization_id: str, run_id: str, kind: ObjectKind, pointer: Pointer) -> ObjectRef:
     return ObjectRef(
-        key=f"{prefix(run.organization_id, run.id, kind)}/{pointer.digest}",
+        key=f"{prefix(organization_id, run_id, kind)}/{pointer.digest}",
         digest=pointer.digest,
         size=pointer.size,
         content_type="application/json",
     )
-
-
-def compatible(run: RunRow) -> bool:
-    """Whether this build can continue from the run's checkpoint; a run without one always can."""
-    return run.checkpoint is None or StatePointer.model_validate(run.checkpoint).format == FORMAT
 
 
 def claimable() -> ColumnElement[bool]:
@@ -107,24 +104,28 @@ def claimable() -> ColumnElement[bool]:
     return or_(and_(RunRow.checkpoint.is_(None), ~newer_parent), RunRow.checkpoint["format"].as_integer() <= FORMAT)
 
 
-def require_compatible(run: RunRow) -> None:
-    if run.checkpoint is None or not compatible(run):
-        raise conflict("run", run.id, "checkpoint_incompatible")
+def require_compatible(run_id: str, checkpoint: dict | None) -> StatePointer:
+    if checkpoint is None or (pointer := StatePointer.model_validate(checkpoint)).format != FORMAT:
+        raise conflict("run", run_id, "checkpoint_incompatible")
+    return pointer
 
 
-async def load_state(objects: ObjectStore, run: RunRow) -> RunState | None:
-    if run.checkpoint is None:
+async def load_state(
+    objects: ObjectStore, organization_id: str, run_id: str, pointer: StatePointer | None
+) -> RunState | None:
+    if pointer is None:
         return None
-    require_compatible(run)
-    pointer = StatePointer.model_validate(run.checkpoint)
-    return RunState.model_validate_json(await read(objects, _ref(run, "state", pointer)))
+    if pointer.format != FORMAT:
+        raise conflict("run", run_id, "checkpoint_incompatible")
+    return RunState.model_validate_json(await read(objects, _ref(organization_id, run_id, "state", pointer)))
 
 
-async def load_display(objects: ObjectStore, run: RunRow) -> Display | None:
-    if run.display is None:
+async def load_display(
+    objects: ObjectStore, organization_id: str, run_id: str, pointer: DisplayPointer | None
+) -> Display | None:
+    if pointer is None:
         return None
-    pointer = DisplayPointer.model_validate(run.display)
-    return Display.model_validate_json(await read(objects, _ref(run, "display", pointer)))
+    return Display.model_validate_json(await read(objects, _ref(organization_id, run_id, "display", pointer)))
 
 
 class Committed(_Frozen):
@@ -134,7 +135,7 @@ class Committed(_Frozen):
     display: DisplayPointer
 
     @classmethod
-    def of(cls, run: RunRow) -> "Committed | None":
+    def of(cls, run: RunRow) -> Committed | None:
         if run.checkpoint is None or run.display is None:
             return None
         return cls(
@@ -154,7 +155,14 @@ async def publish_checkpoint(runtime: Runtime, lease: Lease, state: RunState, di
     state_ref, display_pointer = await asyncio.gather(
         publish(runtime.objects, lease.organization_id, lease.run_id, "state", state.model_dump_json().encode()),
         publish_display(runtime, lease, display),
+        return_exceptions=True,
     )
+    # Finish both writes before a failure can seal and reclaim the prefix. Ordinary gather would let the
+    # other write publish an orphan after that final scan had already completed.
+    if isinstance(state_ref, BaseException):
+        raise state_ref
+    if isinstance(display_pointer, BaseException):
+        raise display_pointer
     return Committed(
         state=StatePointer(
             digest=state_ref.digest, size=state_ref.size, format=FORMAT, seq=state.seq, attempt=state.attempt
@@ -165,7 +173,6 @@ async def publish_checkpoint(runtime: Runtime, lease: Lease, state: RunState, di
 
 async def commit(
     session: AsyncSession,
-    objects: ObjectStore,
     run: RunRow,
     attempt: AttemptRow,
     *,
@@ -183,8 +190,7 @@ async def commit(
     state incorporated and ingests pending usage, so pointers, cursors, consumption and usage move together or
     not at all; it is the checkpoint's durability point. `previous` must still be the run's pointers: any other
     value means another writer moved them, which the lease predicate already rules out, but consuming input
-    against the wrong state would break at-most-once incorporation. The replaced objects are deleted after
-    commit, best effort: takeover and seal cleanup reclaim what a failed deletion leaves.
+    against the wrong state would break at-most-once incorporation. The caller stages reclamation in the same transaction; no object I/O runs here.
     """
     if Committed.of(run) != previous:
         raise LeaseLost()
@@ -193,38 +199,92 @@ async def commit(
     run.memory_cursors = memory_cursors
     await inbox.consume(session, run.id, consumed, checkpoint_seq=committed.state.seq, at=at)
     await ingest(session, run, attempt, usage)
-    if previous is not None:
-        after_commit(session, partial(_discard, objects, run.organization_id, run.id, previous, committed))
 
 
-async def _discard(
-    objects: ObjectStore, organization_id: str, run_id: str, previous: Committed, committed: Committed
-) -> None:
-    replaced: tuple[tuple[ObjectKind, Pointer, Pointer], ...] = (
-        ("state", previous.state, committed.state),
-        ("display", previous.display, committed.display),
-    )
-    for kind, old, new in replaced:
-        if old.digest == new.digest:
-            continue
-        try:
-            await objects.delete(f"{prefix(organization_id, run_id, kind)}/{old.digest}")
-        except Exception as error:
-            logger.warning(
-                "Replaced checkpoint object was not deleted",
-                extra={"run_id": run_id, "kind": kind, "error_type": type(error).__name__},
-            )
+CLEANUP: OutboxKind = "checkpoint_cleanup"
 
 
-async def clean(objects: ObjectStore, run: RunRow, *, limit: int = 1000) -> None:
-    """Delete every state/display object of this run that its pointers do not name.
+def retire(session: AsyncSession, run: RunRow, previous: Committed | None, committed: Committed) -> None:
+    """Persist deletion of provably retired references alongside the pointer change."""
+    if previous is None:
+        return
+    keys = []
+    if previous.state.digest != committed.state.digest:
+        keys.append(_ref(run.organization_id, run.id, "state", previous.state).key)
+    old, new = previous.display, committed.display
+    # A different digest at the same stream position may be published again. Seal collects those orphans.
+    if (old.position.attempt, old.position.sequence) < (new.position.attempt, new.position.sequence):
+        keys.append(_ref(run.organization_id, run.id, "display", old).key)
+    if keys:
+        enqueue(
+            session,
+            organization_id=run.organization_id,
+            workspace_id=run.workspace_id,
+            kind=CLEANUP,
+            target={"run_id": run.id},
+            payload={"keys": keys},
+        )
 
-    Callers are the run's owners only: a worker after its own commit, a takeover before entering the
-    Harness, and every seal after commit. Objects named by frozen pointers are never deleted.
+
+def reclaim(session: AsyncSession, run: RunRow, *, before_attempt: int | None = None) -> None:
+    """Stage an orphan scan at takeover or seal, preserving the pointers captured in this transaction.
+
+    Active runs only retire state from older attempts. A display can repeat at the same position, so only
+    a sealed run can scan display orphans. Newly published state carries its attempt number and is skipped.
     """
     pointers: tuple[tuple[ObjectKind, dict | None], ...] = (("state", run.checkpoint), ("display", run.display))
-    keep = {f"{prefix(run.organization_id, run.id, kind)}/{value['digest']}" for kind, value in pointers if value}
-    for kind, _ in pointers:
-        for key in await objects.keys(prefix(run.organization_id, run.id, kind), limit=limit):
-            if key not in keep:
-                await objects.delete(key)
+    keep: list[JsonValue] = [
+        f"{prefix(run.organization_id, run.id, kind)}/{value['digest']}" for kind, value in pointers if value
+    ]
+    enqueue(
+        session,
+        organization_id=run.organization_id,
+        workspace_id=run.workspace_id,
+        kind=CLEANUP,
+        target={"run_id": run.id},
+        payload={"keep": keep, "before_attempt": before_attempt, "after": None},
+    )
+
+
+async def clean(runtime: Runtime, claimed: Claim) -> None:
+    """Deliver a durable reclamation intent outside sessions, with one total I/O budget.
+
+    A scan checkpoints its last completed key and defers remaining pages without consuming an attempt.
+    A failure retries the same page; deletes are idempotent. Zero progress at the deadline is a failed attempt.
+    """
+    assert claimed.organization_id is not None
+    organization_id, run_id = claimed.organization_id, claimed.target["run_id"]
+    payload = dict(claimed.payload)
+    if "keys" in payload:
+        with anyio.fail_after(runtime.settings.objects.timeout):
+            for key in payload["keys"]:
+                await runtime.objects.delete(key)
+        async with transaction(runtime.storage) as session:
+            await settle(session, claimed, "delivered")
+        return
+
+    before = payload["before_attempt"]
+    # State-only scans at takeover also avoid reading an entire run prefix that is still growing.
+    scan_prefix = (
+        prefix(organization_id, run_id, "state") if before is not None else f"orgs/{organization_id}/runs/{run_id}"
+    )
+    after = payload["after"]
+    progressed, complete = False, False
+    with anyio.move_on_after(runtime.settings.objects.timeout):
+        keys = await runtime.objects.keys(scan_prefix, limit=1000, after=after)
+        for key in keys:
+            if key not in payload["keep"]:
+                if before is None:
+                    await runtime.objects.delete(key)
+                elif (data := await runtime.objects.get(key)) is not None:
+                    state = RunState.model_validate_json(data)
+                    if state.attempt < before:
+                        await runtime.objects.delete(key)
+            payload["after"] = key
+            progressed = True
+        complete = len(keys) < 1000
+    if not complete and not progressed:
+        raise TimeoutError("Checkpoint reclamation made no progress")
+    async with transaction(runtime.storage) as session:
+        if await settle(session, claimed, "delivered" if complete else "deferred") and not complete:
+            await session.execute(update(OutboxRow).where(OutboxRow.id == claimed.id).values(payload=payload))
