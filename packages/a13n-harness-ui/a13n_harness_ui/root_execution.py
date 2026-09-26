@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Literal
@@ -47,12 +47,18 @@ from a13n_harness_ui.composition import (
 from a13n_harness_ui.configuration import LoadedHarnessUiConfiguration
 from a13n_harness_ui.conversation import ConversationExcerpt, ExcerptCollector, checkpoint_excerpt
 from a13n_harness_ui.diagnostics import exception_feedback
-from a13n_harness_ui.display_history import DisplayHistoryCollector, saved_display_history, with_display_history
+from a13n_harness_ui.display_history import (
+    DisplayHistory,
+    DisplayHistoryCollector,
+    saved_display_history,
+    with_display_history,
+)
 from a13n_harness_ui.environment_bindings import EnvironmentSelectionPatch
 from a13n_harness_ui.environment_runtime import EnvironmentFinalization, EnvironmentRunService
 from a13n_harness_ui.errors import RunCoordinationError, ThreadError
 from a13n_harness_ui.goal import GoalCapability, GoalView, saved_goal, with_goal
 from a13n_harness_ui.live import HarnessUiLiveHub, HarnessUiSummaryHub
+from a13n_harness_ui.memory import MemoryOrganizationRun
 from a13n_harness_ui.model_runtime import SubscriptionSource
 from a13n_harness_ui.observation import (
     phase,
@@ -112,6 +118,8 @@ class RootRunAdmission:
     deferred_resume: DeferredToolResume | None
     prompt: RunInputValue | None
     response: ThreadDeferredResponse | None
+    memory_positions: dict[str, str | None] = field(default_factory=dict)
+    organization: MemoryOrganizationRun | None = None
 
 
 class RootRunExecutor:
@@ -175,6 +183,7 @@ class RootRunExecutor:
         mutation: ThreadConfigurationMutation | None = None,
         model_overrides: RunModelOverrides | None = None,
         environment: EnvironmentSelectionPatch | None = None,
+        organization: MemoryOrganizationRun | None = None,
     ) -> RootRunAdmission:
         """Resolve admission using detached store reads; never connect to a Device."""
         if sum(value is not None for value in (prompt, response, restart)) != 1:
@@ -189,11 +198,25 @@ class RootRunExecutor:
             raise ThreadError("run_thread accepts only root Threads.", code="child_thread_scoped")
         if thread.archived:
             raise ThreadError("An archived Thread cannot run.", code="thread_archived")
+        if thread.memory_scope is not None:
+            if organization is None or thread.memory_scope != organization.scope.key or prompt is None:
+                raise ThreadError("Memory Threads are observation-only.", code="memory_thread_read_only")
+            source = organization.source
+            published = await self._compositions.publish_memory(source, thread)
+            previous, _, _, _, _ = await self._load_run_state(thread)
+            saved = saved_display_history(previous)
+            display = DisplayHistoryCollector(
+                (), DisplayHistory(messages=previous.message_history if saved is None else saved.messages)
+            ).capture(())
+            fresh = with_display_history(HarnessState.new(thread_id=thread_id), display)
+            return RootRunAdmission(thread, source, published, fresh, None, prompt, None, organization=organization)
+        if organization is not None:
+            raise ThreadError("Organization requires a Memory Thread.", code="memory_thread_required")
         if mutation is not None:
             thread = await self._threads.update_configuration(thread_id=thread_id, mutation=mutation)
         if restart is not None and (thread.continuation != restart.checkpoint or thread_id != restart.thread_id):
             raise RunCoordinationError("The saved restart continuation changed.", code="restart_conflict")
-        previous_state, deferred, previous_composition, accepted = await self._load_run_state(thread)
+        previous_state, deferred, previous_composition, accepted, positions = await self._load_run_state(thread)
         deferred_resume = _deferred_resume(thread=thread, requests=deferred, response=response)
         if deferred_resume is None and accepted is not None:
             deferred_resume = accepted.recover()
@@ -266,7 +289,7 @@ class RootRunExecutor:
             )
             envelope = await self._store.objects.publish_model(object_kind=ObjectKind.run_composition, value=captured)
             published = PublishedRunComposition(value=captured, reference=envelope.ref)
-        return RootRunAdmission(thread, source, published, previous_state, deferred_resume, prompt, response)
+        return RootRunAdmission(thread, source, published, previous_state, deferred_resume, prompt, response, positions)
 
     async def execute(
         self,
@@ -303,6 +326,7 @@ class RootRunExecutor:
                 selected = await self._select_state(
                     thread=thread,
                     composition=published.reference,
+                    memory_positions=reconstructed.memory_cursors.snapshot(),
                     accepted=deferred_resume,
                     state=state,
                     display=display,
@@ -322,15 +346,21 @@ class RootRunExecutor:
             reconstructed = self._agents.reconstruct(
                 published.value,
                 pricing_catalog=pricing_catalog,
+                memory_positions=admission.memory_positions,
+                organization=admission.organization,
                 subagent_operator=self._subagent_operator,
                 root_capabilities=(
                     goal_capability,
                     display,
                     RootCheckpointCapability(save_checkpoint),
-                    *((RestartPauseCapability(self._restart, thread_id),) if self._restart is not None else ()),
+                    *(
+                        (RestartPauseCapability(self._restart, thread_id),)
+                        if self._restart is not None and admission.organization is None
+                        else ()
+                    ),
                     *(
                         ()
-                        if self._root_capability_factory is None
+                        if self._root_capability_factory is None or admission.organization is not None
                         else (self._root_capability_factory(published.value),)
                     ),
                 ),
@@ -348,7 +378,7 @@ class RootRunExecutor:
                         for capability in reconstructed.executable.definition.capabilities
                     ),
                 )
-                if self._thread_files is not None
+                if self._thread_files is not None and admission.organization is None
                 else None
             )
             input_factory: RunInputFactory | None = None
@@ -362,7 +392,9 @@ class RootRunExecutor:
                 input_factory = prepare_input
                 prompt = None
             preparation_span.set_attribute("a13n.phase.step", "environment")
-            environment = await self._environments.prepare(published.value)
+            environment = (
+                None if admission.organization is not None else await self._environments.prepare(published.value)
+            )
             instance = AgentInstanceContext(
                 identity=AgentIdentityRef(issuer="a13n-harness-ui", subject=thread.thread_id),
                 agent_instance_id=f"agent-{uuid4().hex[:20]}",
@@ -371,8 +403,8 @@ class RootRunExecutor:
             )
             bindings = RunBindings(
                 instance=instance,
-                environment=environment.runtime,
-                tool_result_directory=environment.tool_result_directory,
+                environment=None if environment is None else environment.runtime,
+                tool_result_directory=None if environment is None else environment.tool_result_directory,
                 model_resolver=reconstructed.model_resolver,
                 file_media_understanding=reconstructed.file_media_understanding(previous_state.thread_id),
                 working_state_observer=(
@@ -447,7 +479,11 @@ class RootRunExecutor:
             with CancelScope(shield=True):
                 finalization_span.set_attribute("a13n.phase.step", "environment")
                 try:
-                    finalization = await environment.finalize(timeout_seconds=self._cleanup_timeout_seconds)
+                    finalization = (
+                        EnvironmentFinalization(cleanup_errors=(), state_publications=())
+                        if environment is None
+                        else await environment.finalize(timeout_seconds=self._cleanup_timeout_seconds)
+                    )
                 except Exception as exc:
                     finalization_error = exc
                 if (
@@ -474,6 +510,7 @@ class RootRunExecutor:
                     continuation = await self._select_state(
                         thread=thread,
                         composition=published.reference,
+                        memory_positions=reconstructed.memory_cursors.snapshot(),
                         accepted=deferred_resume,
                         state=paused_state,
                         display=display,
@@ -518,6 +555,7 @@ class RootRunExecutor:
                     continuation = await self._select_state(
                         thread=thread,
                         composition=published.reference,
+                        memory_positions=reconstructed.memory_cursors.snapshot(),
                         accepted=deferred_resume,
                         state=result.state,
                         display=display,
@@ -543,6 +581,7 @@ class RootRunExecutor:
                         continuation = await self._select_state(
                             thread=thread,
                             composition=published.reference,
+                            memory_positions=reconstructed.memory_cursors.snapshot(),
                             accepted=deferred_resume,
                             state=state,
                             display=display,
@@ -648,8 +687,11 @@ class RootRunExecutor:
 
     async def _load_run_state(
         self, thread: Thread
-    ) -> tuple[HarnessState, DeferredToolRequests | None, ObjectRef | None, StoredDeferredInput | None]:
+    ) -> tuple[
+        HarnessState, DeferredToolRequests | None, ObjectRef | None, StoredDeferredInput | None, dict[str, str | None]
+    ]:
         accepted = None
+        positions: dict[str, str | None] = {}
         if thread.continuation is None:
             stored = await self._store.objects.read_model(thread.initial_state, StoredThreadInitialState)
             state = stored.harness_state
@@ -661,12 +703,13 @@ class RootRunExecutor:
             deferred = stored_continuation.deferred_requests
             composition = stored_continuation.run_composition
             accepted = stored_continuation.accepted_input
+            positions = stored_continuation.memory_cursors
         if state.thread_id != thread.thread_id:
             raise ThreadError(
                 "The selected Thread state belongs to another Thread.",
                 code="thread_continuation_incompatible",
             )
-        return state, deferred, composition, accepted
+        return state, deferred, composition, accepted, positions
 
     async def _select_state(
         self,
@@ -680,6 +723,7 @@ class RootRunExecutor:
         excerpt: ConversationExcerpt,
         activity_changed: bool,
         completed_run_id: str | None = None,
+        memory_positions: Mapping[str, str | None] | None = None,
     ) -> RootContinuationSelection:
         if state is None:
             return RootContinuationSelection(status="not_available")
@@ -688,6 +732,7 @@ class RootRunExecutor:
             continuation = StoredContinuation(
                 harness_release=harness_version,
                 run_composition=composition,
+                memory_cursors=dict(memory_positions or {}),
                 harness_state=with_display_history(
                     state, display.capture(state.message_history, completed=completed_run_id is not None)
                 )
@@ -845,6 +890,7 @@ def _validate_question_result(arguments: object, value: object) -> dict[str, obj
 
 def _selection(thread: Thread) -> ThreadCompositionSelection:
     source = thread.configuration.agent_source
+    assert source.kind != "memory"
     return ThreadCompositionSelection(
         thread_id=thread.thread_id,
         version=thread.configuration.version,

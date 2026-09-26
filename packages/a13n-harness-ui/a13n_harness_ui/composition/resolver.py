@@ -39,9 +39,11 @@ from a13n_harness_ui.environment_profiles import (
 )
 from a13n_harness_ui.errors import CompositionError
 from a13n_harness_ui.extensions import HarnessUiExtensionCatalog
+from a13n_harness_ui.memory import ORGANIZATION_PROMPT
 from a13n_harness_ui.model_adapters import PydanticAiModelAdapter, service_tier_setting
 from a13n_harness_ui.model_controls import apply_model_controls
 from a13n_harness_ui.prompts import DEFAULT_SYSTEM_PROMPT
+from a13n_harness_ui.storage.contracts import Thread
 from a13n_harness_ui.surfaces import RunModelOverrides
 
 from .models import (
@@ -140,7 +142,7 @@ class AgentCompositionResolver:
             )
 
         for model in source.models.values():
-            self._model_recipe(model)
+            self.model_recipe(model)
         for agent in source.agents.values():
             self._capability_recipes(source, agent, warnings=warnings)
 
@@ -215,11 +217,12 @@ class AgentCompositionResolver:
             thread_id=selection.thread_id,
             thread_configuration_version=selection.version,
             project_id=selection.project_id,
+            memory_enabled=source.document.memory.enabled,
             role=selection.role,
             coordinator_thread_id=selection.coordinator_thread_id,
             project_roots=selection.local_roots,
             media_understanding={
-                kind: self._model_recipe(source.models[model_id])
+                kind: self.model_recipe(source.models[model_id])
                 for kind, model_id in source.document.media_understanding.selections().items()
             },
             webui_sidekick=(
@@ -314,7 +317,7 @@ class AgentCompositionResolver:
                 effective.pop(service_tier_setting(resource.route), None)
                 effective["service_tier"] = model_overrides.service_tier
             resource = resource.model_copy(update={"settings": effective})
-        model = self._model_recipe(resource)
+        model = self.model_recipe(resource)
         if model_overrides is not None and model_overrides.thinking is not None:
             model = model.model_copy(update={"thinking_override": model_overrides.thinking})
         capabilities = self._capability_recipes(source, agent, active_model=model)
@@ -422,7 +425,7 @@ class AgentCompositionResolver:
                 code="composition_subagent_model_unavailable",
                 details={"subagent_id": child.id, "model_id": child.model},
             )
-        model = parent.model if child.model is None else self._model_recipe(source.models[child.model])
+        model = parent.model if child.model is None else self.model_recipe(source.models[child.model])
         return ResolvedAgentNode(
             source_kind="markdown",
             source_id=child.id,
@@ -449,7 +452,30 @@ class AgentCompositionResolver:
             children=(),
         )
 
-    def _model_recipe(self, item: ModelResource) -> ResolvedModelRecipe:
+    def resolve_memory(self, source: LoadedHarnessUiConfiguration, thread: Thread) -> ResolvedRunComposition:
+        settings = source.document.memory.auto_organize
+        assert settings.model is not None and thread.memory_scope is not None
+        return ResolvedRunComposition(
+            package_prompt_revision=PACKAGE_PROMPT_REVISION,
+            generation_digest=source.source_digest,
+            thread_id=thread.thread_id,
+            thread_configuration_version=thread.configuration.version,
+            project_id=thread.configuration.project_id,
+            memory_organization=True,
+            root=ResolvedAgentNode(
+                source_kind="memory",
+                source_id="memory",
+                roster_name="memory",
+                system_prompt=(ORGANIZATION_PROMPT,),
+                instructions=(settings.instructions,) if settings.instructions else (),
+                model=self.model_recipe(source.models[settings.model]),
+            ),
+            # Retained for the shared composition schema; memory execution never
+            # enters this profile or grants Environment capabilities.
+            environment_profile=self._environment_profile(source, FULL_CONTROL_PROFILE_ID),
+        )
+
+    def model_recipe(self, item: ModelResource) -> ResolvedModelRecipe:
         _validate_auth_route(item)
         normalized = self._model_adapter.validate(
             route=item.route,
@@ -508,13 +534,13 @@ class AgentCompositionResolver:
                         model = active_model
                         if model is None:
                             assert agent.model is not None
-                            model = self._model_recipe(source.models[agent.model])
+                            model = self.model_recipe(source.models[agent.model])
                         review["model"] = model.model_id
                         configuration["review"] = review
                     else:
                         if not isinstance(model_id, str) or model_id not in source.models:
                             raise self._review_model_error(source, agent, model_id=model_id)
-                        model = self._model_recipe(source.models[model_id])
+                        model = self.model_recipe(source.models[model_id])
                     overrides = review.get("model_settings", {})
                     if not isinstance(overrides, dict):
                         raise CompositionError(

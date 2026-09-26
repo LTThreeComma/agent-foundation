@@ -1412,6 +1412,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/memory/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Memory Files */
+        get: operations["memory_files_api_memory_files_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/memory/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Memory File */
+        get: operations["memory_file_api_memory_file_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/threads": {
         parameters: {
             query?: never;
@@ -1731,14 +1765,14 @@ export interface components {
             /** Id */
             id: string;
         };
-        AgentSource: components["schemas"]["AgentResourceSource"] | components["schemas"]["MarkdownSubagentSource"];
+        AgentSource: components["schemas"]["AgentResourceSource"] | components["schemas"]["MarkdownSubagentSource"] | components["schemas"]["MemoryAgentSource"];
         /** AgentSourceView */
         AgentSourceView: {
             /**
              * Kind
              * @enum {string}
              */
-            kind: "agent" | "markdown";
+            kind: "agent" | "markdown" | "memory";
             /** Id */
             id: string;
         };
@@ -1849,6 +1883,7 @@ export interface components {
              * @default []
              */
             capability_warnings?: string[];
+            memory_organization?: components["schemas"]["MemoryOrganizationStatus"] | null;
         };
         /**
          * AppliedEditView
@@ -1924,7 +1959,7 @@ export interface components {
              * Source Kind
              * @enum {string}
              */
-            source_kind: "agent" | "markdown";
+            source_kind: "agent" | "markdown" | "memory";
             /** Source Id */
             source_id: string;
             /** Model Id */
@@ -1949,6 +1984,16 @@ export interface components {
             /** Project Roots */
             project_roots: string[];
             webui_sidekick?: components["schemas"]["SidekickConfiguration"] | null;
+            /**
+             * Memory Enabled
+             * @default false
+             */
+            memory_enabled?: boolean;
+            /**
+             * Memory Scopes
+             * @default []
+             */
+            memory_scopes?: string[];
             agent: components["schemas"]["CapturedAgentSelection"];
             /** Capability Ids */
             capability_ids: string[];
@@ -1957,11 +2002,11 @@ export interface components {
             /** Mcp Server Ids */
             mcp_server_ids: string[];
             /** Environment Profile Id */
-            environment_profile_id: string;
+            environment_profile_id: string | null;
             /** Environment Provider */
-            environment_provider: string;
+            environment_provider: string | null;
             /** Environment Adapter */
-            environment_adapter: string;
+            environment_adapter: string | null;
             /**
              * Environment Bindings
              * @default []
@@ -3263,6 +3308,83 @@ export interface components {
             kind?: "markdown";
             /** Id */
             id: string;
+        };
+        /**
+         * MemoryAgentSource
+         * @description Application-owned organizer; not a selectable Agent resource.
+         */
+        MemoryAgentSource: {
+            /**
+             * Kind
+             * @default memory
+             * @constant
+             */
+            kind?: "memory";
+            /**
+             * Id
+             * @default memory
+             */
+            id?: string;
+        };
+        /** MemoryFileEntry */
+        MemoryFileEntry: {
+            /** Path */
+            path: string;
+            /** Version */
+            version: string;
+            /** Size */
+            size: number;
+            /** Description */
+            description?: string | null;
+        };
+        /** MemoryFileText */
+        MemoryFileText: {
+            /** Path */
+            path: string;
+            /** Version */
+            version: string;
+            /** Text */
+            text: string;
+        };
+        /** MemoryOrganizationStatus */
+        MemoryOrganizationStatus: {
+            /**
+             * Memory Enabled
+             * @default false
+             */
+            memory_enabled?: boolean;
+            /**
+             * Availability
+             * @enum {string}
+             */
+            availability: "ready" | "disabled" | "model_not_configured" | "webui_only" | "configuration_unavailable";
+            /**
+             * Active Scopes
+             * @default []
+             */
+            active_scopes?: string[];
+            /** Last Outcome */
+            last_outcome?: ("completed" | "failed" | "cancelled" | "concurrent_change") | null;
+            /**
+             * Attempts
+             * @default 0
+             */
+            attempts?: number;
+            /**
+             * Requests
+             * @default 0
+             */
+            requests?: number;
+            /**
+             * Input Tokens
+             * @default 0
+             */
+            input_tokens?: number;
+            /**
+             * Output Tokens
+             * @default 0
+             */
+            output_tokens?: number;
         };
         ModelAuthentication: components["schemas"]["ApiKeyAuthentication"] | components["schemas"]["CodexSubscriptionAuthentication"] | components["schemas"]["GrokSubscriptionAuthentication"] | components["schemas"]["CopilotSubscriptionAuthentication"];
         /** ModelCatalogSnapshot */
@@ -4784,6 +4906,11 @@ export interface components {
         /** ThreadSummary */
         ThreadSummary: {
             /**
+             * Memory Scope
+             * @default null
+             */
+            memory_scope?: string | null;
+            /**
              * Role
              * @default ordinary
              * @enum {string}
@@ -5971,6 +6098,11 @@ export interface components {
         };
         /** ThreadLookup */
         ThreadLookup: {
+            /**
+             * Memory
+             * @default false
+             */
+            memory?: boolean;
             /** Thread Ids */
             thread_ids: string[];
         };
@@ -9066,9 +9198,74 @@ export interface operations {
             };
         };
     };
+    memory_files_api_memory_files_get: {
+        parameters: {
+            query?: {
+                project_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryFileEntry"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    memory_file_api_memory_file_get: {
+        parameters: {
+            query: {
+                path: string;
+                project_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryFileText"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     threads_api_threads_get: {
         parameters: {
             query?: {
+                memory?: boolean;
+                projectless?: boolean;
                 query?: string | null;
                 project_id?: string | null;
                 include_archived?: boolean;
