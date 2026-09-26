@@ -513,15 +513,15 @@ async def test_shared_reviewer_isolates_overlapping_executions(reviewer_context,
 async def test_reviewer_allocates_identity_only_after_request_preparation(reviewer_context, monkeypatch):
     from dataclasses import replace
 
-    from a13n_harness import model_calls
     from a13n_harness.capabilities import tool_review
+    from a13n_harness.metering import MeteredModel
 
     events = []
-    allocate = model_calls.uuid4
+    admit = MeteredModel._admit
 
-    def record_allocation():
-        events.append("allocate")
-        return allocate()
+    async def record_admission(self, messages):
+        events.append("admit")
+        return await admit(self, messages)
 
     class Preparation(AbstractCapability):
         async def before_model_request(self, ctx, request_context):
@@ -536,7 +536,7 @@ async def test_reviewer_allocates_identity_only_after_request_preparation(review
         events.append("provider")
         yield {0: DeltaToolCall(name=info.output_tools[0].name, json_args='{"risk":"low"}')}
 
-    monkeypatch.setattr(model_calls, "uuid4", record_allocation)
+    monkeypatch.setattr(MeteredModel, "_admit", record_admission)
     monkeypatch.setattr(tool_review, "_auxiliary_agent_capabilities", lambda: (Preparation(),))
     reviewer = tool_review.AgentToolReviewer(
         FunctionModel(stream_function=provider), tool_review.ToolReviewConfig(model="test:review")

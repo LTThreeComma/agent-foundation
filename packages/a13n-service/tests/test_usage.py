@@ -72,6 +72,18 @@ async def test_latest_versions_exact_usd_and_unknown_provider_charges(service, s
         service.runtime.storage, run_id, row.run_attempt_id, [UsageReport(original, row.model_id, row.price_snapshot)]
     )
     result = await _summary(service, run_id)
+    # SQL and the embedded accumulator consume the very same revised facts.
+    from a13n_harness.usage import RunUsageSummary, UsageCounters, summarize_usage
+
+    fields = set(UsageCounters.model_fields) | {
+        "requests",
+        "provider_receipts",
+        "unknown_cost_records",
+        "incomplete_requests",
+    }
+    memory = summarize_usage((original, revised, *(item.record for item in receipts)))
+    sql = RunUsageSummary.model_validate({key: value for key, value in result.items() if key in fields})
+    assert sql == memory
     assert result["requests"] == 1 and result["input_tokens"] == 100
     assert result["cache_read_tokens"] == 70 and result["input_audio_tokens"] == 5
     assert Decimal(result["audio_seconds"]) == Decimal("1.25")
@@ -160,3 +172,64 @@ async def test_reporter_failure_does_not_schedule_another_model_attempt(service,
     assert result["attempts"] == 1
     await scripted_model.request()
     assert scripted_model.requests.empty()
+
+
+@pytest.mark.parametrize("same_generation", [False, True])
+@pytest.mark.parametrize("baseline", [0, 2])
+async def test_service_request_limit_distinguishes_polls_from_new_generations(same_generation, baseline):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from a13n_harness.metering import ModelUsageBinding, ModelUsageCapability
+    from a13n_service.runs.admission import CallContext
+    from a13n_service.runs.attempts import AttemptControl
+    from a13n_service.runs.calls import CallCheck
+    from pydantic_ai import Agent
+    from pydantic_ai.exceptions import UsageLimitExceeded
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.usage import RequestUsage
+
+    context = CallContext("org", "workspace", "session", "thread", "run", "attempt", "run", "", "", None)
+    selected = SimpleNamespace(id="selected", provider=SimpleNamespace(id="provider"), pricing=None)
+    check = CallCheck(
+        SimpleNamespace(admission=None),
+        AttemptControl(),
+        context,
+        models={"": selected},
+        used=baseline,
+        limit=baseline + 1,
+    )
+    binding = ModelUsageBinding.standalone(source="media")
+    owner = SimpleNamespace(run_id=binding.ledger.run_id, instance=binding.ledger.instance, model_call_check=check)
+    binding = replace(binding, owner=owner)
+    received = []
+
+    class Reporter:
+        async def report(self, records):
+            received.extend(records)
+
+    binding.ledger.reporter = Reporter()
+    calls = []
+
+    def model(messages, info):
+        calls.append(1)
+        n = len(calls)
+        return ModelResponse(
+            parts=[TextPart(str(n))],
+            state="suspended" if n < 3 else "complete",
+            provider_response_id="one" if same_generation else f"generation-{n}",
+            usage=RequestUsage(input_tokens=10 * n, cost=Decimal("0.1")),
+        )
+
+    agent = Agent(FunctionModel(model), capabilities=[ModelUsageCapability(binding)])
+    if same_generation:
+        await agent.run("go")
+        assert len(calls) == 3 and check.used == baseline + 1
+        assert len(binding.ledger.records) == 1 and binding.ledger.records[0].revision == 3
+    else:
+        with pytest.raises(UsageLimitExceeded):
+            await agent.run("go")
+        assert len(calls) == 2 and check.used == baseline + 2
+        assert len(binding.ledger.records) == 2
+        assert len(received) == 2  # The over-limit charge is delivered before refusal.

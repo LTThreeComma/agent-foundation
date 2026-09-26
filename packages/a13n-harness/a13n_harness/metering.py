@@ -33,13 +33,16 @@ from a13n_harness.model_calls import _check_model_call
 from a13n_harness.models.self_healing import SelfHealingModel
 from a13n_harness.pricing import AbstractModelCostCapability, CatalogModelCostCapability
 from a13n_harness.providers.usage import ProviderUsage, UsageMeasure
+from a13n_harness.request_budget import RequestBudget
 from a13n_harness.usage import (
     TOKEN_COUNTERS,
     BoundedRequestUsage,
+    ModelUsageObservation,
     ModelUsageRecord,
     RunUsageLedger,
     UsageCapability,
     _stable_id,
+    revise,
 )
 
 logger = get_logger(__name__)
@@ -145,7 +148,7 @@ class MeteredModel(WrapperModel):
         self.pricing: _PricingOutcome | None = None
         self.records: dict[str, ModelUsageRecord] = {}
 
-    async def _admit(self, messages: list[ModelMessage]) -> tuple[str, ModelUsageRecord | None]:
+    async def _admit(self, messages: list[ModelMessage]) -> tuple[str, ModelUsageRecord | None, RequestBudget | None]:
         binding = self.binding
         tail = messages[-1] if messages else None
         continuation = (
@@ -153,22 +156,24 @@ class MeteredModel(WrapperModel):
         )
         state = (tail.metadata or {}).get(_STATE_KEY) if isinstance(tail, ModelResponse) and continuation else None
         previous = ModelUsageRecord.model_validate(state) if state is not None else None
-        binding.ledger.reserve(continuation=previous is not None)
+        call_id = f"call_{uuid4().hex}"
+        binding.ledger.reserve(call_id, continuation=previous is not None)
         try:
             if binding.owner is None:
-                return f"call_{uuid4().hex}", previous
-            call = await _check_model_call(
+                return call_id, previous, None
+            budget = await _check_model_call(
                 binding.owner,
                 self.request_context,
+                call_id=call_id,
                 model_run_id=self.model_run_id,
                 source=binding.source,
                 tool_id=binding.tool_id,
                 tool_call_id=binding.tool_call_id,
                 continuation_of=continuation if previous is not None else None,
             )
-            return call.call_id, previous
+            return call_id, previous, budget
         except BaseException:
-            binding.ledger.release()
+            binding.ledger.requests.cancel(call_id)
             raise
 
     def _snapshot(
@@ -197,34 +202,7 @@ class MeteredModel(WrapperModel):
             request_started_at=previous.request_started_at if previous is not None else started,
         )
         usage = BoundedRequestUsage.from_request_usage(value.usage)
-        if (
-            previous is not None
-            and previous.pricing_revision is not None
-            and pricing.revision != previous.pricing_revision
-        ):
-            usage = usage.model_copy(update={"cost": None})
-            pricing = replace(
-                pricing,
-                revision=previous.pricing_revision,
-                status="declined",
-                quote_source=None,
-                rule_id=previous.pricing_rule_id,
-            )
-        record = ModelUsageRecord(
-            record_id=previous.record_id if previous else _stable_id("model", ledger.run_id, call_id),
-            revision=previous.revision + 1 if previous else 1,
-            run_id=previous.run_id if previous else ledger.run_id,
-            response_ordinal=previous.response_ordinal if previous else ledger.next_model_ordinal(),
-            call_id=previous.call_id if previous else call_id,
-            request_started_at=previous.request_started_at if previous else started,
-            model_run_id=previous.model_run_id if previous else self.model_run_id,
-            model_id=self.request_context.model_id,
-            provider_response_id=value.provider_response_id,
-            agent_instance_id=previous.agent_instance_id if previous else ledger.instance.agent_instance_id,
-            parent_agent_instance_id=previous.parent_agent_instance_id
-            if previous
-            else ledger.instance.parent_agent_instance_id,
-            delegation_id=previous.delegation_id if previous else ledger.instance.delegation_id,
+        observation = ModelUsageObservation(
             response_state=("interrupted" if error is not None and value.state != "complete" else value.state)
             if response is not None
             else "unavailable",
@@ -238,10 +216,34 @@ class MeteredModel(WrapperModel):
             pricing_rule_id=pricing.rule_id,
             pricing_status=pricing.status,
             cost_source=_cost_source(value, pricing) if usage.cost is not None else "unknown",
-            source=previous.source if previous else binding.source,
-            tool_id=previous.tool_id if previous else binding.tool_id,
-            tool_call_id=previous.tool_call_id if previous else binding.tool_call_id,
         )
+        if previous is not None:
+            record = revise(previous, observation)
+            pricing = replace(
+                pricing,
+                revision=record.pricing_revision,
+                rule_id=record.pricing_rule_id,
+                status=record.pricing_status,
+                quote_source=pricing.quote_source if record.request_usage.cost is not None else None,
+            )
+        else:
+            record = ModelUsageRecord(
+                **observation.model_dump(),
+                record_id=_stable_id("model", ledger.run_id, call_id),
+                run_id=ledger.run_id,
+                response_ordinal=ledger.next_model_ordinal(),
+                call_id=call_id,
+                request_started_at=started,
+                model_run_id=self.model_run_id,
+                model_id=self.request_context.model_id,
+                provider_response_id=value.provider_response_id,
+                agent_instance_id=ledger.instance.agent_instance_id,
+                parent_agent_instance_id=ledger.instance.parent_agent_instance_id,
+                delegation_id=ledger.instance.delegation_id,
+                source=binding.source,
+                tool_id=binding.tool_id,
+                tool_call_id=binding.tool_call_id,
+            )
         return record, pricing
 
     async def _capture(
@@ -251,18 +253,18 @@ class MeteredModel(WrapperModel):
         started: datetime,
         error: BaseException | None,
         seed: ModelUsageRecord | None,
+        host_budget: RequestBudget | None,
     ) -> None:
         binding, ledger = self.binding, self.binding.ledger
         try:
-            if response is None and seed is not None:
-                # A failed poll supplies no new generation snapshot. Retry delivery of the
-                # existing fact instead of inventing a competing version without a checkpoint.
-                ledger.append_model(seed)
-                await ledger._flush(reason="model_request", trigger_record_id=seed.record_id)
-                return
-            record, pricing = self._snapshot(response, call_id, started, error, seed)
-            # Capture is synchronous: cancellation cannot land between receiving and recording usage.
-            ledger.append_model(record)
+            # A failed poll has no new snapshot; deliver the existing fact without
+            # inventing a revision that was never saved in a continuation checkpoint.
+            record, pricing = (
+                (seed, None)
+                if response is None and seed is not None
+                else self._snapshot(response, call_id, started, error, seed)
+            )
+            refusal = ledger.finish(call_id, record, host_budget)
             self.records[record.record_id] = record
             self.pricing = pricing
             if response is not None:
@@ -281,14 +283,16 @@ class MeteredModel(WrapperModel):
                         await _pricing_diagnostic(binding.owner, response, pricing.revision)
                 except Exception:
                     logger.warning("Pricing diagnostic delivery failed")
+            if error is None and refusal is not None:
+                raise refusal
         except Exception:
             if error is None:
                 raise
             logger.error("Usage cleanup failed while preserving the model failure")
         finally:
-            ledger.release()
-        if error is None:
-            ledger.check_limits()
+            ledger.requests.cancel(call_id)
+            if host_budget is not None:
+                host_budget.cancel(call_id)
 
     async def request(
         self,
@@ -296,7 +300,7 @@ class MeteredModel(WrapperModel):
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
-        call_id, seed = await self._admit(messages)
+        call_id, seed, host_budget = await self._admit(messages)
         started, response, error = datetime.now(UTC), None, None
         try:
             response = await super().request(messages, model_settings, model_request_parameters)
@@ -305,7 +309,7 @@ class MeteredModel(WrapperModel):
             error = exc
             raise
         finally:
-            await self._capture(response, call_id, started, error, seed)
+            await self._capture(response, call_id, started, error, seed, host_budget)
 
     @asynccontextmanager
     async def request_stream(
@@ -315,7 +319,7 @@ class MeteredModel(WrapperModel):
         model_request_parameters: ModelRequestParameters,
         run_context: RunContext[object] | None = None,
     ) -> AsyncGenerator[StreamedResponse]:
-        call_id, seed = await self._admit(messages)
+        call_id, seed, host_budget = await self._admit(messages)
         started, stream, error = datetime.now(UTC), None, None
         try:
             async with super().request_stream(
@@ -328,4 +332,6 @@ class MeteredModel(WrapperModel):
         finally:
             if stream is not None and stream.metadata is None:
                 stream.metadata = {}
-            await self._capture(stream.get() if stream is not None else None, call_id, started, error, seed)
+            await self._capture(
+                stream.get() if stream is not None else None, call_id, started, error, seed, host_budget
+            )

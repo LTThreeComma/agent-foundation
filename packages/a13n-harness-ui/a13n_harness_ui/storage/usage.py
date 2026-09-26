@@ -9,9 +9,9 @@ from decimal import Decimal
 from typing import Annotated
 
 from a13n_harness import HarnessRunResultEvent
+from a13n_harness.errors import RunError
 from a13n_harness.events import HarnessEvent, HarnessExtensionEvent, UsageReportPayload
-from a13n_harness.money import sum_decimal
-from a13n_harness.usage import ModelUsageRecord, ProviderUsageRecord, UsageRecord
+from a13n_harness.usage import ModelUsageRecord, UsageAccumulator, UsageRecord, validate_revision
 from anyio import Lock
 from pydantic import Field, TypeAdapter
 from sqlalchemy import exists, func, select
@@ -26,15 +26,6 @@ from .models import ThreadRecord, ThreadUsageRecord
 _RECORD = TypeAdapter(Annotated[UsageRecord, Field(discriminator="kind")])
 _BATCH = 128
 _GROUPS = 32
-_COUNTERS = (
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "input_audio_tokens",
-    "output_audio_tokens",
-    "cache_audio_read_tokens",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,45 +82,15 @@ class ThreadUsageView:
     other_groups: UsageTotals | None = None
 
 
-@dataclass
-class _Totals:
-    requests: int = 0
-    receipts: int = 0
-    tokens: dict[str, int] = field(default_factory=lambda: dict.fromkeys(_COUNTERS, 0))
-    cost: Decimal = Decimal(0)
-    unknown: int = 0
-    provider_cost: Decimal = Decimal(0)
-    audio_seconds: Decimal = Decimal(0)
-    unknown_provider: int = 0
-
-    def add(self, record: UsageRecord) -> None:
-        if isinstance(record, ModelUsageRecord):
-            self.requests += 1
-            usage = record.request_usage
-            counters = usage.model_dump(exclude={"details", "cost"})
-            for name in _COUNTERS:
-                self.tokens[name] += counters[name]
-            if usage.cost is None:
-                self.unknown += 1
-            else:
-                self.cost = sum_decimal((self.cost, usage.cost))
-            self.audio_seconds = sum_decimal((self.audio_seconds, usage.audio_seconds))
-        else:
-            self.receipts += 1
-            receipt = record.usage
-            if receipt.cost is None:
-                self.unknown_provider += 1
-            else:
-                self.provider_cost = sum_decimal((self.provider_cost, receipt.cost))
-
+class _Totals(UsageAccumulator):
     def view(self) -> UsageTotals:
         return UsageTotals(
             model_requests=self.requests,
             provider_receipts=self.receipts,
             tokens=tuple(self.tokens.items()),
-            model_cost_usd=self.cost if self.requests > self.unknown else None,
+            model_cost_usd=self.model_cost,
             unknown_model_costs=self.unknown,
-            provider_cost_usd=self.provider_cost if self.receipts > self.unknown_provider else None,
+            provider_cost_usd=self.receipt_cost,
             unknown_provider_costs=self.unknown_provider,
             audio_seconds=self.audio_seconds,
         )
@@ -251,40 +212,52 @@ class ThreadUsageRepository:
             return
         if len(records) > _BATCH:
             raise ValueError("Usage writes are limited to 128 records per transaction.")
-        async with transaction(self._sessions) as session:
-            root_id = await self._root_id(session, thread_id)
-            for record in records:
-                existing = await session.scalar(
-                    select(ThreadUsageRecord).where(
-                        ThreadUsageRecord.root_thread_id == root_id,
-                        ThreadUsageRecord.record_id == record.record_id,
-                        ThreadUsageRecord.revision == record.revision,
-                    )
-                )
-                if existing is not None:
-                    prior = _RECORD.validate_json(existing.payload_json)
-                    # Provider receipt identity is global to a family; attribution is first-observed.
-                    same = prior == record
-                    if isinstance(prior, ProviderUsageRecord) and isinstance(record, ProviderUsageRecord):
-                        same = prior.usage == record.usage
-                    if not same:
-                        raise StoreIntegrityError(
-                            "A usage identity was reused with different facts.", code="usage_record_conflict"
+        try:
+            async with transaction(self._sessions) as session:
+                root_id = await self._root_id(session, thread_id)
+                for record in records:
+                    existing = await session.scalar(
+                        select(ThreadUsageRecord)
+                        .where(
+                            ThreadUsageRecord.root_thread_id == root_id,
+                            ThreadUsageRecord.record_id == record.record_id,
                         )
-                    continue
-                session.add(
-                    ThreadUsageRecord(
-                        root_thread_id=root_id,
-                        origin_thread_id=thread_id,
-                        record_id=record.record_id,
-                        revision=record.revision,
-                        run_id=record.run_id,
-                        descendant=thread_id != root_id or record.parent_agent_instance_id is not None,
-                        payload_json=record.model_dump_json(),
-                        observed_at=datetime.now(UTC),
+                        .order_by(ThreadUsageRecord.revision.desc())
+                        .limit(1)
                     )
-                )
-                await session.flush()
+                    if existing is not None:
+                        prior = _RECORD.validate_json(existing.payload_json)
+                        record = validate_revision(prior, record)
+                        if existing.revision == record.revision:
+                            continue
+                        if record.revision < existing.revision:
+                            # A replay may conflict with an older stored version even when
+                            # its attribution agrees with the latest revision.
+                            version = await session.scalar(
+                                select(ThreadUsageRecord).where(
+                                    ThreadUsageRecord.root_thread_id == root_id,
+                                    ThreadUsageRecord.record_id == record.record_id,
+                                    ThreadUsageRecord.revision == record.revision,
+                                )
+                            )
+                            if version is not None:
+                                validate_revision(_RECORD.validate_json(version.payload_json), record)
+                                continue
+                    session.add(
+                        ThreadUsageRecord(
+                            root_thread_id=root_id,
+                            origin_thread_id=thread_id,
+                            record_id=record.record_id,
+                            revision=record.revision,
+                            run_id=record.run_id,
+                            descendant=thread_id != root_id or record.parent_agent_instance_id is not None,
+                            payload_json=record.model_dump_json(),
+                            observed_at=datetime.now(UTC),
+                        )
+                    )
+                    await session.flush()
+        except RunError as error:
+            raise StoreIntegrityError(str(error), code="usage_record_conflict") from error
 
     async def latest_root_request(self, *, thread_id: str, run_id: str | None = None) -> ModelUsageRecord | None:
         """Read request-local usage already committed during execution, not Run totals."""

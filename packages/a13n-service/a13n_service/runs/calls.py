@@ -10,7 +10,8 @@ from dataclasses import replace
 from typing import NoReturn
 
 from a13n_harness.model_calls import ModelCall
-from a13n_harness.usage import ModelUsageRecord, UsageRecord
+from a13n_harness.request_budget import RequestBudget
+from pydantic_ai.exceptions import UsageLimitExceeded
 
 from a13n_service.infra.db import transaction
 from a13n_service.infra.errors import ServiceError
@@ -43,30 +44,20 @@ class CallCheck:
         limit: int | None,
     ):
         self.runtime, self.control, self.context, self.models = runtime, control, context, models
-        self._baseline, self.limit = used, limit
-        self._pending: set[str] = set()
-        self._recorded: set[str] = set()
+        self.budget = RequestBudget(used=used, limit=limit)
         self.refusal: Outcome | None = None
         self.lease_missed = False
 
     @property
     def used(self) -> int:
-        return self._baseline + len(self._pending) + len(self._recorded)
+        return self.budget.used
 
-    def recorded(self, records: tuple[UsageRecord, ...], owned: frozenset[str]) -> None:
-        for record in records:
-            if isinstance(record, ModelUsageRecord):
-                if record.call_id is not None:
-                    self._pending.discard(record.call_id)
-                if record.record_id in owned:
-                    self._recorded.add(record.record_id)
-
-    async def check(self, call: ModelCall) -> None:
+    async def check(self, call: ModelCall) -> RequestBudget:
         self._continuing()
-        if call.continuation_of is None and self.limit is not None and self.used >= self.limit:
-            self.refuse(Outcome.failed("usage_limit_exceeded", f"The run used its {self.limit} model requests"))
-        if call.continuation_of is None:
-            self._pending.add(call.call_id)
+        try:
+            self.budget.reserve(call.call_id, continuation=call.continuation_of is not None)
+        except UsageLimitExceeded as error:
+            self.refuse(Outcome.failed("usage_limit_exceeded", str(error)))
         try:
             # Every model of the graph is selected by its ID; a call that names none of them cannot be admitted.
             model = self.models.get(call.model_id or "")
@@ -82,8 +73,9 @@ class CallCheck:
                     price_snapshot=price_snapshot(model),
                 )
             )
+            return self.budget
         except BaseException:
-            self._pending.discard(call.call_id)
+            self.budget.cancel(call.call_id)
             raise
 
     async def tool_call(

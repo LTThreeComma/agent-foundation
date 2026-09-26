@@ -3,9 +3,9 @@
 import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
-from uuid import uuid4
 
 from a13n_harness.errors import RunError
+from a13n_harness.request_budget import RequestBudget
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestContext
@@ -39,8 +39,8 @@ class ModelCall:
 
 @runtime_checkable
 class ModelCallCheck(Protocol):
-    async def check(self, call: ModelCall) -> None:
-        """Return to permit dispatch; raising or cancellation prevents it."""
+    async def check(self, call: ModelCall) -> RequestBudget | None:
+        """Permit dispatch, optionally returning a reserved Host budget to settle before reporting."""
         ...
 
 
@@ -48,15 +48,16 @@ async def _check_model_call(
     owner: "AgentContext",
     request: "ModelRequestContext",
     *,
+    call_id: str,
     model_run_id: str | None,
     source: str,
     tool_id: str | None = None,
     tool_call_id: str | None = None,
     continuation_of: str | None = None,
-) -> ModelCall:
+) -> RequestBudget | None:
     """Allocate once at the native wrapper boundary, after request preparation."""
     call = ModelCall(
-        call_id=f"call_{uuid4().hex}",
+        call_id=call_id,
         harness_run_id=owner.run_id,
         model_run_id=model_run_id,
         agent_instance_id=owner.instance.agent_instance_id,
@@ -72,7 +73,7 @@ async def _check_model_call(
     )
     if owner.model_call_check is not None:
         try:
-            await owner.model_call_check.check(call)
+            return await owner.model_call_check.check(call)
         except asyncio.CancelledError as error:
             task = asyncio.current_task()
             if task is not None and task.cancelling():
@@ -81,4 +82,4 @@ async def _check_model_call(
             raise ModelCallCheckError("Host model-call check was cancelled.") from error
         except Exception as error:
             raise ModelCallCheckError() from error
-    return call
+    return None

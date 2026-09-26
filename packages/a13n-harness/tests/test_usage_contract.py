@@ -272,3 +272,133 @@ async def test_record_capacity_is_checked_before_another_model_is_dispatched(mon
     with pytest.raises(Exception, match="capacity"):
         await agent.run("two")
     assert len(calls) == 1 and binding.ledger.summary().requests == 1
+
+
+async def test_finished_request_releases_capacity_before_reporting() -> None:
+    binding = ModelUsageBinding.standalone(source="media")
+    binding.ledger._limits = UsageLimits(request_limit=2)
+    reporting, release, second_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls = []
+
+    class Reporter:
+        async def report(self, records):
+            reporting.set()
+            await release.wait()
+
+    def model(messages, info):
+        calls.append(1)
+        if len(calls) == 2:
+            second_entered.set()
+        return ModelResponse(parts=[TextPart("done")], usage=RequestUsage(input_tokens=3))
+
+    binding.ledger.reporter = Reporter()
+    agent = Agent(FunctionModel(model), capabilities=[ModelUsageCapability(binding)])
+    tasks = [asyncio.create_task(agent.run("first"))]
+    await reporting.wait()
+    tasks.append(asyncio.create_task(agent.run("second")))
+    try:
+        await asyncio.wait_for(second_entered.wait(), 1)
+        with pytest.raises(UsageLimitExceeded):
+            await agent.run("third")
+    finally:
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    assert all(not isinstance(result, BaseException) for result in results)
+    assert binding.ledger.summary().requests == 2
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "run_id",
+        "call_id",
+        "model_id",
+        "model_run_id",
+        "provider_response_id",
+        "agent_instance_id",
+        "parent_agent_instance_id",
+        "delegation_id",
+        "source",
+        "tool_id",
+        "tool_call_id",
+        "request_started_at",
+        "response_ordinal",
+    ],
+)
+def test_revisions_cannot_change_generation_ownership(field) -> None:
+    from a13n_harness.errors import RunError
+    from a13n_harness.usage import validate_revision
+
+    original = record(request_usage=BoundedRequestUsage(input_tokens=1))
+    changed = original.model_copy(
+        update={
+            "revision": 2,
+            field: _NOW.replace(year=2027)
+            if field == "request_started_at"
+            else 1
+            if field == "response_ordinal"
+            else "different",
+        }
+    )
+    for before, after in ((original, changed), (changed, original)):
+        with pytest.raises(RunError, match="attribution"):
+            validate_revision(before, after)
+
+
+def test_revision_refines_only_observation_and_preserves_policy() -> None:
+    from a13n_harness.usage import ModelUsageObservation, revise, validate_revision
+
+    original = record(
+        call_id="call-first",
+        request_usage=BoundedRequestUsage(input_tokens=1, cost="0.1"),
+        pricing_revision="v1",
+        pricing_rule_id="rule1",
+    )
+    observation = ModelUsageObservation(
+        response_state="complete",
+        response_timestamp=_NOW,
+        request_usage=BoundedRequestUsage(input_tokens=10, cost="0.2"),
+        pricing_revision="v2",
+        pricing_rule_id="rule2",
+        pricing_status="applied",
+    )
+    revised = revise(original, observation)
+    assert revised.revision == 2 and revised.call_id == original.call_id
+    assert revised.pricing_revision == "v1" and revised.pricing_rule_id == "rule1"
+    assert revised.pricing_status == "declined" and revised.request_usage.cost is None
+    assert revised.request_usage.input_tokens == 10
+    assert validate_revision(original, revised) == revised
+    with pytest.raises(Exception, match="price policy"):
+        validate_revision(
+            original, revised.model_copy(update={"pricing_revision": "v2", "request_usage": observation.request_usage})
+        )
+
+
+async def test_failed_report_retries_facts_without_holding_request_capacity() -> None:
+    binding = ModelUsageBinding.standalone(source="media")
+    binding.ledger._limits = UsageLimits(request_limit=2)
+    received = []
+
+    class Reporter:
+        fail = True
+
+        async def report(self, records):
+            if self.fail:
+                self.fail = False
+                raise ConnectionError("retry delivery")
+            received.extend(records)
+
+    binding.ledger.reporter = Reporter()
+    agent = Agent(
+        FunctionModel(
+            lambda messages, info: ModelResponse(parts=[TextPart("done")], usage=RequestUsage(input_tokens=3))
+        ),
+        capabilities=[ModelUsageCapability(binding)],
+    )
+    with pytest.raises(UsageReportError):
+        await agent.run("first")
+    await agent.run("second")
+    assert binding.ledger.summary().requests == 2
+    assert len(received) == 2 and len({item.record_id for item in received}) == 2
+    assert binding.ledger.requests.pending == 0

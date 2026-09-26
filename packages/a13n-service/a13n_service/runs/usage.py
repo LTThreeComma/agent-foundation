@@ -6,13 +6,19 @@ made them: the attempt's own, or an inline subagent's whose events the attempt's
 """
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import anyio
-from a13n_harness.usage import ModelUsageRecord, ProviderUsageRecord, UsageRecord
-from pydantic import JsonValue
+from a13n_harness.errors import RunError
+from a13n_harness.usage import (
+    ModelUsageRecord,
+    ProviderUsageRecord,
+    UsageRecord,
+    validate_price_policy,
+    validate_revision,
+)
+from pydantic import JsonValue, TypeAdapter
 from sqlalchemy import select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import OperationalError
@@ -24,10 +30,8 @@ from a13n_service.resources.models.service import ResolvedModel
 from a13n_service.runs.schemas import canonical_json
 from a13n_service.runs.tables import AttemptRow, RunRow, UsageRecordRow
 
-if TYPE_CHECKING:
-    from a13n_service.runs.calls import CallCheck
-
 MAX_RECORD_BYTES = 65536
+_RECORD = TypeAdapter(UsageRecord)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,9 +67,7 @@ def _values(run: RunRow, attempt: AttemptRow, report: UsageReport, record: dict)
     }
 
 
-async def ingest(
-    session: AsyncSession, run: RunRow, attempt: AttemptRow, reports: Sequence[UsageReport]
-) -> frozenset[str]:
+async def ingest(session: AsyncSession, run: RunRow, attempt: AttemptRow, reports: Sequence[UsageReport]) -> None:
     """Persist immutable, tenant-scoped versions. Conflicting delivery fails explicitly."""
     if attempt.run_id != run.id:
         raise ServiceError("forbidden", "Usage report does not belong to this attempt")
@@ -80,7 +82,7 @@ async def ingest(
             raise ServiceError("conflict", "Conflicting usage record revision")
         rows[key] = candidate
     if not rows:
-        return frozenset()
+        return
     # Serialize only receipt ingestion, never model execution. Sort keys to avoid deadlocks.
     for record_id in sorted({key[0] for key in rows}):
         await advisory_lock(session, "usage", run.workspace_id, record_id)
@@ -106,34 +108,14 @@ async def ingest(
         if owner is None:
             owners[row["id"]] = row
             continue
-        if (
-            row["record"]["kind"] == "provider"
-            and owner["record"]["kind"] == "provider"
-            and row["revision"] == owner["revision"]
-            and row["record"]["usage"] == owner["record"]["usage"]
-        ):
-            row["record"] = owner["record"]
         if row["model_id"] != owner["model_id"]:
             raise ServiceError("conflict", "Usage record changed its selected model")
-        for name in (
-            "kind",
-            "run_id",
-            "call_id",
-            "request_started_at",
-            "provider_response_id",
-            "response_ordinal",
-            "ordinal",
-            "agent_instance_id",
-            "parent_agent_instance_id",
-            "delegation_id",
-            "source",
-            "tool_id",
-            "tool_call_id",
-        ):
-            if name in owner["record"] and row["record"].get(name) != owner["record"][name]:
-                raise ServiceError("conflict", "Usage record changed its attribution")
-        if row["price_snapshot"] != owner["price_snapshot"] and row["cost"] is not None:
-            raise ServiceError("conflict", "Usage revision changed its price policy")
+        try:
+            record = validate_revision(_RECORD.validate_python(owner["record"]), _RECORD.validate_python(row["record"]))
+            validate_price_policy(owner["price_snapshot"], row["price_snapshot"], row["cost"])
+        except RunError as error:
+            raise ServiceError("conflict", str(error)) from error
+        row["record"] = record.model_dump(mode="json")
         for name in ("run_id", "run_attempt_id", "harness_run_id", "call_id", "price_snapshot"):
             row[name] = owner[name]
         row["digest"] = hashlib.sha256(
@@ -157,13 +139,11 @@ async def ingest(
     if any(rows[(record_id, revision)]["digest"] != digest for record_id, revision, digest in stored):
         raise ServiceError("conflict", "Conflicting usage record revision")
 
-    return frozenset(row["id"] for row in rows.values() if row["run_attempt_id"] == attempt.id)
 
-
-async def persist(storage: Storage, run_id: str, attempt_id: str, reports: Sequence[UsageReport]) -> frozenset[str]:
+async def persist(storage: Storage, run_id: str, attempt_id: str, reports: Sequence[UsageReport]) -> None:
     """Persist received facts in a short transaction, independent of worker lease state."""
     if not reports:
-        return frozenset()
+        return
     async with transaction(storage) as session:
         pair = (
             await session.execute(
@@ -177,7 +157,7 @@ async def persist(storage: Storage, run_id: str, attempt_id: str, reports: Seque
         ).one_or_none()
         if pair is None:
             raise ServiceError("not_found", "Usage report names no attempt")
-        return await ingest(session, pair[0], pair[1], reports)
+        await ingest(session, pair[0], pair[1], reports)
 
 
 def price_snapshot(model: ResolvedModel) -> dict[str, JsonValue] | None:
@@ -187,19 +167,18 @@ def price_snapshot(model: ResolvedModel) -> dict[str, JsonValue] | None:
 class DatabaseUsageReporter:
     """The Service's only normal ingestion entry point, independent of checkpoints and leases."""
 
-    def __init__(self, storage: Storage, run_id: str, attempt_id: str, check: "CallCheck"):
+    def __init__(self, storage: Storage, run_id: str, attempt_id: str, models: Mapping[str, ResolvedModel]):
         self.storage, self.run_id, self.attempt_id = storage, run_id, attempt_id
-        self.check = check
+        self.models = models
 
     async def report(self, records: tuple[UsageRecord, ...]) -> None:
         reports = []
         for record in records:
-            model = self.check.models.get(record.model_id or "") if isinstance(record, ModelUsageRecord) else None
+            model = self.models.get(record.model_id or "") if isinstance(record, ModelUsageRecord) else None
             reports.append(UsageReport(record, model.id if model else None, price_snapshot(model) if model else None))
         for attempt in range(3):
             try:
-                owned = await persist(self.storage, self.run_id, self.attempt_id, reports)
-                self.check.recorded(records, owned)
+                await persist(self.storage, self.run_id, self.attempt_id, reports)
                 return
             except OperationalError:
                 if attempt == 2:

@@ -313,7 +313,7 @@ class _Attempt:
         self.boundaries = Boundaries(self.cursors.snapshot)
         models = {model.id: model for model in plan.agent.models()}
         self.check = CallCheck(runtime, control, self._call_context(), models=models, used=plan.used, limit=plan.limit)
-        self.usage_reporter = DatabaseUsageReporter(runtime.storage, lease.run_id, lease.attempt_id, self.check)
+        self.usage_reporter = DatabaseUsageReporter(runtime.storage, lease.run_id, lease.attempt_id, models)
         self.yielding = False
 
     async def run(self) -> None:

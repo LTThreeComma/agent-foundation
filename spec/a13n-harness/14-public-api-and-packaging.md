@@ -53,6 +53,7 @@ The package root is a closed primary code-first facade. It exports only the valu
 | `a13n_harness.tools`                 | Tool recovery declarations, managed tool invocation, and event helpers                       |
 | `a13n_harness.toolsets`              | First-party reusable Toolsets, including the standard async subagent dispatcher              |
 | `a13n_harness.model_calls`           | `ModelCall`, `ModelCallCheck`, `ModelCallCheckError`                                         |
+| `a13n_harness.request_budget`        | Shared in-memory `RequestBudget` for independent local and Host request limits               |
 | `a13n_harness.usage`                 | Usage attribution, ledger, and `intersect_usage_limits`                                      |
 
 `a13n_harness.models.codex` exports `CodexRequestModel`. The Model authentication feature exports `CodexLoginFlow`, `CodexLoginResult`, and the Codex device flow alongside Grok credential/source values, OAuth and refresh primitives, bounded errors, and `build_grok_model()`. Native Codex credential, source, provider, and ordinary browser-flow APIs are imported directly from `pydantic_ai.providers.openai_codex`; there are no compatibility aliases or parallel refresh APIs. Its lifecycle and Host boundary belong to [Model Authentication](16a-model-authentication.md).
@@ -223,11 +224,12 @@ class ModelCall:
     source: str
     tool_id: str | None
     tool_call_id: str | None
+    continuation_of: str | None = None
 
 
 @runtime_checkable
 class ModelCallCheck(Protocol):
-    async def check(self, call: ModelCall) -> None: ...
+    async def check(self, call: ModelCall) -> RequestBudget | None: ...
 ```
 
 `ModelCallCheckError` is a `RunError` with code `model_call_check_failed` that preserves authoritative refusal across built-in optional auxiliary paths.

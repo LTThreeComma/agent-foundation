@@ -16,6 +16,7 @@ from a13n_harness.usage import (
     ProviderUsageRecord,
     RunUsageSummary,
     UsageMeasure,
+    summarize_usage,
 )
 from a13n_harness_ui.errors import StoreIntegrityError
 from a13n_harness_ui.interactive.usage import thread_usage_text
@@ -149,6 +150,21 @@ async def test_reports_terminal_and_receipts_deduplicate_across_root_inline_and_
         assert snapshot.root.model_requests == 1
         assert snapshot.descendants.model_requests == 3
         assert snapshot.combined.model_requests == 4
+        memory = summarize_usage(
+            (
+                record,
+                _model(0, run="run-inline", child=True),
+                _model(0, run="run-async"),
+                _model(0, run="run-nested"),
+                _receipt(),
+            )
+        )
+        totals = snapshot.combined
+        assert dict(totals.tokens) == {name: getattr(memory, name) for name, _ in totals.tokens}
+        assert totals.audio_seconds == memory.audio_seconds
+        assert totals.unknown_model_costs + totals.unknown_provider_costs == memory.unknown_cost_records
+        assert totals.provider_receipts == memory.provider_receipts
+        assert (totals.model_cost_usd or Decimal(0)) + (totals.provider_cost_usd or Decimal(0)) == memory.cost
         assert dict(snapshot.combined.tokens)["input_tokens"] == 400
         assert dict(snapshot.combined.tokens)["cache_read_tokens"] == 240
         assert snapshot.combined.model_cost_usd == Decimal("0.125")
@@ -185,9 +201,9 @@ async def test_conflicting_usage_is_not_overwritten_and_chunk_is_atomic(tmp_path
             session.add(_thread("thread-root"))
         repository = ThreadUsageRepository(database.sessions)
         await repository.append(thread_id="thread-root", records=(_model(0), _receipt()))
-        with pytest.raises(StoreIntegrityError, match="different facts"):
+        with pytest.raises(StoreIntegrityError, match="Conflicting usage record revision"):
             await repository.append(thread_id="thread-root", records=(_model(1), _model(0, cost=Decimal(1))))
-        with pytest.raises(StoreIntegrityError, match="different facts"):
+        with pytest.raises(StoreIntegrityError, match="Conflicting usage record revision"):
             await repository.append(thread_id="thread-root", records=(_receipt(run="other", cost=Decimal(1)),))
         snapshot = await repository.snapshot(thread_id="thread-root")
         assert snapshot.combined.model_requests == 1
@@ -488,3 +504,17 @@ async def test_cumulative_revisions_invalidate_cached_totals_and_ignore_older_de
         assert dict(view.combined.tokens)["input_tokens"] == 200
         assert await repository.latest_root_request(thread_id="thread-root") == last
         assert view == await ThreadUsageRepository(database.sessions).snapshot(thread_id="thread-root")
+
+
+async def test_revision_cannot_move_usage_to_another_owner(tmp_path: Path) -> None:
+    settings = StorageSettings(data_root=tmp_path)
+    async with open_database(tmp_path / "metadata.sqlite3", settings) as database:
+        async with transaction(database.sessions) as session:
+            session.add(_thread("thread-root"))
+        repository = ThreadUsageRepository(database.sessions)
+        original = _model(0, cost=Decimal("0.1"))
+        await repository.append(thread_id="thread-root", records=(original,))
+        revised = original.model_copy(update={"revision": 2, "source": "another-source"})
+        with pytest.raises(StoreIntegrityError, match="attribution"):
+            await repository.append(thread_id="thread-root", records=(revised,))
+        assert (await repository.snapshot(thread_id="thread-root")).combined.model_requests == 1

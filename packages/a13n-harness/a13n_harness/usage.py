@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from collections.abc import Iterable
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
@@ -28,6 +28,7 @@ from a13n_harness.money import sum_decimal
 from a13n_harness.pricing import MODEL_COST_CAPABILITY_ID, AbstractModelCostCapability
 from a13n_harness.providers.usage import ProviderUsage as ProviderUsage
 from a13n_harness.providers.usage import UsageMeasure as UsageMeasure
+from a13n_harness.request_budget import RequestBudget
 
 if TYPE_CHECKING:
     from a13n_harness.events import HarnessEventEmitter
@@ -140,10 +141,26 @@ class BoundedRequestUsage(UsageCounters):
         )
 
 
-class ModelUsageRecord(BaseModel):
-    """One observed model generation, independent of native response commitment."""
+class ModelUsageObservation(BaseModel):
+    """Fields a later observation of the same generation can refine."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    usage_status: Literal["complete", "partial", "unavailable"] = "complete"
+    outcome: Literal["completed", "failed", "cancelled"] = "completed"
+    response_state: str = Field(min_length=1, max_length=64)
+    model_name: str | None = Field(default=None, max_length=1024)
+    provider_name: str | None = Field(default=None, max_length=512)
+    response_timestamp: datetime
+    request_usage: BoundedRequestUsage
+    pricing_revision: str | None = Field(default=None, max_length=256)
+    pricing_rule_id: str | None = Field(default=None, max_length=128)
+    cost_source: CostSource = "unknown"
+    pricing_status: PricingStatus = "not_reached"
+
+
+class ModelUsageRecord(ModelUsageObservation):
+    """One observed generation: immutable attribution plus a revisable observation."""
 
     kind: Literal["model"] = "model"
     record_id: str = Field(min_length=1, max_length=128)
@@ -152,23 +169,12 @@ class ModelUsageRecord(BaseModel):
     revision: int = Field(default=1, ge=1)
     model_id: str | None = Field(default=None, max_length=1024)
     provider_response_id: str | None = Field(default=None, max_length=1024)
-    usage_status: Literal["complete", "partial", "unavailable"] = "complete"
-    outcome: Literal["completed", "failed", "cancelled"] = "completed"
     call_id: str | None = Field(default=None, min_length=1, max_length=128)
     model_run_id: str | None = Field(default=None, max_length=256)
     agent_instance_id: str = Field(min_length=1, max_length=512)
     parent_agent_instance_id: str | None = Field(default=None, max_length=512)
     delegation_id: str | None = Field(default=None, max_length=512)
-    response_state: str = Field(min_length=1, max_length=64)
-    model_name: str | None = Field(default=None, max_length=1024)
-    provider_name: str | None = Field(default=None, max_length=512)
-    response_timestamp: datetime
     request_started_at: datetime
-    request_usage: BoundedRequestUsage
-    pricing_revision: str | None = Field(default=None, max_length=256)
-    pricing_rule_id: str | None = Field(default=None, max_length=128)
-    cost_source: CostSource = "unknown"
-    pricing_status: PricingStatus = "not_reached"
     source: str = Field(default="agent", min_length=1, max_length=256)
     tool_id: str | None = Field(default=None, max_length=256)
     tool_call_id: str | None = Field(default=None, max_length=1024)
@@ -203,6 +209,57 @@ class ProviderUsageRecord(BaseModel):
 type UsageRecord = ModelUsageRecord | ProviderUsageRecord
 
 
+def revise(previous: ModelUsageRecord, observation: ModelUsageObservation) -> ModelUsageRecord:
+    """Refine a generation while retaining its original attribution and price policy."""
+    if previous.pricing_revision is not None and observation.pricing_revision != previous.pricing_revision:
+        observation = observation.model_copy(
+            update={
+                "request_usage": observation.request_usage.model_copy(update={"cost": None}),
+                "pricing_revision": previous.pricing_revision,
+                "pricing_rule_id": previous.pricing_rule_id,
+                "pricing_status": "declined",
+                "cost_source": "unknown",
+            }
+        )
+    return previous.model_copy(
+        update={
+            **{name: getattr(observation, name) for name in ModelUsageObservation.model_fields},
+            "revision": previous.revision + 1,
+        },
+        deep=True,
+    )
+
+
+def validate_price_policy(previous: object, current: object, cost: Decimal | None) -> None:
+    if previous != current and cost is not None:
+        raise RunError("Usage revision changed its price policy.", code="usage_record_conflict")
+
+
+def validate_revision(previous: UsageRecord, record: UsageRecord) -> UsageRecord:
+    """Validate identity and version rules; normalize first-observed provider attribution."""
+    if previous.record_id != record.record_id or previous.kind != record.kind:
+        raise RunError("Usage record changed its identity.", code="usage_record_conflict")
+    if record.revision == previous.revision:
+        if isinstance(previous, ProviderUsageRecord) and isinstance(record, ProviderUsageRecord):
+            if previous.usage == record.usage:
+                return previous
+        if previous != record:
+            raise RunError("Conflicting usage record revision.", code="usage_record_conflict")
+        return record
+    # Compare immutable fields in either arrival order, including older replayed versions.
+    mutable = set(ModelUsageObservation.model_fields) if isinstance(previous, ModelUsageRecord) else {"usage"}
+    if previous.model_dump(exclude=mutable | {"revision"}) != record.model_dump(exclude=mutable | {"revision"}):
+        raise RunError("Usage record changed its attribution.", code="usage_record_conflict")
+    first, later = (previous, record) if previous.revision < record.revision else (record, previous)
+    if (
+        isinstance(first, ModelUsageRecord)
+        and isinstance(later, ModelUsageRecord)
+        and first.pricing_revision is not None
+    ):
+        validate_price_policy(first.pricing_revision, later.pricing_revision, later.request_usage.cost)
+    return record
+
+
 class RunUsageSummary(BoundedRequestUsage):
     """Known run-local totals. Unknown and partial records remain explicit."""
 
@@ -221,51 +278,6 @@ class RunUsageSummary(BoundedRequestUsage):
         return self.cache_read_tokens / self.input_tokens if self.input_tokens else None
 
 
-def summarize_usage(records: Iterable[UsageRecord], *, tool_calls: int = 0) -> RunUsageSummary:
-    """Sum each record's latest revision once; costs include model and provider receipts."""
-    latest: dict[str, UsageRecord] = {}
-    for record in records:
-        previous = latest.get(record.record_id)
-        if previous is None or record.revision > previous.revision:
-            latest[record.record_id] = record
-        elif record.revision == previous.revision and record != previous:
-            raise RunError("Conflicting usage record revision.", code="usage_record_conflict")
-    counters = dict.fromkeys(TOKEN_COUNTERS, 0)
-    details: dict[str, int] = {}
-    costs: list[Decimal] = []
-    seconds: list[Decimal] = []
-    requests = receipts = unknown = incomplete = 0
-    for record in latest.values():
-        if isinstance(record, ModelUsageRecord):
-            requests += 1
-            usage = record.request_usage
-            for name in counters:
-                counters[name] += getattr(usage, name)
-            for name, count in usage.details.items():
-                details[name] = details.get(name, 0) + count
-            seconds.append(usage.audio_seconds)
-            incomplete += record.usage_status != "complete"
-            cost = usage.cost
-        else:
-            receipts += 1
-            cost = record.usage.cost
-        if cost is None:
-            unknown += 1
-        else:
-            costs.append(cost)
-    return RunUsageSummary(
-        **counters,
-        details=dict(sorted(details.items())[:_MAX_USAGE_DETAILS]),
-        audio_seconds=sum_decimal(seconds),
-        requests=requests,
-        tool_calls=tool_calls,
-        provider_receipts=receipts,
-        cost=sum_decimal(costs) if costs else None,
-        unknown_cost_records=unknown,
-        incomplete_requests=incomplete,
-    )
-
-
 TOKEN_COUNTERS = (
     "input_tokens",
     "cache_write_tokens",
@@ -275,6 +287,82 @@ TOKEN_COUNTERS = (
     "cache_audio_read_tokens",
     "output_audio_tokens",
 )
+
+
+@dataclass
+class UsageAccumulator:
+    """Incremental totals over distinct latest records; callers own selection and grouping."""
+
+    requests: int = 0
+    receipts: int = 0
+    tokens: dict[str, int] = field(default_factory=lambda: dict.fromkeys(TOKEN_COUNTERS, 0))
+    details: dict[str, int] = field(default_factory=dict)
+    cost: Decimal = Decimal(0)
+    unknown: int = 0
+    provider_cost: Decimal = Decimal(0)
+    unknown_provider: int = 0
+    audio_seconds: Decimal = Decimal(0)
+    incomplete: int = 0
+
+    def add(self, record: UsageRecord) -> None:
+        if isinstance(record, ModelUsageRecord):
+            self.requests += 1
+            usage = record.request_usage
+            for name in TOKEN_COUNTERS:
+                self.tokens[name] += getattr(usage, name)
+            for name, count in usage.details.items():
+                self.details[name] = self.details.get(name, 0) + count
+                if len(self.details) > _MAX_USAGE_DETAILS:
+                    del self.details[max(self.details)]
+            self.audio_seconds = sum_decimal((self.audio_seconds, usage.audio_seconds))
+            self.incomplete += record.usage_status != "complete"
+            if usage.cost is None:
+                self.unknown += 1
+            else:
+                self.cost = sum_decimal((self.cost, usage.cost))
+        else:
+            self.receipts += 1
+            if record.usage.cost is None:
+                self.unknown_provider += 1
+            else:
+                self.provider_cost = sum_decimal((self.provider_cost, record.usage.cost))
+
+    @property
+    def model_cost(self) -> Decimal | None:
+        return self.cost if self.requests > self.unknown else None
+
+    @property
+    def receipt_cost(self) -> Decimal | None:
+        return self.provider_cost if self.receipts > self.unknown_provider else None
+
+    def summary(self, *, tool_calls: int = 0) -> RunUsageSummary:
+        known = self.requests + self.receipts > self.unknown + self.unknown_provider
+        return RunUsageSummary(
+            **self.tokens,
+            details=dict(sorted(self.details.items())),
+            audio_seconds=self.audio_seconds,
+            requests=self.requests,
+            tool_calls=tool_calls,
+            provider_receipts=self.receipts,
+            cost=sum_decimal((self.cost, self.provider_cost)) if known else None,
+            unknown_cost_records=self.unknown + self.unknown_provider,
+            incomplete_requests=self.incomplete,
+        )
+
+
+def summarize_usage(records: Iterable[UsageRecord], *, tool_calls: int = 0) -> RunUsageSummary:
+    """Sum each record's latest revision once; costs include model and provider receipts."""
+    latest: dict[str, UsageRecord] = {}
+    for record in records:
+        previous = latest.get(record.record_id)
+        if previous is not None:
+            record = validate_revision(previous, record)
+        if previous is None or record.revision > previous.revision:
+            latest[record.record_id] = record
+    totals = UsageAccumulator()
+    for record in latest.values():
+        totals.add(record)
+    return totals.summary(tool_calls=tool_calls)
 
 
 @runtime_checkable
@@ -313,7 +401,7 @@ class RunUsageLedger:
         self._flush_lock = asyncio.Lock()
         self._limits = limits
         self._baseline = deepcopy(baseline) if baseline is not None else RunUsage()
-        self._in_flight = 0
+        self.requests = RequestBudget(used=self._baseline.requests, limit=limits.request_limit if limits else None)
 
     @property
     def records(self) -> tuple[UsageRecord, ...]:
@@ -330,36 +418,43 @@ class RunUsageLedger:
         self._model_ordinal += 1
         return ordinal
 
-    def append_model(self, record: ModelUsageRecord) -> None:
-        self._append(record)
-
     def _budget(self) -> RunUsage:
         summary = self.summary()
         value = RunUsage(
             **{name: getattr(summary, name) for name in TOKEN_COUNTERS},
-            requests=summary.requests + self._in_flight,
+            requests=summary.requests,
             cost=summary.cost,
         )
         value.incr(self._baseline)
         return value
 
-    def reserve(self, *, continuation: bool = False) -> None:
-        # No await between the check and reservation: concurrent tasks cannot oversubscribe.
-        if not continuation and len(self._records) + self._in_flight >= _MAX_RECORDS:
+    def reserve(self, call_id: str, *, continuation: bool = False) -> None:
+        # No await between checking capacity and reserving a request.
+        if not continuation and len(self._records) + self.requests.pending >= _MAX_RECORDS:
             raise RunError("Run usage capacity was exceeded.", code="usage_capacity_exceeded")
         if self._limits is not None:
-            limits = replace(self._limits, request_limit=None) if continuation else self._limits
-            limits.check_before_request(self._budget())
-        self._in_flight += 1
+            replace(self._limits, request_limit=None).check_before_request(self._budget())
+        self.requests.limit = self._limits.request_limit if self._limits else None
+        self.requests.reserve(call_id, continuation=continuation)
 
-    def release(self) -> None:
-        self._in_flight -= 1
+    def finish(
+        self, call_id: str, record: ModelUsageRecord, host_budget: RequestBudget | None = None
+    ) -> UsageLimitExceeded | None:
+        """Capture the fact and settle both scopes before any asynchronous delivery."""
+        self._append(record)
+        refusal = self.requests.finish(call_id, record)
+        if host_budget is not None:
+            host_refusal = host_budget.finish(call_id, record)
+            refusal = refusal or host_refusal
+        try:
+            self.check_limits()
+        except UsageLimitExceeded as error:
+            refusal = refusal or error
+        return refusal
 
     def check_limits(self) -> None:
         if self._limits is not None:
             value = self._budget()
-            if self._limits.request_limit is not None and value.requests - self._in_flight > self._limits.request_limit:
-                raise UsageLimitExceeded("Continuation exceeded the request_limit")
             self._limits.check_tokens(value)
             self._limits.check_cost(value, warn_if_cost_unavailable=False)
 
@@ -389,11 +484,8 @@ class RunUsageLedger:
     def _append(self, record: UsageRecord) -> None:
         previous = self._records.get(record.record_id)
         if previous is not None:
-            if record.revision < previous.revision:
-                return
-            if record.revision == previous.revision:
-                if record != previous:
-                    raise RunError("Conflicting usage record revision.", code="usage_record_conflict")
+            record = validate_revision(previous, record)
+            if record.revision <= previous.revision:
                 return
         elif len(self._records) >= _MAX_RECORDS:
             raise RunError("Run usage capacity was exceeded.", code="usage_capacity_exceeded")
@@ -510,16 +602,21 @@ def _report_chunks(records: list[UsageRecord]) -> list[list[UsageRecord]]:
 __all__ = [
     "TOKEN_COUNTERS",
     "BoundedRequestUsage",
+    "ModelUsageObservation",
     "ModelUsageRecord",
     "ProviderUsage",
     "ProviderUsageRecord",
     "RunUsageLedger",
     "RunUsageSummary",
+    "UsageAccumulator",
     "UsageCounters",
     "UsageMeasure",
     "UsageRecord",
     "UsageReportError",
     "UsageReporter",
     "intersect_usage_limits",
+    "revise",
     "summarize_usage",
+    "validate_price_policy",
+    "validate_revision",
 ]
