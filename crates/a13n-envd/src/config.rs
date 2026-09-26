@@ -48,6 +48,8 @@ const KNOWN_ENVIRONMENT_VARIABLES: &[&str] = &[
     "A13N_ENVD_DEFAULT_WORKING_DIRECTORY",
     "A13N_ENVD_DIRECTORY_DISCOVERY",
     "A13N_ENVD_FULL_CONTROL",
+    "A13N_ENVD_COMPUTER_USE",
+    "A13N_ENVD_COMPUTER_USE_PERMISSION_TIMEOUT_MS",
 ];
 
 const HTTP_VARIABLES: &[&str] = &[
@@ -112,6 +114,8 @@ struct FileConfig {
     installation_state_directory: Option<PathBuf>,
     directory_discovery: Option<bool>,
     full_control: Option<bool>,
+    computer_use: Option<bool>,
+    computer_use_permission_timeout_ms: Option<u64>,
     idle_timeout_ms: Option<u64>,
     disconnect_grace_ms: Option<u64>,
     #[serde(default)]
@@ -214,6 +218,9 @@ pub(crate) struct ConnectionBootstrap {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Config {
+    #[serde(default)]
+    pub(crate) computer_use: bool,
+    pub(crate) computer_use_permission_timeout: Duration,
     #[serde(skip)]
     pub(crate) managed: bool,
     pub(crate) execution: Option<crate::execution::Identity>,
@@ -396,6 +403,22 @@ impl Config {
             .sandbox
             .sources()
             .map_err(|error| ConfigError::new(error.to_string()))?;
+        let computer_use = file.computer_use.unwrap_or(false);
+        let permission_timeout_ms = file.computer_use_permission_timeout_ms.unwrap_or(120_000);
+        if permission_timeout_ms == 0 {
+            return Err(ConfigError::new(
+                "computer_use_permission_timeout_ms must be positive",
+            ));
+        }
+        if computer_use
+            && (!cfg!(target_os = "macos")
+                || file.sandbox.restricted()
+                || file.egress != Egress::Inherit {})
+        {
+            return Err(ConfigError::new(
+                "computer_use requires macOS with sandbox disabled and inherited egress",
+            ));
+        }
         let full_control = file.full_control.unwrap_or(false);
         let command = if full_control {
             if !file.trusted_executable_roots.is_empty() || !file.shell_profiles.is_empty() {
@@ -408,6 +431,8 @@ impl Config {
             prepare_command_config(file.trusted_executable_roots, file.shell_profiles)?
         };
         Ok(Self {
+            computer_use,
+            computer_use_permission_timeout: Duration::from_millis(permission_timeout_ms),
             managed: false,
             execution,
             allow_sudo,
@@ -433,6 +458,8 @@ impl Config {
     #[cfg(test)]
     pub(crate) fn for_test(device_id: &str) -> Self {
         Self {
+            computer_use: false,
+            computer_use_permission_timeout: Duration::from_secs(120),
             managed: false,
             execution: None,
             allow_sudo: true,
@@ -938,6 +965,7 @@ struct StartupArguments {
     execution_uid: Option<u32>,
     execution_gid: Option<u32>,
     egress_mode: Option<Egress>,
+    computer_use: Option<bool>,
 }
 
 impl StartupArguments {
@@ -960,6 +988,7 @@ impl StartupArguments {
                     | "--execution-uid"
                     | "--execution-gid"
                     | "--egress-mode"
+                    | "--computer-use"
             ) {
                 return Err(ConfigError::new(format!("unknown argument: {flag}")));
             }
@@ -989,6 +1018,7 @@ impl StartupArguments {
                 "--name" => result.name = Some(value),
                 "--description" => result.description = Some(value),
                 "--allow-sudo" => result.allow_sudo = Some(parse_bool(&value, &flag)?),
+                "--computer-use" => result.computer_use = Some(parse_bool(&value, &flag)?),
                 "--egress-mode" => result.egress_mode = Some(parse_egress(&value)?),
                 "--execution-uid" | "--execution-gid" => {
                     let value = value.parse().map_err(|_| {
@@ -1007,6 +1037,7 @@ impl StartupArguments {
     }
 
     fn apply(self, file: &mut FileConfig) -> Result<(), ConfigError> {
+        file.computer_use = self.computer_use.or(file.computer_use);
         file.execution.allow_sudo = self.allow_sudo.or(file.execution.allow_sudo);
         file.execution.uid = self.execution_uid.or(file.execution.uid);
         file.execution.gid = self.execution_gid.or(file.execution.gid);
@@ -1128,6 +1159,7 @@ fn apply_environment(value: &mut serde_json::Value) -> Result<(), ConfigError> {
             &["directory_discovery"][..],
         ),
         ("A13N_ENVD_FULL_CONTROL", &["full_control"][..]),
+        ("A13N_ENVD_COMPUTER_USE", &["computer_use"][..]),
     ] {
         if let Some(text) = optional_unicode(name)? {
             set_config_field(value, path, parse_bool(&text, name)?.into());
@@ -1137,6 +1169,10 @@ fn apply_environment(value: &mut serde_json::Value) -> Result<(), ConfigError> {
         ("A13N_ENVD_EXECUTION_UID", &["execution", "uid"][..]),
         ("A13N_ENVD_EXECUTION_GID", &["execution", "gid"][..]),
         ("A13N_ENVD_IDLE_TIMEOUT_MS", &["idle_timeout_ms"][..]),
+        (
+            "A13N_ENVD_COMPUTER_USE_PERMISSION_TIMEOUT_MS",
+            &["computer_use_permission_timeout_ms"][..],
+        ),
         (
             "A13N_ENVD_DISCONNECT_GRACE_MS",
             &["disconnect_grace_ms"][..],

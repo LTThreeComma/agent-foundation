@@ -26,6 +26,7 @@ const MAX_BOOTSTRAP_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkerConfig {
+    pub computer_use: bool,
     pub managed: bool,
     pub sandbox: super::boundary::Sandbox,
     pub grant_sources: Vec<super::boundary::GrantSource>,
@@ -47,6 +48,9 @@ pub(crate) struct WorkerConfig {
 impl WorkerConfig {
     fn config(&self) -> io::Result<Config> {
         Ok(Config {
+            computer_use: self.computer_use,
+            // Permission readiness belongs to daemon startup, not Session workers.
+            computer_use_permission_timeout: Duration::ZERO,
             managed: false,
             execution: None,
             allow_sudo: self.allow_sudo,

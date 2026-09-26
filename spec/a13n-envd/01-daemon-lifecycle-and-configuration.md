@@ -32,6 +32,8 @@ An omitted default working directory uses the daemon's startup cwd. An explicit 
 
 `full_control: true`, or `A13N_ENVD_FULL_CONTROL=1`, enables native command execution without shell-profile declarations. It selects a platform shell and preserves inherited `PATH` order and command environment, excluding daemon bootstrap variables. Full Control uses the execution account's authority and native sudoers, not a daemon-owned command allowlist. Explicit shell profiles and executable roots are an alternative to Full Control, not an additional policy layered over it. The flag does not alter an outer container, account or sandbox.
 
+`computer_use: true`, `A13N_ENVD_COMPUTER_USE=true`, or `--computer-use true` explicitly enables [native computer use](10-computer-use.md). It is independent of Full Control and defaults off. Unsupported platform or execution-boundary combinations fail startup rather than exposing the host desktop through a restricted worker.
+
 Clients may override the default at `session.open`. Existing Sessions retain their resolved working directory. Disabling directory discovery removes only Device-level enumeration; known paths and ordinary Session file access remain usable. No EIP method changes launch identity or networking.
 
 Configuration precedence is defaults, JSON file, `A13N_ENVD_CONFIG_JSON`, scalar `A13N_ENVD_*` variables, then explicit CLI arguments. The JSON environment layer accepts the same strict schema as the file, including nested limits and shell profiles. Objects merge recursively; arrays and scalar values replace earlier values. Every supplied JSON layer is validated even if a later layer overrides it. UID/GID pairing is validated after merging. Configuration requires valid types, required transport fields and positive finite bounds. Transport credentials stay out of command arguments, URLs, logs and child environment values. Native permissions protect configuration and runtime files within the chosen deployment boundary; envd does not claim to hide them from arbitrary code running as the same account.
@@ -60,7 +62,7 @@ Each generation gets fresh runtime storage. Nothing in it is a recovery checkpoi
 
 ## Startup and Readiness
 
-Startup loads configuration, establishes identity/generation and runtime ownership, initializes the Session registry and aggregate accounting, then admits its configured transport. Disabled-Sandbox/inherit launches retain native execution. Restricted Sandbox prepares its platform boundary for each Session worker. Controlled egress additionally prepares the private management runtime before any Session is admitted, as defined by [Execution Boundary](07-execution-isolation.md#controlled-session-egress).
+Startup loads configuration and establishes identity and runtime ownership. When computer use is enabled, the [desktop authorization gate](10-computer-use.md#startup-authorization) must succeed before the Session registry and aggregate accounting are initialized and the configured EIP transport is admitted. Disabled-Sandbox/inherit launches retain native execution. Restricted Sandbox prepares its platform boundary for each Session worker. Controlled egress additionally prepares the private management runtime before any Session is admitted, as defined by [Execution Boundary](07-execution-isolation.md#controlled-session-egress).
 
 Three observations are distinct:
 

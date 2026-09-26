@@ -14,6 +14,8 @@ from a13n_harness.context import AgentContext
 from a13n_harness.errors import DefinitionError
 from a13n_harness.model_context import AbstractModelContextCapability
 from a13n_harness.providers.environment.models import EnvironmentAction
+from a13n_harness.toolsets._instructions import InstructionFunctionToolset, tool_instruction
+from a13n_harness.toolsets.computer import ComputerToolset
 from a13n_harness.toolsets.file_media import (
     AgentMediaUnderstandingProvider,
     MediaUnderstandingProvider,
@@ -77,6 +79,7 @@ class _DynamicEnvironmentRunCapability(DynamicEnvironmentCapability):
         self._run_id = run_id
         self._environment = environment
         self._shell_toolset = ShellToolset(environment)
+        self._computer_toolset = ComputerToolset(environment)
         self._dynamic_context = _DynamicEnvironmentContext()
         self._file_toolset = FileToolset(
             environment.files,
@@ -95,7 +98,8 @@ class _DynamicEnvironmentRunCapability(DynamicEnvironmentCapability):
         ctx: RunContext[AgentContext],
     ) -> AbstractToolset[AgentContext] | None:
         del ctx
-        mounts = self._environment.snapshot.mounts
+        snapshot = self._environment.snapshot
+        mounts = snapshot.mounts
         operations = frozenset(action for mount in mounts for action in mount.permission_ceiling.operations)
         file_names = (
             self._file_toolset.available_names([mount.permission_ceiling.operations for mount in mounts])
@@ -125,8 +129,20 @@ class _DynamicEnvironmentRunCapability(DynamicEnvironmentCapability):
             shell = self._shell_toolset.get_toolset(allowed_names=self.configuration.shell_tools)
             if shell.tools:
                 toolsets.append(shell)
+        if self.configuration.computer_enabled:
+            computer = self._computer_toolset.get_toolset(allowed_names=self.configuration.computer_tools)
+            if computer.tools:
+                toolsets.append(computer)
         if not toolsets:
             return None
+        if len(mounts) > 1 or snapshot.default_mount is None:
+            toolsets.insert(
+                0,
+                InstructionFunctionToolset(
+                    id="a13n-environment-routing",
+                    instructions=[tool_instruction("environment-routing")],
+                ),
+            )
         return CombinedToolset(toolsets)
 
     async def for_run(self, ctx: RunContext[AgentContext]) -> AbstractCapability[AgentContext]:
