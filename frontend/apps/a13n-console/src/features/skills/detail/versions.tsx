@@ -92,14 +92,14 @@ export function Revisions({
                               "Version information is unavailable. Reload this page.",
                             ),
                           );
-                        await client.http
+                        await client
+                          .workspace(skill.workspace_id)
                           .POST(
-                            "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/revisions/{revision_id}/set-default",
+                            "/api/v1/skills/{skill_reference}/revisions/{revision_id}/set-default",
                             {
                               params: {
                                 path: {
-                                  workspace_id: skill.workspace_id,
-                                  skill_id: skill.id,
+                                  skill_reference: skill.id,
                                   revision_id: revision.id,
                                 },
                               },

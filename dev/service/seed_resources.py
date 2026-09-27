@@ -89,10 +89,10 @@ def publish(api: Api, ws: str, skill: Skill, *, revision: int) -> Json:
 
 
 def seed_configuration(api: Api, ws: str, environment_providers: dict[str, Json], local_template: Json) -> None:
-    """Secrets of both scopes, a template per fictional environment account, a disabled template, and a webhook
+    """Workspace secrets, a template per fictional environment account, a disabled template, and a webhook
     subscription the scripted model's `/webhooks` route accepts."""
     api.post(f"{ws}/secrets", {"key": "RELEASE_TOKEN", "value": "fictional-release-token"})
-    api.post(f"{ws}/secrets", {"key": "PERSONAL_NOTES_TOKEN", "value": "fictional-notes-token", "scope": "user"})
+    api.post(f"{ws}/secrets", {"key": "NOTES_TOKEN", "value": "fictional-notes-token"})
     for provider_type, provider in environment_providers.items():
         body = {"key": f"{provider_type}-sandbox", "name": f"{provider['name']} sandbox", "provider_id": provider["id"]}
         api.post(f"{ws}/environment-templates", {**body, "labels": {"runtime": provider_type}})

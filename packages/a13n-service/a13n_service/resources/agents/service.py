@@ -42,8 +42,8 @@ from a13n_service.tenancy.access import workspace_scope
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, WorkspaceScope
 
 
-async def resolve_agent(session: AsyncSession, workspace_id: str, reference: str, *, lock: bool = False) -> AgentRow:
-    return await revisions.resolve_head(session, AgentRow, workspace_id, reference, lock=lock)
+async def resolve_agent(session: AsyncSession, workspace_id: str, agent_id: str, *, lock: bool = False) -> AgentRow:
+    return await revisions.resolve_head(session, AgentRow, workspace_id, agent_id, lock=lock)
 
 
 def agent_view(head: AgentRow) -> Agent:
@@ -57,7 +57,7 @@ def agent_view(head: AgentRow) -> Agent:
         labels=head.labels,
         default_revision_id=head.default_revision_id,
         source=head.source,
-        image_url=images.url(f"/api/v1/workspaces/{head.workspace_id}/agents/{head.id}/avatar", head.image),
+        image_url=images.url(f"/api/v1/agents/{head.id}/avatar", head.image),
         archived_at=head.archived_at,
         version=head.version,
         created_by_id=head.created_by_id,
@@ -148,7 +148,7 @@ async def update_agent(
     async with transaction(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
         head = await revisions.open_head(session, AgentRow, scope.workspace_id, agent_id, if_match)
-        await revisions.update_head(session, actor, head, given(body, "name", "key", "description", "labels"))
+        await revisions.update_head(session, actor, head, given(body, "name", "description", "labels"))
         return agent_view(head)
 
 

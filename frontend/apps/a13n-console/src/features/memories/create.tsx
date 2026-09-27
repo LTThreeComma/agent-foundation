@@ -97,9 +97,9 @@ function CreateForm({
   const provider = providers.data?.find((item) => item.id === providerId);
   const create = useMutation({
     mutationFn: () =>
-      client.http
-        .POST("/api/v1/workspaces/{workspace_id}/memories", {
-          params: { path: { workspace_id: workspace.id } },
+      client
+        .workspace(workspace.id)
+        .POST("/api/v1/memories", {
           body: memoryCreate(
             key.name,
             draft,

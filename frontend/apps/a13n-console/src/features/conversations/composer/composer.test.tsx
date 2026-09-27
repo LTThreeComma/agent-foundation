@@ -10,7 +10,14 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { Composer } from "./composer";
 
-vi.mock("../../../auth/context", () => ({ useClient: () => ({ http: {} }) }));
+vi.mock("../../../auth/context", () => ({
+  useClient: () => ({
+    http: {},
+    workspace() {
+      return this.http;
+    },
+  }),
+}));
 vi.mock("../../../layout/workspace", () => ({
   useWorkspace: () => ({
     basePath: "/workspace/design",

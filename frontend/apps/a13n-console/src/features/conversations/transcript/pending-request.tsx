@@ -127,35 +127,33 @@ export function RunFeedback({
       const workspace_id = workspace.id;
       if (message.length) {
         const receipt = data(
-          await client.http.POST(
-            "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/inbox",
-            {
+          await client
+            .workspace(workspace_id)
+            .POST("/api/v1/threads/{thread_id}/inbox", {
               params: {
-                path: { workspace_id, thread_id: thread.id },
+                path: { thread_id: thread.id },
                 header: commandHeaders(key),
               },
               body: {
                 kind: "message",
                 delivery: "next_run",
                 payload: { content: message },
-                agent_id: run.agent_id,
+                agent: { id: run.agent_id },
               },
-            },
-          ),
+            }),
         );
         return receipt.run;
       }
       return data(
-        await client.http.POST(
-          "/api/v1/workspaces/{workspace_id}/runs/{run_id}/resume",
-          {
+        await client
+          .workspace(workspace_id)
+          .POST("/api/v1/runs/{run_id}/resume", {
             params: {
-              path: { workspace_id, run_id: run.id },
+              path: { run_id: run.id },
               header: commandHeaders(key),
             },
             body: { answers: resume },
-          },
-        ),
+          }),
       );
     },
     onSuccess: (next) => accepted(next),

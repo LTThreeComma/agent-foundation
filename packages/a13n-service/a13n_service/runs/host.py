@@ -142,11 +142,7 @@ class Host:
 
     def policies(self) -> tuple[AbstractCapability[AgentContext], ...]:
         """Run-wide policies; inline agents inherit them with their bindings."""
-        return (
-            secrets_policy(
-                self.runtime, self.lease.workspace_id, self.principal.id, self.root_revision_id, self.plan.secrets
-            ),
-        )
+        return (secrets_policy(self.runtime, self.lease.workspace_id, self.root_revision_id, self.plan.secrets),)
 
 
 @asynccontextmanager

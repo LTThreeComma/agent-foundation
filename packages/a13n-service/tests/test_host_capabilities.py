@@ -38,6 +38,7 @@ from a13n_harness.tools.metadata import HarnessTool, HarnessToolMetadata, ToolOu
 from a13n_service.distribution import OSS
 from a13n_service.infra.db import short_session
 from a13n_service.infra.errors import ServiceError
+from a13n_service.infra.ids import new_object_id
 from a13n_service.providers.environments.local import LocalEnvironment
 from a13n_service.providers.registry import Registry
 from a13n_service.resources.agents.schemas import SkillSelection
@@ -391,15 +392,18 @@ def secret_tool(name: str, audience: str) -> HarnessTool:
 
 async def test_a_tool_gets_only_the_secrets_its_node_declares(runtime, tenant) -> None:  # type: ignore[no-untyped-def]
     body = SecretCreate.model_validate({"key": "API_KEY", "value": VALUE})
-    await create_secret(runtime.storage, runtime.keys, admin(tenant), tenant.workspace_id, body)
+    secret = await create_secret(runtime.storage, runtime.keys, admin(tenant), tenant.workspace_id, body)
     row = run_row(tenant)
-    requirements = {REVISION: [SecretRequirement(key="API_KEY")], CHILD: [SecretRequirement(key="OTHER")]}
+    requirements = {
+        REVISION: [SecretRequirement(secret_id=secret.id, key="API_KEY")],
+        CHILD: [SecretRequirement(secret_id=new_object_id("sec"), key="OTHER")],
+    }
     with pytest.raises(ServiceError) as missing:
-        await require_secrets(runtime, row.workspace_id, row.principal_id, requirements)
-    assert missing.value.details == {"kind": "secret", "id": "OTHER"}
-    await require_secrets(runtime, row.workspace_id, row.principal_id, {REVISION: requirements[REVISION]})
+        await require_secrets(runtime, row.workspace_id, requirements)
+    assert missing.value.details == {"kind": "secret", "id": requirements[CHILD][0].secret_id}
+    await require_secrets(runtime, row.workspace_id, {REVISION: requirements[REVISION]})
 
-    policy = secrets_policy(runtime, row.workspace_id, row.principal_id, row.agent_revision_id, requirements)
+    policy = secrets_policy(runtime, row.workspace_id, row.agent_revision_id, requirements)
     tools = Toolset(FunctionToolset([secret_tool("use_key", "API_KEY"), secret_tool("use_other", "OTHER")]))
     script = Script([("use_other", {}, "call_other"), ("use_key", {}, "call_key"), "done"])
     result = await run(script, [tools], capabilities=(policy,))

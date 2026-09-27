@@ -116,16 +116,16 @@ export function SkillMenu({
                         "Version information is unavailable. Reload this page.",
                       ),
                     );
-                  await client.http
+                  await client
+                    .workspace(skill.workspace_id)
                     .POST(
                       skill.archived_at
-                        ? "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/unarchive"
-                        : "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/archive",
+                        ? "/api/v1/skills/{skill_reference}/unarchive"
+                        : "/api/v1/skills/{skill_reference}/archive",
                       {
                         params: {
                           path: {
-                            workspace_id: skill.workspace_id,
-                            skill_id: skill.id,
+                            skill_reference: skill.id,
                           },
                         },
                         headers: ifMatch(resource.etag),
@@ -175,12 +175,12 @@ function RenameForm({
         throw new Error(
           t("Version information is unavailable. Reload this page."),
         );
-      return client.http
-        .PATCH("/api/v1/workspaces/{workspace_id}/skills/{skill_id}", {
+      return client
+        .workspace(basis.value.workspace_id)
+        .PATCH("/api/v1/skills/{skill_reference}", {
           params: {
             path: {
-              workspace_id: basis.value.workspace_id,
-              skill_id: basis.value.id,
+              skill_reference: basis.value.id,
             },
           },
           headers: ifMatch(basis.etag),
@@ -195,12 +195,12 @@ function RenameForm({
   });
   const reload = useMutation({
     mutationFn: () =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/skills/{skill_id}", {
+      client
+        .workspace(basis.value.workspace_id)
+        .GET("/api/v1/skills/{skill_reference}", {
           params: {
             path: {
-              workspace_id: basis.value.workspace_id,
-              skill_id: basis.value.id,
+              skill_reference: basis.value.id,
             },
           },
         })

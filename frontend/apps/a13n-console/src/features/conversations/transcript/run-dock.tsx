@@ -163,12 +163,11 @@ export function RunDock({
                     // Guidance joins the active run; a next step never joins
                     // a run another caller started meanwhile.
                     const receipt = data(
-                      await client.http.POST(
-                        "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/inbox",
-                        {
+                      await client
+                        .workspace(workspace.id)
+                        .POST("/api/v1/threads/{thread_id}/inbox", {
                           params: {
                             path: {
-                              workspace_id: workspace.id,
                               thread_id: thread.id,
                             },
                             header: commandHeaders(key),
@@ -177,14 +176,13 @@ export function RunDock({
                             kind: "message",
                             delivery: active ? "steer" : "next_run",
                             payload,
-                            agent_id: run.agent_id,
+                            agent: { id: run.agent_id },
                             ...(resubmit && {
                               agent_revision_id: resubmit.agent_revision_id,
                               options: resubmit.options,
                             }),
                           },
-                        },
-                      ),
+                        }),
                     );
                     if (resubmit) onResubmitted?.();
                     if (receipt.run) accepted(receipt.run);

@@ -8,13 +8,13 @@ addFormats(ajv);
 ajv.addFormat("password", true);
 ajv.addFormat("binary", true);
 ajv.addSchema({ components }, "service");
-export const validateAgentConfig = ajv.compile<Schema["AgentConfig-Input"]>({
-  $ref: "service#/components/schemas/AgentConfig-Input",
+export const validateAgentConfig = ajv.compile<Schema["AgentConfig"]>({
+  $ref: "service#/components/schemas/AgentConfig",
 });
-export const validateRunOverride = ajv.compile<Schema["AgentOverride-Input"]>({
-  $ref: "service#/components/schemas/AgentOverride-Input",
+export const validateRunOverride = ajv.compile<Schema["AgentOverride"]>({
+  $ref: "service#/components/schemas/AgentOverride",
 });
-export function runOverride(value: unknown): Schema["AgentOverride-Input"] {
+export function runOverride(value: unknown): Schema["AgentOverride"] {
   if (!validateRunOverride(value))
     throw new Error(
       ajv.errorsText(validateRunOverride.errors, {

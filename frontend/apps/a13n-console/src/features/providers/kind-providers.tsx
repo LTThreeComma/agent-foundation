@@ -43,6 +43,7 @@ type Definition = Schema["ProviderType"];
 type Resource = { value: Schema["Provider"]; etag?: string };
 
 const categories: Record<ProviderKind, ProviderCategoryValue> = {
+  model: "models",
   environment: "environments",
   memory: "memory",
 };

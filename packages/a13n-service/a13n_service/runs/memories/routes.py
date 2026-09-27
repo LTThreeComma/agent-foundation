@@ -2,21 +2,25 @@
 
 from fastapi import APIRouter, Response
 
+from a13n_service.infra.db import short_session
 from a13n_service.infra.http import IfMatch, etag
+from a13n_service.resources.memories.inputs import MemoryMountInput, mount_ids
 from a13n_service.resources.memories.schemas import MemoryMount
+from a13n_service.resources.memories.tables import MemoryRow
+from a13n_service.resources.references import ReferenceBatch
 from a13n_service.resources.requests import CurrentRuntime
 from a13n_service.runs.memories import mounts
 from a13n_service.runs.memories.schemas import MemoryMountPage, MemoryMountUpdate
-from a13n_service.tenancy.requests import Actor
+from a13n_service.tenancy.requests import Actor, Workspace
 
-router = APIRouter(prefix="/api/v1/workspaces/{workspace_id}/threads/{thread_id}/memories", tags=["memories"])
+router = APIRouter(prefix="/api/v1/threads/{thread_id}/memories", tags=["memories"])
 
 
 @router.get("", response_model=MemoryMountPage)
 async def list_mounts(
-    runtime: CurrentRuntime, response: Response, workspace_id: str, thread_id: str, actor: Actor
+    runtime: CurrentRuntime, response: Response, workspace: Workspace, thread_id: str, actor: Actor
 ) -> MemoryMountPage:
-    page, version = await mounts.list_mounts(runtime.storage, actor, workspace_id, thread_id)
+    page, version = await mounts.list_mounts(runtime.storage, actor, workspace.workspace_id, thread_id)
     response.headers["ETag"] = etag(thread_id, version)
     return page
 
@@ -25,18 +29,23 @@ async def list_mounts(
 async def add_mount(
     runtime: CurrentRuntime,
     response: Response,
-    workspace_id: str,
+    workspace: Workspace,
     thread_id: str,
-    body: MemoryMount,
+    body: MemoryMountInput,
     actor: Actor,
     if_match: IfMatch = None,
 ) -> MemoryMount:
+    batch = ReferenceBatch()
+    batch.add(MemoryRow, body.memory)
+    async with short_session(runtime.storage) as session:
+        await batch.resolve(session, workspace.workspace_id)
+    selected = mount_ids(batch, body)
     mount, version = await mounts.add_mount(
         runtime.storage,
         actor,
-        workspace_id,
+        workspace.workspace_id,
         thread_id,
-        body,
+        selected,
         if_match=if_match,
         limit=runtime.settings.memory.mounts_per_thread,
     )
@@ -48,7 +57,7 @@ async def add_mount(
 async def update_mount(
     runtime: CurrentRuntime,
     response: Response,
-    workspace_id: str,
+    workspace: Workspace,
     thread_id: str,
     name: str,
     body: MemoryMountUpdate,
@@ -56,7 +65,7 @@ async def update_mount(
     if_match: IfMatch = None,
 ) -> MemoryMount:
     mount, version = await mounts.update_mount(
-        runtime.storage, actor, workspace_id, thread_id, name, body, if_match=if_match
+        runtime.storage, actor, workspace.workspace_id, thread_id, name, body, if_match=if_match
     )
     response.headers["ETag"] = etag(thread_id, version)
     return mount
@@ -64,7 +73,9 @@ async def update_mount(
 
 @router.delete("/{name}", status_code=204)
 async def remove_mount(
-    runtime: CurrentRuntime, workspace_id: str, thread_id: str, name: str, actor: Actor, if_match: IfMatch = None
+    runtime: CurrentRuntime, workspace: Workspace, thread_id: str, name: str, actor: Actor, if_match: IfMatch = None
 ) -> Response:
-    version = await mounts.remove_mount(runtime.storage, actor, workspace_id, thread_id, name, if_match=if_match)
+    version = await mounts.remove_mount(
+        runtime.storage, actor, workspace.workspace_id, thread_id, name, if_match=if_match
+    )
     return Response(status_code=204, headers={"ETag": etag(thread_id, version)})

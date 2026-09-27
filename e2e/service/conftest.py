@@ -217,6 +217,7 @@ async def stack(stores: Stores, tmp_path: Path, request: pytest.FixtureRequest) 
                 ),
                 201,
             )
+            client.headers["X-Workspace-ID"] = workspace["id"]
             model = ScriptedModel(model_url)
             try:
                 yield Stack(

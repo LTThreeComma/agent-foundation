@@ -1,9 +1,10 @@
 """Write-only secrets: each value is encrypted for its own row and revealed only to execution."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from pydantic import JsonValue, SecretStr
-from sqlalchemy import ColumnElement, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra import cursors
@@ -12,7 +13,7 @@ from a13n_service.infra.db import Storage, short_session, transaction, unique_ke
 from a13n_service.infra.errors import not_found
 from a13n_service.infra.http import require_match
 from a13n_service.infra.ids import new_object_id
-from a13n_service.resources.rows import audit_row
+from a13n_service.resources.rows import audit_row, find_row
 from a13n_service.resources.secrets.schemas import (
     Secret,
     SecretCreate,
@@ -22,7 +23,7 @@ from a13n_service.resources.secrets.schemas import (
 )
 from a13n_service.resources.secrets.tables import SecretRow
 from a13n_service.tenancy.access import workspace_scope
-from a13n_service.tenancy.authorize import Principal, Verb, allowed_verbs
+from a13n_service.tenancy.authorize import Principal
 
 
 def _location(row: SecretRow) -> SecretLocation:
@@ -34,8 +35,6 @@ def _view(row: SecretRow) -> Secret:
         id=row.id,
         workspace_id=row.workspace_id,
         key=row.key,
-        scope="workspace" if row.principal_id is None else "user",
-        principal_id=row.principal_id,
         version=row.version,
         created_by_id=row.created_by_id,
         updated_by_id=row.updated_by_id,
@@ -44,52 +43,21 @@ def _view(row: SecretRow) -> Secret:
     )
 
 
-def _visible_to(principal_id: str) -> ColumnElement[bool]:
-    """Private secrets exist only for their owner, whatever the caller's workspace role."""
-    return or_(SecretRow.principal_id.is_(None), SecretRow.principal_id == principal_id)
-
-
-def _change_verb(actor: Principal, owner_id: str | None) -> Verb:
-    """Workspace secrets, without an owner, need `write`; a private secret needs `run` from its owner and
-    `admin` from anyone else."""
-    if owner_id is None:
-        return "write"
-    return "run" if owner_id == actor.id else "admin"
-
-
-async def _resolve_changeable(
-    session: AsyncSession, actor: Principal, workspace_id: str, secret_id: str, *, others: bool = False
-) -> SecretRow:
-    """The locked secret the actor may change. With `others`, workspace admins also find every user's private
-    secret; anyone else finds only their own, as reads do."""
-    scope = await workspace_scope(session, actor, workspace_id, "read")
-    query = select(SecretRow).where(SecretRow.workspace_id == scope.workspace_id, SecretRow.id == secret_id)
-    if not (others and "admin" in allowed_verbs(actor, scope)):
-        query = query.where(_visible_to(actor.id))
-    row = await session.scalar(query.with_for_update())
-    if row is None:
-        raise not_found(SecretRow.KIND, secret_id)
-    await workspace_scope(session, actor, scope.workspace_id, _change_verb(actor, row.principal_id))
-    return row
-
-
 def _audit(session: AsyncSession, actor: Principal, row: SecretRow, verb: str) -> None:
-    details: dict[str, JsonValue] = {"key": row.key, "scope": "workspace" if row.principal_id is None else "user"}
+    details: dict[str, JsonValue] = {"key": row.key}
     audit_row(session, actor, row, verb, details)
 
 
 async def create_secret(
     storage: Storage, keys: KeyRing, actor: Principal, workspace_id: str, body: SecretCreate
 ) -> Secret:
-    owner_id = actor.id if body.scope == "user" else None
-    with unique_key(SecretRow.KIND, "uq_secrets_owner_key", body.key):
+    with unique_key(SecretRow.KIND, "uq_secrets_workspace_id_key", body.key):
         async with transaction(storage) as session:
-            scope = await workspace_scope(session, actor, workspace_id, _change_verb(actor, owner_id))
+            scope = await workspace_scope(session, actor, workspace_id, "write")
             row = SecretRow(
                 id=new_object_id("sec"),
                 organization_id=scope.organization_id,
                 workspace_id=scope.workspace_id,
-                principal_id=owner_id,
                 key=body.key,
                 created_by_id=actor.id,
                 updated_by_id=actor.id,
@@ -104,12 +72,12 @@ async def create_secret(
 async def list_secrets(
     storage: Storage, actor: Principal, workspace_id: str, *, limit: int, cursor: str | None
 ) -> SecretPage:
-    """Workspace secrets and the caller's own private ones."""
+    """Metadata for the workspace's secrets; no value is returned."""
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
         rows, next_cursor = await cursors.id_page(
             session,
-            select(SecretRow).where(SecretRow.workspace_id == scope.workspace_id, _visible_to(actor.id)),
+            select(SecretRow).where(SecretRow.workspace_id == scope.workspace_id),
             SecretRow.id,
             kind="secrets",
             owner=scope.workspace_id,
@@ -122,13 +90,7 @@ async def list_secrets(
 async def get_secret(storage: Storage, actor: Principal, workspace_id: str, secret_id: str) -> Secret:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        row = await session.scalar(
-            select(SecretRow).where(
-                SecretRow.workspace_id == scope.workspace_id, SecretRow.id == secret_id, _visible_to(actor.id)
-            )
-        )
-        if row is None:
-            raise not_found(SecretRow.KIND, secret_id)
+        row = await find_row(session, actor, SecretRow, scope, secret_id, "read")
         return _view(row)
 
 
@@ -143,7 +105,8 @@ async def replace_secret(
     if_match: str | None,
 ) -> Secret:
     async with transaction(storage) as session:
-        row = await _resolve_changeable(session, actor, workspace_id, secret_id)
+        scope = await workspace_scope(session, actor, workspace_id, "write")
+        row = await find_row(session, actor, SecretRow, scope, secret_id, "write", lock=True)
         require_match(if_match, row.id, row.version)
         row.ciphertext = keys.protect(body.value.get_secret_value().encode(), _location(row)).model_dump()
         row.updated_by_id = actor.id
@@ -155,27 +118,25 @@ async def replace_secret(
 async def delete_secret(
     storage: Storage, actor: Principal, workspace_id: str, secret_id: str, *, if_match: str | None
 ) -> None:
-    """Later executions requiring the key fail; accepted runs keep no copy of the value."""
+    """Later uses of this ID fail, even if its key is reused; accepted runs keep no copy of the value."""
     async with transaction(storage) as session:
-        row = await _resolve_changeable(session, actor, workspace_id, secret_id, others=True)
+        scope = await workspace_scope(session, actor, workspace_id, "write")
+        row = await find_row(session, actor, SecretRow, scope, secret_id, "write", lock=True)
         require_match(if_match, row.id, row.version)
         _audit(session, actor, row, "delete")
         await session.delete(row)
 
 
-async def resolve_secrets(
-    storage: Storage,
-    keys: KeyRing,
-    *,
-    workspace_id: str,
-    principal_id: str,
-    requirements: Sequence[SecretRequirement],
-) -> dict[str, SecretStr]:
-    """Plaintext by requirement key for one execution: workspace secrets, or the run principal's own.
+@dataclass(frozen=True, slots=True)
+class StoredSecret:
+    envelope: Envelope
+    location: SecretLocation
 
-    Rows are read in one short session and decrypted after it closes. Requirement keys are unique per agent
-    revision. A missing secret is `not_found` naming only its key; values never enter errors or logs.
-    """
+
+async def required_secrets(
+    storage: Storage, workspace_id: str, requirements: Sequence[SecretRequirement]
+) -> dict[str, StoredSecret]:
+    """Check the fixed identities and detach encrypted values; this never reveals plaintext."""
     if not requirements:
         return {}
     async with short_session(storage) as session:
@@ -183,17 +144,27 @@ async def resolve_secrets(
             await session.scalars(
                 select(SecretRow).where(
                     SecretRow.workspace_id == workspace_id,
-                    SecretRow.key.in_({requirement.key for requirement in requirements}),
-                    _visible_to(principal_id),
+                    SecretRow.id.in_({requirement.secret_id for requirement in requirements}),
                 )
             )
         ).all()
-    found = {(row.key, row.principal_id is not None): row for row in rows}
-    values: dict[str, SecretStr] = {}
+        found = {row.id: StoredSecret(Envelope.model_validate(row.ciphertext), _location(row)) for row in rows}
+    selected = {}
     for requirement in requirements:
-        row = found.get((requirement.key, requirement.scope == "user"))
-        if row is None:
-            raise not_found(SecretRow.KIND, requirement.key)
-        plaintext = keys.reveal(Envelope.model_validate(row.ciphertext), _location(row))
-        values[requirement.key] = SecretStr(plaintext.decode())
-    return values
+        value = found.get(requirement.secret_id)
+        if value is None:
+            raise not_found(SecretRow.KIND, requirement.secret_id)
+        selected[requirement.key] = value
+    return selected
+
+
+async def resolve_secrets(
+    storage: Storage,
+    keys: KeyRing,
+    *,
+    workspace_id: str,
+    requirements: Sequence[SecretRequirement],
+) -> dict[str, SecretStr]:
+    """Reveal each fixed identity's current value for an authorized tool call, after closing the session."""
+    selected = await required_secrets(storage, workspace_id, requirements)
+    return {key: SecretStr(keys.reveal(value.envelope, value.location).decode()) for key, value in selected.items()}

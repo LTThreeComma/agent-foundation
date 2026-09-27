@@ -2,7 +2,7 @@
 
 An **agent** is a named, versioned configuration: a model, instructions, tools and policies. People and applications talk to agents in **sessions**. A session holds one or more **threads**, each a single line of conversation; messages you send go to the thread's **inbox**, and each turn of the agent is a **run**. A run executes on a worker as one or more **attempts** and ends `completed`, `waiting`, `failed` or `cancelled`.
 
-All paths below are under `/api/v1/workspaces/{workspace_id}`. Reading needs `read`; starting, steering, answering and stopping runs needs `run`; changing agents needs `write`. See [Identity and access](identity.md#roles).
+All paths below are under `/api/v1`, with [workspace selection](http.md#workspace-selection-and-references). Reading needs `read`; starting, steering, answering and stopping runs needs `run`; changing agents needs `write`. See [Identity and access](identity.md#roles).
 
 ## Agents
 
@@ -11,16 +11,16 @@ In Console, open **Agents → Create agent**. Each save creates an immutable **v
 Through the API:
 
 ```sh
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/agents" \
+curl -X POST "$A13N_URL/api/v1/agents" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
   -d '{"key": "support", "name": "Support", "description": "Answers product questions",
-       "config": {"model": {"model_id": "mdl_..."}, "instructions": "Be precise and cite sources.",
+       "config": {"model": {"id": "mdl_..."}, "instructions": "Be precise and cite sources.",
                   "user_questions": true}}'
 ```
 
 - `POST …/agents/{agent_id}/revisions` with `{config, note?, make_default?}` and the agent's `If-Match` adds a revision; it becomes the default unless `make_default` is `false`. A `config` identical to the current default is a no-op: the call returns that revision again (`201`) without creating one, regardless of `make_default`. `POST …/revisions/{revision_id}/set-default` changes the default.
 - `POST …/agents/validate` with `{config}` checks a configuration exactly as saving would, and answers `204`.
-- `PATCH …/agents/{agent_id}` changes `key`, `name`, `description` and `labels`; `PUT …/avatar` sets an image. `POST …/duplicate` copies an agent, from its default or a chosen revision.
+- `PATCH …/agents/{agent_id}` changes `name`, `description` and `labels`; `key` is immutable; `PUT …/avatar` sets an image. `POST …/duplicate` copies an agent, from its default or a chosen revision.
 - `POST …/archive` stops new runs of the agent (`422 disabled`); runs already accepted finish. `POST …/unarchive` reverses it.
 - Lists filter by `label`, `q` (key, name or description), `archived`, and the skill or skill revision the agents pin.
 
@@ -28,26 +28,26 @@ The built-in [Agent Composer](agent-composer.md) is an agent too; it cannot be c
 
 ### Agent configuration
 
-A revision's `config` holds:
+When creating an agent or revision, `config` accepts the following fields. Stored revisions return canonical IDs for all resource references.
 
-| Field                             | Meaning                                                                                                                                                                       |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                           | `model_id`, plus `settings` (model-API-specific, such as reasoning effort) and `characteristics` (context window and context-management thresholds). See [Models](models.md). |
-| `instructions`                    | The system instructions, up to 256 KiB.                                                                                                                                       |
-| `toolsets`                        | Built-in toolsets and each tool's enablement, configuration and permission. See [Tools and connections](tools.md#built-in-toolsets).                                          |
-| `skills`                          | Skills and the revisions they pin. See [Skills](skills.md).                                                                                                                   |
-| `connection_tools`                | Connections and their tools. See [Use a connection in an agent](tools.md#use-a-connection-in-an-agent).                                                                       |
-| `client_tools`                    | Tools your application executes; see [client tools](#client-tools-and-questions).                                                                                             |
-| `user_questions`                  | Offers the `ask_user_question` tool.                                                                                                                                          |
-| `subagents`, `subagent_mode`      | Other agents this agent can delegate to; see [subagents](#subagents).                                                                                                         |
-| `reviewer`                        | The model that decides calls whose permission is `review`.                                                                                                                    |
-| `media_understanding`             | Models that read images, video or audio for this agent; see [media understanding](models.md#media-understanding).                                                             |
-| `plugins`                         | Instances of Harness plugins the deployment installed (`plugins.keys`).                                                                                                       |
-| `output_spec`                     | Structured output: one JSON Schema, or 2–32 named `variants`. Without it the result is text.                                                                                  |
-| `retries`                         | How many times the model may retry failed tool calls (`tools`) and invalid output (`output`), 0–100 each.                                                                     |
-| `secret_requirements`             | Secrets the agent's tools need; see [Secrets](skills.md#secrets).                                                                                                             |
-| `default_environment_template_id` | An [environment template](environments.md#templates) from which each new thread gets its own primary environment.                                                             |
-| `memory_mounts`                   | [Memories](memory.md#mount-a-memory-on-a-thread) each new thread mounts when its first run is accepted, `[{name, memory_id, access}]`.                                        |
+| Field                          | Meaning                                                                                                                                                                          |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                        | `id` or `key`, plus `settings` (model-API-specific, such as reasoning effort) and `characteristics` (context window and context-management thresholds). See [Models](models.md). |
+| `instructions`                 | The system instructions, up to 256 KiB.                                                                                                                                          |
+| `toolsets`                     | Built-in toolsets and each tool's enablement, configuration and permission. See [Tools and connections](tools.md#built-in-toolsets).                                             |
+| `skills`                       | Skills and the revisions they pin. See [Skills](skills.md).                                                                                                                      |
+| `connection_tools`             | Connections and their tools. See [Use a connection in an agent](tools.md#use-a-connection-in-an-agent).                                                                          |
+| `client_tools`                 | Tools your application executes; see [client tools](#client-tools-and-questions).                                                                                                |
+| `user_questions`               | Offers the `ask_user_question` tool.                                                                                                                                             |
+| `subagents`, `subagent_mode`   | Other agents this agent can delegate to; see [subagents](#subagents).                                                                                                            |
+| `reviewer`                     | The model that decides calls whose permission is `review`.                                                                                                                       |
+| `media_understanding`          | Models that read images, video or audio for this agent; see [media understanding](models.md#media-understanding).                                                                |
+| `plugins`                      | Instances of Harness plugins the deployment installed (`plugins.keys`).                                                                                                          |
+| `output_spec`                  | Structured output: one JSON Schema, or 2–32 named `variants`. Without it the result is text.                                                                                     |
+| `retries`                      | How many times the model may retry failed tool calls (`tools`) and invalid output (`output`), 0–100 each.                                                                        |
+| `secret_requirements`          | Secrets the agent's tools need; see [Secrets](skills.md#secrets).                                                                                                                |
+| `default_environment_template` | An [environment template](environments.md#templates) reference (`{id}` or `{key}`) from which each new thread gets its own primary environment.                                  |
+| `memory_mounts`                | [Memories](memory.md#mount-a-memory-on-a-thread) each new thread mounts when its first run is accepted, \`\[{name, memory: {id}                                                  |
 
 Saving validates the whole configuration against the workspace: every referenced model, skill, connection, provider and agent must exist and be usable by you, and skill and subagent references without a `revision_id` are pinned to the current default revision. A revision therefore always runs exactly what it was saved with.
 
@@ -87,13 +87,13 @@ With `user_questions: true`, the model can ask the user a question with `ask_use
 
 ### Subagents
 
-`subagents` names other agents of the workspace this agent can delegate to. Each edge sets the `agent_id`, optionally a pinned `revision_id` and a `description` for the model, `context` (whether the task, a history summary or selected history, and shared or isolated task state are passed), `usage_limits`, and, for async children, `environment`.
+`subagents` names other agents of the workspace this agent can delegate to. Each edge selects `agent: {id}` or `agent: {key}`, optionally a pinned `revision_id` and a `description` for the model, `context` (whether the task, a history summary or selected history, and shared or isolated task state are passed), `usage_limits`, and, for async children, `environment`.
 
 ```json
 {
   "subagent_mode": "async",
   "subagents": {
-    "researcher": {"agent_id": "ap_...", "description": "Finds and summarizes sources.",
+    "researcher": {"agent": {"id": "ap_..."}, "description": "Finds and summarizes sources.",
                    "usage_limits": {"request_limit": 20}, "environment": {"mode": "shared"}}
   }
 }
@@ -102,17 +102,17 @@ With `user_questions: true`, the model can ask the user a question with `ask_use
 - **Inline** (`subagent_mode: "inline"`, the default): a delegated agent runs inside the parent's run and attempt, as part of that run. Inline subagents may not lead back to the delegating agent, and the graph's depth and size are bounded. `usage_limits` bounds requests, tokens and tool calls of each delegation. Each inline subagent uses its own secret declarations.
 - **Async** (`subagent_mode: "async"`): each delegation starts a **child thread** in the same session, with `origin: "child"` and `subagent` set to the edge name, whose first run executes the edge's revision under the parent run's principal and authority. The parent can check, wait for, steer, cancel and continue its children with the Harness [delegation tools](../a13n-harness/delegation-and-codeact.md#asynchronous-children). When a child run completes, fails or is cancelled, its result arrives in the parent thread's inbox as a `child_result` entry with `{child_run_id, subagent, status, output, failure}`: it joins the parent's active run, or starts a parent run with trigger `child_result`. A result is never dropped; if the parent's inbox is full, delivery is retried. A child waiting for a person counts as still running. For async edges, `usage_limits` takes only `request_limit`, which becomes the child run's `max_usage.requests`.
 
-An async child's environment follows its edge: `shared` (the default) mounts the parent run's environments, `dedicated` reserves a new one from `template_id`, and `none` mounts nothing. The child agent's own `default_environment_template_id` is not used. A run may start at most `worker.child_count` children, and children nest at most `worker.child_depth` levels.
+An async child's environment follows its edge: `shared` (the default) mounts the parent run's environments, `dedicated` reserves a new one from `template: {id}` or `template: {key}`, and `none` mounts nothing. The child agent's own default environment template is not used. A run may start at most `worker.child_count` children, and children nest at most `worker.child_depth` levels.
 
 ## Start a conversation
 
 `POST …/threads` creates a thread with its first message, and a new session unless you pass `session_id`. It requires an `Idempotency-Key`:
 
 ```sh
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/threads" \
+curl -X POST "$A13N_URL/api/v1/threads" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
   -H "Idempotency-Key: 9f0c7c1e-2b1f-4a3e-8f53-5d7c0c1c9a10" \
-  -d '{"agent_id": "ap_...",
+  -d '{"agent": {"id": "ap_..."},
        "payload": {"content": [{"type": "text", "text": "Summarize the attached report."},
                                {"type": "asset", "asset_id": "ast_..."}]},
        "options": {"labels": {"customer": "acme"}}}'
@@ -122,9 +122,9 @@ The response (`201`, or `200` for a replay) is `{thread, entry, run}`: the new t
 
 - `mcp_headers`: [caller headers](#caller-headers) for its MCP connections;
 - `environments`: initial [mounts](environments.md#mount-environments-on-a-thread), `[{name, environment_id, working_directory?}]`;
-- `memories`: initial [memory mounts](memory.md#mount-a-memory-on-a-thread), `[{name, memory_id, access}]`.
+- `memories`: initial [memory mounts](memory.md#mount-a-memory-on-a-thread), `[{name, memory: {id} | {key}, access}]`.
 
-`POST …/sessions` creates an empty session to pass as `session_id`. `GET …/sessions` lists sessions with a `preview` of the latest run and filters by `q` (a session or thread ID), `agent_id`, `status`, `trigger`, `updated_after`, `updated_before` and `label`. `GET …/threads?session_id=…` lists a session's threads, and `PATCH` changes session and thread `labels`.
+`POST …/sessions` creates an empty session to pass as `session_id`. `GET …/sessions` lists sessions with a `preview` of the latest run and filters by `q` (a session or thread ID), `agent` (ID or `@key`), `status`, `trigger`, `updated_after`, `updated_before` and `label`. `GET …/threads?session_id=…` lists a session's threads, and `PATCH` changes session and thread `labels`.
 
 Sessions list most recently updated first: a new run or a label edit moves a session to the top. A run's acceptance does not change a session's `ETag`, so a label edit's `If-Match` read before a later run still applies.
 
@@ -132,7 +132,7 @@ In Console, **New conversation** starts a session; **Try agent** starts one from
 
 ## Submit a message
 
-`POST …/threads/{thread_id}/inbox` adds a message to a thread. It takes the same `agent_id`, `payload` and `options` as a new thread, requires an `Idempotency-Key`, and returns `{thread, entry, run}`.
+`POST …/threads/{thread_id}/inbox` adds a message to a thread. It takes the same `agent`, `payload` and `options` as a new thread, requires an `Idempotency-Key`, and returns `{thread, entry, run}`.
 
 A message's `payload.content` holds 1–32 parts:
 
@@ -192,7 +192,7 @@ Anyone with `run` may withdraw and reorder. A thread holds at most `control.inbo
 
 ```json
 {"options": {"max_usage": {"requests": 40},
-             "overrides": {"model": {"model_id": "mdl_..."}, "instructions": "Answer in German."}}}
+             "overrides": {"model": {"id": "mdl_..."}, "instructions": "Answer in German."}}}
 ```
 
 A resume or a child result continues with the options of the run it follows. In Console, **Run options** sets the model, an instructions override, media understanding, a pinned revision and other configuration for the next run.
@@ -233,7 +233,7 @@ In Console, a pending approval offers **Approve once**, **Deny** and **Deny with
 `POST …/runs/{run_id}/resume` answers the wait with an `Idempotency-Key` and starts a successor run (trigger `resume`) that continues from the waiting run:
 
 ```sh
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/runs/$RUN/resume" \
+curl -X POST "$A13N_URL/api/v1/runs/$RUN/resume" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
   -H "Idempotency-Key: 5b1b3f0e-approve-1" \
   -d '{"answers": [{"tool_call_id": "call_...", "action": "approve"},
@@ -266,7 +266,7 @@ A failed run's `failure.code` names the cause, such as `usage_limit_exceeded`, `
 `GET …/threads/{thread_id}/stream` is a server-sent event stream of the thread's live output:
 
 ```sh
-curl -N "$A13N_URL/api/v1/workspaces/$WORKSPACE/threads/$THREAD/stream" -H "Authorization: Bearer $A13N_API_KEY"
+curl -N "$A13N_URL/api/v1/threads/$THREAD/stream" -H "Authorization: Bearer $A13N_API_KEY"
 ```
 
 | Event      | Data                                       | Meaning                                                                                                                       |
@@ -292,7 +292,7 @@ The stream carries only live output the items do not cover yet. Consecutive text
 Every model request is recorded with its token counts and a snapshot of the model's pricing. `GET …/usage` sums the records per model:
 
 ```sh
-curl "$A13N_URL/api/v1/workspaces/$WORKSPACE/usage?thread_id=$THREAD" -H "Authorization: Bearer $A13N_API_KEY"
+curl "$A13N_URL/api/v1/usage?thread_id=$THREAD" -H "Authorization: Bearer $A13N_API_KEY"
 ```
 
 ```json

@@ -1,6 +1,6 @@
 """Scope rules of organization collections that hold shared (`workspace_id IS NULL`) and workspace rows.
 
-Providers and models use them; the verb split for shared rows is tenancy's one rule in `authorize`.
+Providers use them; the verb split for shared rows is tenancy's one rule in `authorize`.
 """
 
 from collections.abc import Sequence

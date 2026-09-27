@@ -109,21 +109,15 @@ def config_digest(value: object) -> str:
 
 
 async def resolve_head[H: HeadRow](
-    session: AsyncSession, table: type[H], workspace_id: str, reference: str, *, lock: bool = False
+    session: AsyncSession, table: type[H], workspace_id: str, resource_id: str, *, lock: bool = False
 ) -> H:
-    """A head of the workspace by ID or key; an ID match wins over another head whose key equals it. A locked head
-    also refreshes any stale copy already loaded in this session."""
-    query = (
-        select(table)
-        .where(table.workspace_id == workspace_id, (table.id == reference) | (table.key == reference))
-        .order_by((table.id == reference).desc())
-        .limit(1)
-    )
+    """A head by canonical ID inside its workspace."""
+    query = select(table).where(table.workspace_id == workspace_id, table.id == resource_id)
     if lock:
         query = query.with_for_update().execution_options(populate_existing=True)
     row = await session.scalar(query)
     if row is None:
-        raise not_found(table.KIND, reference)
+        raise not_found(table.KIND, resource_id)
     return row
 
 
@@ -149,10 +143,10 @@ def require_open(head: HeadRow, if_match: str | None) -> None:
 
 
 async def open_head[H: HeadRow](
-    session: AsyncSession, table: type[H], workspace_id: str, reference: str, if_match: str | None
+    session: AsyncSession, table: type[H], workspace_id: str, resource_id: str, if_match: str | None
 ) -> H:
     """The locked head, once it accepts changes."""
-    head = await resolve_head(session, table, workspace_id, reference, lock=True)
+    head = await resolve_head(session, table, workspace_id, resource_id, lock=True)
     require_open(head, if_match)
     return head
 
@@ -206,12 +200,12 @@ async def get_revision[V: BaseModel](
     table: type[RevisionColumns],
     view: type[V],
     workspace_id: str,
-    reference: str,
+    resource_id: str,
     revision_id: str,
 ) -> V:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        head = await resolve_head(session, heads, scope.workspace_id, reference)
+        head = await resolve_head(session, heads, scope.workspace_id, resource_id)
         return view.model_validate(await find_revision(session, table, head.id, revision_id))
 
 
@@ -222,7 +216,7 @@ async def list_revisions[V: BaseModel](
     table: type[RevisionColumns],
     view: type[V],
     workspace_id: str,
-    reference: str,
+    resource_id: str,
     *,
     limit: int,
     cursor: str | None,
@@ -230,7 +224,7 @@ async def list_revisions[V: BaseModel](
     """One page of the head's revisions, newest first."""
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        head = await resolve_head(session, heads, scope.workspace_id, reference)
+        head = await resolve_head(session, heads, scope.workspace_id, resource_id)
         rows, next_cursor = await revision_page(session, table, head.id, cursor=cursor, limit=limit)
         return [view.model_validate(row) for row in rows], next_cursor
 

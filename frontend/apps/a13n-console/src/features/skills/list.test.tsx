@@ -12,7 +12,9 @@ import { afterEach, expect, it, vi } from "vitest";
 import { SkillsPage } from "./page";
 
 const http = vi.hoisted(() => ({ GET: vi.fn() }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({ workspace: { id: "ws_test" }, can: () => false }),
 }));
@@ -98,10 +100,9 @@ it("searches the server by name or key from the first page and links by key", as
   await user.click(await screen.findByRole("option", { name: "GitHub" }));
   await waitFor(() =>
     expect(http.GET).toHaveBeenCalledWith(
-      "/api/v1/workspaces/{workspace_id}/skills",
+      "/api/v1/skills",
       expect.objectContaining({
         params: {
-          path: { workspace_id: "ws_test" },
           query: {
             q: "review",
             source: "github",
@@ -140,7 +141,7 @@ it("counts the unarchived agents using each skill and adds archived skills on re
   http.GET.mockImplementation(async (path: string, options) => {
     const query = options.params.query;
     const response = path.endsWith("/agents")
-      ? query.skill_id === "sk_used"
+      ? query.skill === "sk_used"
         ? { items: [{ id: "ap_one" }, { id: "ap_two" }], next_cursor: "more" }
         : { items: [], next_cursor: null }
       : {
@@ -161,11 +162,10 @@ it("counts the unarchived agents using each skill and adds archived skills on re
   const idle = screen.getByRole("link", { name: /Idle skill/ }).closest("tr")!;
   expect(await within(idle).findByText("Unused")).toBeTruthy();
   expect(http.GET).toHaveBeenCalledWith(
-    "/api/v1/workspaces/{workspace_id}/agents",
+    "/api/v1/agents",
     expect.objectContaining({
       params: {
-        path: { workspace_id: "ws_test" },
-        query: { skill_id: "sk_used", archived: false, cursor: undefined },
+        query: { skill: "sk_used", archived: false, cursor: undefined },
       },
     }),
   );

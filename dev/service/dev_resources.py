@@ -150,15 +150,16 @@ def apply(api: Api, resources: Resources, applied: Applied) -> Counter[str]:
     """Create or update every entry whose credential is filled; returns how many of each kind are in place."""
     # By key: the seeded state holds several workspaces, listed in ID order.
     workspace = api.get("/api/v1/workspaces/default")
-    org, ws = f"/api/v1/organizations/{workspace['organization_id']}", f"/api/v1/workspaces/{workspace['id']}"
+    org, ws = f"/api/v1/organizations/{workspace['organization_id']}", "/api/v1"
+    api = api.workspace(workspace["id"])
     counts: Counter[str] = Counter()
     model_apis = {item["type"]: item["model_apis"] for item in api.items("/api/v1/provider-types/model")}
-    models = {model["key"]: model for model in api.items(f"{org}/models")}
+    models = {model["key"]: model for model in api.items(f"{ws}/models")}
     for entry in resources.model_providers:
         if filled(entry.credential):
             provider = _apply_provider(api, org, "model-providers", _provider_body(entry), applied)
             for model in entry.models:
-                _apply_model(api, org, provider, model, model_apis[entry.type][0], models.get(model.key))
+                _apply_model(api, ws, provider, model, model_apis[entry.type][0], models.get(model.key))
             counts.update({"model providers": 1, "models": len(entry.models)})
     for entry in resources.web_providers:
         if filled(entry.credential):
@@ -182,17 +183,17 @@ def apply(api: Api, resources: Resources, applied: Applied) -> Counter[str]:
     return counts
 
 
-def _apply_model(api: Api, org: str, provider: Json, entry: ModelEntry, default_api: str, current: Json | None) -> None:
+def _apply_model(api: Api, ws: str, provider: Json, entry: ModelEntry, default_api: str, current: Json | None) -> None:
     config = {"model_name": entry.upstream_model, "model_api": entry.model_api or default_api}
     if current is None:
-        body = {"workspace_id": None, "provider_id": provider["id"], "key": entry.key, "name": entry.name}
-        current = api.post(f"{org}/models", {**body, "config": config})
+        body = {"provider_id": provider["id"], "key": entry.key, "name": entry.name}
+        current = api.post(f"{ws}/models", {**body, "config": config})
     elif current["provider_id"] != provider["id"]:
         raise ValueError(f"Model key {entry.key} belongs to another provider")
     applied = (current["name"], current["enabled"], {key: current["config"][key] for key in config})
     if applied != (entry.name, entry.enabled, config):
         api.patch(
-            f"{org}/models/{current['id']}", current, {"name": entry.name, "config": config, "enabled": entry.enabled}
+            f"{ws}/models/{current['id']}", current, {"name": entry.name, "config": config, "enabled": entry.enabled}
         )
 
 

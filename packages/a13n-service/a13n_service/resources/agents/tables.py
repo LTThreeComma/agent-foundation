@@ -7,7 +7,7 @@ from sqlalchemy import CheckConstraint, DateTime, ForeignKey, ForeignKeyConstrai
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from a13n_service.infra.db import Base, Stamped, identity_guarded, rules
+from a13n_service.infra.db import Base, Stamped, identity_guarded, immutable_columns, rules
 from a13n_service.resources.revisions import RevisionColumns
 
 
@@ -27,7 +27,7 @@ class AgentRow(Stamped, Base):
             initially="DEFERRED",
         ),
         CheckConstraint("source IN ('custom', 'builtin')", name="source"),
-        rules(identity_guarded("agents")),
+        rules(identity_guarded("agents"), immutable_columns("agents", "key")),
     )
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))

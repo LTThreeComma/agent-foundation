@@ -1,10 +1,4 @@
-"""Models in the organization collection, and their resolution for execution and for referencing resources.
-
-A model's scope must be covered by its provider's: a shared provider serves shared and workspace models, a
-workspace provider only models of its own workspace. A model spends its provider's credential, so creating one
-or changing its configuration needs `write` on the provider too: models under an organization-shared provider
-are configured by organization-scope grants, and workspaces use them.
-"""
+"""Workspace models and the provider-backed configuration execution uses."""
 
 from dataclasses import dataclass
 
@@ -13,20 +7,22 @@ from a13n_harness.pricing import ModelPricingEntry
 from a13n_harness.providers.model.definition import ModelProviderDefinition
 from a13n_harness.toolsets.file_media import NativeInputMediaKind
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from a13n_service.infra import cursors
 from a13n_service.infra.db import Storage, assign, short_session, transaction, unique_key
-from a13n_service.infra.errors import disabled, invalid
+from a13n_service.infra.errors import disabled, invalid, not_found
 from a13n_service.infra.http import require_match
 from a13n_service.infra.ids import new_object_id
 from a13n_service.providers.registry import Registry
 from a13n_service.resources.models.schemas import Model, ModelConfig, ModelCreate, ModelPage, ModelUpdate
 from a13n_service.resources.models.tables import ModelRow
-from a13n_service.resources.providers.scope import list_rows, usable_row, writable_scope
 from a13n_service.resources.providers.service import ResolvedProvider, resolve_provider
 from a13n_service.resources.providers.tables import ModelProviderRow
 from a13n_service.resources.rows import audit_row, find_row, given, record_update
-from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope, Verb, WorkspaceScope
+from a13n_service.tenancy.access import workspace_scope
+from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Scope, Verb, WorkspaceScope, authorize
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +46,12 @@ async def resolve_model(
     authority: ExecutionAuthority | None = None,
 ) -> ResolvedModel:
     """An enabled model of an enabled provider usable in the workspace, read in the caller's short session."""
-    row = await usable_row(session, actor, ModelRow, scope, model_id, verb=verb, authority=authority)
+    row = await session.get(ModelRow, model_id)
+    if row is None or row.workspace_id != scope.workspace_id or row.organization_id != scope.organization_id:
+        raise not_found(ModelRow.KIND, model_id)
+    authorize(actor, scope, verb, authority=authority)
+    if not row.enabled:
+        raise disabled(row.KIND, row.id)
     provider = await resolve_provider(
         session, actor, ModelProviderRow, scope, row.provider_id, verb=verb, authority=authority
     )
@@ -85,14 +86,14 @@ def require_understanding(model: ResolvedModel, kind: NativeInputMediaKind) -> N
 
 
 async def create_model(
-    storage: Storage, actor: Principal, organization_id: str, body: ModelCreate, *, registry: Registry
+    storage: Storage, actor: Principal, workspace_id: str, body: ModelCreate, *, registry: Registry
 ) -> Model:
-    with unique_key(ModelRow.KIND, "uq_models_provider_id_key", body.key):
+    with unique_key(ModelRow.KIND, "uq_models_workspace_id_key", body.key):
         async with transaction(storage) as session:
-            scope = await writable_scope(session, actor, organization_id, body.workspace_id)
-            provider = await _configured_provider(session, actor, organization_id, body.provider_id)
+            scope = await workspace_scope(session, actor, workspace_id, "write")
+            provider = await _configured_provider(session, actor, scope.organization_id, body.provider_id)
             if provider.workspace_id not in {None, scope.workspace_id}:
-                raise invalid("workspace_id", "the provider is confined to another workspace")
+                raise invalid("provider_id", "the provider is confined to another workspace")
             if not provider.enabled:
                 raise disabled(provider.KIND, provider.id)
             _check_api(registry.get("model", provider.type), body.config)
@@ -117,31 +118,38 @@ async def create_model(
             return Model.model_validate(row)
 
 
-async def get_model(storage: Storage, actor: Principal, organization_id: str, model_id: str) -> Model:
+async def get_model(storage: Storage, actor: Principal, workspace_id: str, model_id: str) -> Model:
     async with short_session(storage) as session:
-        return Model.model_validate(await find_row(session, actor, ModelRow, Scope(organization_id), model_id, "read"))
+        scope = await workspace_scope(session, actor, workspace_id, "read")
+        return Model.model_validate(await find_row(session, actor, ModelRow, scope, model_id, "read"))
 
 
 async def list_models(
     storage: Storage,
     actor: Principal,
-    organization_id: str,
+    workspace_id: str,
     *,
-    workspace_id: str | None,
     limit: int,
     cursor: str | None,
 ) -> ModelPage:
     async with short_session(storage) as session:
-        rows, next_cursor = await list_rows(
-            session, actor, ModelRow, organization_id, workspace_id, limit=limit, cursor=cursor
+        scope = await workspace_scope(session, actor, workspace_id, "read")
+        rows, next_cursor = await cursors.id_page(
+            session,
+            select(ModelRow).where(ModelRow.workspace_id == scope.workspace_id),
+            ModelRow.id,
+            kind="models",
+            owner=scope.workspace_id,
+            limit=limit,
+            cursor=cursor,
         )
-    return ModelPage(items=[Model.model_validate(row) for row in rows], next_cursor=next_cursor)
+        return ModelPage(items=[Model.model_validate(row) for row in rows], next_cursor=next_cursor)
 
 
 async def update_model(
     storage: Storage,
     actor: Principal,
-    organization_id: str,
+    workspace_id: str,
     model_id: str,
     body: ModelUpdate,
     *,
@@ -149,11 +157,12 @@ async def update_model(
     registry: Registry,
 ) -> Model:
     async with transaction(storage) as session:
-        row = await find_row(session, actor, ModelRow, Scope(organization_id), model_id, "write", lock=True)
+        scope = await workspace_scope(session, actor, workspace_id, "write")
+        row = await find_row(session, actor, ModelRow, scope, model_id, "write", lock=True)
         require_match(if_match, row.id, row.version)
         values = given(body, "name", "description", "enabled")
         if body.config is not None and (config := body.config.model_dump(mode="json")) != row.config:
-            provider = await _configured_provider(session, actor, organization_id, row.provider_id)
+            provider = await _configured_provider(session, actor, scope.organization_id, row.provider_id)
             _check_api(registry.get("model", provider.type), body.config)
             values["config"] = config
         for field in ("pricing", "catalog_ref"):

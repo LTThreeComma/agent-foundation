@@ -7,7 +7,9 @@ import { afterEach, expect, it, vi } from "vitest";
 import { CreateWorkspace } from "./create-workspace";
 
 const http = vi.hoisted(() => ({ POST: vi.fn() }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));

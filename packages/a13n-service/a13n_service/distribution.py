@@ -45,7 +45,6 @@ from a13n_service.resources.memories.tables import (
     MemoryRow,
 )
 from a13n_service.resources.models.routes import router as models_router
-from a13n_service.resources.models.routes import workspace_router as media_router
 from a13n_service.resources.models.tables import ModelRow
 from a13n_service.resources.providers.routes import router as providers_router
 from a13n_service.resources.providers.tables import (
@@ -303,7 +302,6 @@ OSS = Distribution(
         member_router,
         providers_router,
         models_router,
-        media_router,
         agents_router,
         uploads_router,
         assets_router,

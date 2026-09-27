@@ -56,16 +56,14 @@ export function TemplateEditor({
     queryKey: ["environment-template", scope.kind, scope.id, templateId],
     enabled: open && !!templateId,
     queryFn: ({ signal }) =>
-      client.http
-        .GET(
-          "/api/v1/workspaces/{workspace_id}/environment-templates/{template_id}",
-          {
-            params: {
-              path: { workspace_id: scope.id, template_id: templateId! },
-            },
-            signal,
+      client
+        .workspace(scope.id)
+        .GET("/api/v1/environment-templates/{template_reference}", {
+          params: {
+            path: { template_reference: templateId! },
           },
-        )
+          signal,
+        })
         .then(representation),
   });
   async function reload() {
@@ -179,24 +177,21 @@ export function TemplateSettings({
     [archived, setArchived] = useState(!initial.value.enabled);
   const save = useMutation({
     mutationFn: () =>
-      client.http
-        .PATCH(
-          "/api/v1/workspaces/{workspace_id}/environment-templates/{template_id}",
-          {
-            params: {
-              path: {
-                workspace_id: basis.value.workspace_id,
-                template_id: basis.value.id,
-              },
-            },
-            headers: ifMatch(basis.etag),
-            body: {
-              name,
-              description: description || null,
-              enabled: !archived,
+      client
+        .workspace(basis.value.workspace_id)
+        .PATCH("/api/v1/environment-templates/{template_reference}", {
+          params: {
+            path: {
+              template_reference: basis.value.id,
             },
           },
-        )
+          headers: ifMatch(basis.etag),
+          body: {
+            name,
+            description: description || null,
+            enabled: !archived,
+          },
+        })
         .then(data),
     onSuccess: () => {
       void cache.invalidateQueries({ queryKey: ["environment-templates"] });

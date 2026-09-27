@@ -19,6 +19,7 @@ from a13n_service.resources.connections.service import validate_caller_headers
 from a13n_service.runs import checkpoints
 from a13n_service.runs.accept import Source, accept, primary_template, run_revision
 from a13n_service.runs.attachments import asset_fields, require_readable
+from a13n_service.runs.commands import ForkInput, MessageInput, NewThreadInput, resolve_message
 from a13n_service.runs.environments.mounts import mount_environments, shared_mounts, thread_has_primary
 from a13n_service.runs.inbox import Request, append_message, check_replay, find_request
 from a13n_service.runs.memories.mounts import mount_memories, shared_memory_mounts
@@ -147,12 +148,13 @@ async def _lookup(
 
 
 async def submit_message(
-    runtime: Runtime, actor: Principal, workspace_id: str, thread_id: str, message: Message, *, request_key: str
+    runtime: Runtime, actor: Principal, workspace_id: str, thread_id: str, message: MessageInput, *, request_key: str
 ) -> tuple[Submitted, bool]:
     async def create(session: AsyncSession, scope: WorkspaceScope, request: Request) -> tuple[ThreadRow, Source]:
         thread = await get_thread(session, scope.workspace_id, thread_id, lock=True)
         require_open(thread)
-        return thread, await _append(session, runtime, actor, scope, thread, message, request)
+        selected = await resolve_message(session, scope.workspace_id, message, Message)
+        return thread, await _append(session, runtime, actor, scope, thread, selected, request)
 
     return await _submit(
         runtime, actor, workspace_id, lambda _: Request.of(request_key, "message", thread_id, message), create
@@ -160,21 +162,22 @@ async def submit_message(
 
 
 async def create_thread(
-    runtime: Runtime, actor: Principal, workspace_id: str, body: NewThread, *, request_key: str
+    runtime: Runtime, actor: Principal, workspace_id: str, body: NewThreadInput, *, request_key: str
 ) -> tuple[Submitted, bool]:
     async def create(session: AsyncSession, scope: WorkspaceScope, request: Request) -> tuple[ThreadRow, Source]:
-        await validate_caller_headers(session, scope.workspace_id, body.mcp_headers)
-        if body.session_id is not None:
-            owner = await find_session(session, scope.workspace_id, body.session_id)
+        selected = await resolve_message(session, scope.workspace_id, body, NewThread)
+        await validate_caller_headers(session, scope.workspace_id, selected.mcp_headers)
+        if selected.session_id is not None:
+            owner = await find_session(session, scope.workspace_id, selected.session_id)
         else:
             owner = new_session(scope.organization_id, scope.workspace_id, actor.id)
             session.add(owner)
-        thread = new_thread(owner, mcp_headers=body.mcp_headers)
+        thread = new_thread(owner, mcp_headers=selected.mcp_headers)
         session.add(thread)
         await session.flush()
-        await mount_environments(session, thread, body.environments, principal_id=actor.id)
-        await mount_memories(session, thread, body.memories, limit=runtime.settings.memory.mounts_per_thread)
-        return thread, await _append(session, runtime, actor, scope, thread, body, request)
+        await mount_environments(session, thread, selected.environments, principal_id=actor.id)
+        await mount_memories(session, thread, selected.memories, limit=runtime.settings.memory.mounts_per_thread)
+        return thread, await _append(session, runtime, actor, scope, thread, selected, request)
 
     return await _submit(
         runtime, actor, workspace_id, lambda scope: Request.of(request_key, "thread", scope.workspace_id, body), create
@@ -182,11 +185,12 @@ async def create_thread(
 
 
 async def fork(
-    runtime: Runtime, actor: Principal, workspace_id: str, run_id: str, body: Fork, *, request_key: str
+    runtime: Runtime, actor: Principal, workspace_id: str, run_id: str, body: ForkInput, *, request_key: str
 ) -> tuple[Submitted, bool]:
     """A new thread in the origin's session whose first run continues the origin's committed history."""
 
     async def create(session: AsyncSession, scope: WorkspaceScope, request: Request) -> tuple[ThreadRow, Source]:
+        selected = await resolve_message(session, scope.workspace_id, body, Fork)
         origin = await get_run(session, scope.workspace_id, run_id)
         origin_thread = await get_thread(session, scope.workspace_id, origin.thread_id, lock=True)
         # Failed and cancelled runs never became history; fork their parent and resubmit instead.
@@ -204,10 +208,10 @@ async def fork(
         )
         session.add(thread)
         await session.flush()
-        shared = [] if body.fresh_environments else await shared_mounts(session, origin_thread)
-        await mount_environments(session, thread, [*shared, *body.environments], principal_id=actor.id)
-        memories = [*await shared_memory_mounts(session, origin_thread), *body.memories]
+        shared = [] if selected.fresh_environments else await shared_mounts(session, origin_thread)
+        await mount_environments(session, thread, [*shared, *selected.environments], principal_id=actor.id)
+        memories = [*await shared_memory_mounts(session, origin_thread), *selected.memories]
         await mount_memories(session, thread, memories, limit=runtime.settings.memory.mounts_per_thread)
-        return thread, await _append(session, runtime, actor, scope, thread, body, request)
+        return thread, await _append(session, runtime, actor, scope, thread, selected, request)
 
     return await _submit(runtime, actor, workspace_id, lambda _: Request.of(request_key, "fork", run_id, body), create)

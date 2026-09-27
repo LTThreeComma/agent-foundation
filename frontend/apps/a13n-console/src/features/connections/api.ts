@@ -5,7 +5,6 @@ type Connection = Schema["Connection"];
 
 export function connectionPath(connection: Connection) {
   return {
-    workspace_id: connection.workspace_id,
     connection_id: connection.id,
   };
 }
@@ -17,13 +16,11 @@ export function connectionState(connection: Connection) {
 
 /** Discovers the tools with the current configuration and credential; the outcome becomes `last_test`. */
 export function testConnection(client: Client, connection: Connection) {
-  return client.http
-    .POST(
-      "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/test",
-      {
-        params: { path: connectionPath(connection) },
-      },
-    )
+  return client
+    .workspace(connection.workspace_id)
+    .POST("/api/v1/connections/{connection_id}/test", {
+      params: { path: connectionPath(connection) },
+    })
     .then(data);
 }
 

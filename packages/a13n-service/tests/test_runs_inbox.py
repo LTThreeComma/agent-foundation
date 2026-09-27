@@ -116,7 +116,7 @@ async def test_only_the_submitter_edits_a_pending_entry(service, scripted_model,
     agent = await runs_kit.create_agent(service, scripted_model)
     thread_id = (await runs_kit.start_thread(service, agent, "first"))["thread"]["id"]
     queued = await _queue(service, runs_kit, thread_id, agent, "queued")
-    accounts = f"{service.workspace}/service-accounts"
+    accounts = f"/api/v1/workspaces/{service.tenant.workspace_id}/service-accounts"
     account = (await service.client.post(accounts, json={"name": "runner", "role": "runner"})).json()
     key = await service.client.post(f"{accounts}/{account['id']}/keys", json={"name": "runner"})
     runner = {"authorization": "Bearer " + key.json()["secret"]}
@@ -137,10 +137,10 @@ async def test_only_the_submitter_edits_a_pending_entry(service, scripted_model,
 async def test_malformed_overrides_fail_before_anything_is_stored(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
     agent = await runs_kit.create_agent(service, scripted_model)
     thread_id = (await runs_kit.start_thread(service, agent, "first"))["thread"]["id"]
-    missing = {"overrides": {"model": {"model_id": new_object_id("mdl")}}}
+    missing = {"overrides": {"model": {"id": new_object_id("mdl")}}}
 
     appended = await runs_kit.submit(service, thread_id, runs_kit.message(agent, "queued", options=missing))
-    assert appended.status_code == 400, appended.text
+    assert appended.status_code == 404, appended.text
     assert len(await runs_kit.inbox(service, thread_id)) == 1
 
     queued = await _queue(service, runs_kit, thread_id, agent, "queued")
@@ -148,7 +148,7 @@ async def test_malformed_overrides_fail_before_anything_is_stored(service, scrip
     edited = await service.client.patch(
         f"{service.workspace}/threads/{thread_id}/inbox/{queued['id']}", json={"options": missing}, headers=thread
     )
-    assert edited.status_code == 400, edited.text
+    assert edited.status_code == 404, edited.text
     assert (await runs_kit.inbox(service, thread_id))[1]["options"] == queued["options"]
 
 
@@ -266,14 +266,29 @@ async def test_archive_withdraws_the_steers_a_completing_run_left_unused(service
     assert entries[steer["id"]]["status"] == "withdrawn", entries[steer["id"]]
 
 
-async def test_a_new_thread_replays_its_key_however_the_path_names_the_workspace(
-    service, scripted_model, runs_kit
-) -> None:  # type: ignore[no-untyped-def]
+async def test_a_new_thread_replays_before_resolving_reused_resource_keys(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
     agent = await runs_kit.create_agent(service, scripted_model)
-    key = (await service.client.get(service.workspace)).json()["key"]
-    body, headers = runs_kit.message(agent, "hello"), runs_kit.fresh_key()
-    created = await service.client.post(f"{service.workspace}/threads", json=body, headers=headers)
+    memory = (await service.client.post("/api/v1/memories", json={"key": "notes", "name": "Notes"})).json()
+    body = {
+        **runs_kit.message(agent, "hello"),
+        "agent": {"key": agent["key"]},
+        "memories": [{"name": "notes", "memory": {"key": "notes"}, "access": "read"}],
+    }
+    headers = runs_kit.fresh_key()
+    created = await service.client.post("/api/v1/threads", json=body, headers=headers)
     assert created.status_code == 201, created.text
-    replayed = await service.client.post(f"/api/v1/workspaces/{key}/threads", json=body, headers=headers)
-    assert replayed.status_code == 200, replayed.text
-    assert replayed.json()["thread"]["id"] == created.json()["thread"]["id"]
+    deleted = await service.client.delete(f"/api/v1/memories/{memory['id']}", headers=runs_kit.if_match(memory))
+    assert deleted.status_code == 204, deleted.text
+    # Replay works even when a key no longer resolves, and later cannot bind to its replacement.
+    for recreate in (False, True):
+        if recreate:
+            replacement = await service.client.post("/api/v1/memories", json={"key": "notes", "name": "New notes"})
+            assert replacement.status_code == 201 and replacement.json()["id"] != memory["id"]
+        replayed = await service.client.post("/api/v1/threads", json=body, headers=headers)
+        assert replayed.status_code == 200, replayed.text
+        assert replayed.json()["run"]["id"] == created.json()["run"]["id"]
+        assert replayed.json()["run"]["memory_mounts"][0]["memory_id"] == memory["id"]
+    different = await service.client.post(
+        "/api/v1/threads", json={**body, "agent": {"id": agent["id"]}}, headers=headers
+    )
+    assert different.status_code == 409, different.text

@@ -231,7 +231,7 @@ async def use_environment(stack, account: Backend, cleanup: list[str]) -> None: 
     types = expect(await api.client.get("/api/v1/provider-types/environment"), 200)["items"]
     [described] = [item for item in types if item["type"] == account.type]
     agent = await api.create_agent(
-        "builder", await api.create_model(model.base_url), default_environment_template_id=template_id
+        "builder", await api.create_model(model.base_url), default_environment_template={"id": template_id}
     )
 
     command = "echo live-$((6 * 7)) > proof.txt && cat proof.txt"
@@ -299,7 +299,7 @@ async def test_a_ready_e2b_sandbox_is_renewed_past_its_timeout(stack, request) -
 
 async def outlive_timeout(api, account: Backend, cleanup: list[str]) -> None:  # type: ignore[no-untyped-def]
     reserved = await api.client.post(
-        f"{api.path}/environments", json={"template_id": await create_template(api, account)}
+        f"{api.path}/environments", json={"template": {"id": await create_template(api, account)}}
     )
     environment_id = expect(reserved, 201)["id"]
     cleanup.append(environment_id)

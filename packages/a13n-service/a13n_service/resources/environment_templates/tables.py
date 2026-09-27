@@ -6,7 +6,7 @@ from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, UniqueConstrain
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from a13n_service.infra.db import Base, Stamped, identity_guarded, rules
+from a13n_service.infra.db import Base, Stamped, identity_guarded, immutable_columns, rules
 from a13n_service.resources.providers.tables import provider_in_scope
 
 
@@ -22,6 +22,7 @@ class EnvironmentTemplateRow(Stamped, Base):
         ),
         rules(
             identity_guarded("environment_templates"),
+            immutable_columns("environment_templates", "key"),
             *provider_in_scope("environment_templates", "provider_id", "environment_providers"),
         ),
     )

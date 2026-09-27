@@ -137,7 +137,7 @@ async def test_workspace_key_confinement(service) -> None:  # type: ignore[no-un
     assert key_a.status_code == key_b.status_code == 201
     assert (await client.post("/api/v1/users/me/keys", json={"name": "unscoped"})).status_code == 400
     bearer = {"authorization": "Bearer " + key_a.json()["secret"]}
-    assert (await client.get(service.workspace, headers=bearer)).status_code == 200
+    assert (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)).status_code == 200
     assert (await client.get(f"/api/v1/workspaces/{other_id}", headers=bearer)).status_code == 403
     assert (await client.get(f"/api/v1/workspaces/{foreign_ws}", headers=bearer)).status_code == 403
     # A key never issues keys, not even for its own workspace: one would outlive its expiry and revocation.
@@ -189,7 +189,7 @@ async def test_workspace_key_confinement(service) -> None:  # type: ignore[no-un
     revoked = await client.delete(path, headers=if_match(issued))
     assert revoked.status_code == 200 and revoked.json()["revoked_at"] is not None
     assert (await client.delete(path, headers=if_match(revoked.json()))).status_code == 409
-    assert (await client.get(service.workspace, headers=bearer)).status_code == 401
+    assert (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)).status_code == 401
 
 
 async def test_reauthenticate_rechecks_without_touching_credentials(runtime, tenant) -> None:  # type: ignore[no-untyped-def]

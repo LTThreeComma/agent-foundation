@@ -43,8 +43,8 @@ from a13n_service.tenancy.authorize import Principal, WorkspaceScope
 _KEY = TypeAdapter(SkillKey)
 
 
-async def resolve_skill(session: AsyncSession, workspace_id: str, reference: str, *, lock: bool = False) -> SkillRow:
-    return await revisions.resolve_head(session, SkillRow, workspace_id, reference, lock=lock)
+async def resolve_skill(session: AsyncSession, workspace_id: str, skill_id: str, *, lock: bool = False) -> SkillRow:
+    return await revisions.resolve_head(session, SkillRow, workspace_id, skill_id, lock=lock)
 
 
 async def resolve_revision(session: AsyncSession, head: SkillRow, revision_id: str) -> SkillRevisionRow:

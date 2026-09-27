@@ -6,7 +6,12 @@ import { MCPConnectionIcon } from "./mcp-icon";
 
 const get = vi.hoisted(() => vi.fn());
 vi.mock("../../auth/context", () => ({
-  useClient: () => ({ http: { GET: get } }),
+  useClient: () => ({
+    http: { GET: get },
+    workspace() {
+      return this.http;
+    },
+  }),
 }));
 
 it("reuses the catalog logo for a saved remote MCP connection", async () => {

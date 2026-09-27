@@ -55,7 +55,9 @@ const config = {
       tools: { shell: { permission: "ask" as const } },
     },
   },
-  secret_requirements: [{ key: "research_token", scope: "user" as const }],
+  secret_requirements: [
+    { key: "research_token", secret_id: "sec_0123456789abcdef0123" },
+  ],
   subagents: {
     helper: {
       agent_id: "ap_0123456789abcdef0123",

@@ -98,9 +98,8 @@ test("multipart uploads keep their form boundary through the transport", async (
       return json({});
     },
   });
-  await client.http.POST("/api/v1/workspaces/{workspace_id}/uploads", {
+  await client.workspace("ws_one").POST("/api/v1/uploads", {
     params: {
-      path: { workspace_id: "ws_one" },
       header: { "Idempotency-Key": "key" },
     },
     body: { file: form.get("file") },
@@ -184,9 +183,6 @@ test("Thread stream resumes after its last cursor and reports control frames", a
   });
   await assert.rejects(stream.next(), ProtocolError);
   assert.equal(requests.length, 1);
-  assert.equal(
-    requests[0].url,
-    `${baseUrl}/api/v1/workspaces/ws_one/threads/th_one/stream`,
-  );
+  assert.equal(requests[0].url, `${baseUrl}/api/v1/threads/th_one/stream`);
   assert.equal(requests[0].headers.get("Last-Event-ID"), "4-0");
 });

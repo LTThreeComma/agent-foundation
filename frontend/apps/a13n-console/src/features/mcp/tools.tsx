@@ -26,13 +26,11 @@ export function MCPTools({ connection }: { connection: Schema["Connection"] }) {
     [limit, setLimit] = useState(30);
   const discovery = useMutation({
     mutationFn: () =>
-      client.http
-        .GET(
-          "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/tools",
-          {
-            params: { path: connectionPath(connection) },
-          },
-        )
+      client
+        .workspace(connection.workspace_id)
+        .GET("/api/v1/connections/{connection_id}/tools", {
+          params: { path: connectionPath(connection) },
+        })
         .then(data),
   });
   const tools =

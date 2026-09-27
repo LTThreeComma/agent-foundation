@@ -22,8 +22,8 @@ async def create_memory(service: SimpleNamespace, key: str) -> dict[str, Any]:
     return created.json()
 
 
-def mount(name: str, memory: dict[str, Any], access: str = "write") -> dict[str, str]:
-    return {"name": name, "memory_id": memory["id"], "access": access}
+def mount(name: str, memory: dict[str, Any], access: str = "write") -> dict[str, Any]:
+    return {"name": name, "memory": {"id": memory["id"]}, "access": access}
 
 
 def mounted(run: dict[str, Any]) -> list[tuple[str, str, str]]:
@@ -55,7 +55,11 @@ async def test_thread_mounts_are_edited_under_the_thread_version(service, script
     assert (await client.post(mounts, json=body)).status_code == 428
     assert (await client.post(mounts, json={**body, "name": "Notes"}, headers={"if-match": version})).status_code == 400
     added = await client.post(mounts, json=body, headers={"if-match": version})
-    assert added.status_code == 201 and added.json() == {**body, "recall": True} and added.headers["etag"] != version
+    assert (
+        added.status_code == 201
+        and added.json() == {"name": "notes", "memory_id": notes["id"], "access": "read", "recall": True}
+        and added.headers["etag"] != version
+    )
     assert (await client.post(mounts, json=body, headers={"if-match": version})).status_code == 412
     # Access and recall change in place, under the thread version like every mount edit.
     change = {"access": "write", "recall": False}
@@ -63,16 +67,18 @@ async def test_thread_mounts_are_edited_under_the_thread_version(service, script
     stale = await client.patch(f"{mounts}/notes", json=change, headers={"if-match": version})
     assert stale.status_code == 412
     changed = await client.patch(f"{mounts}/notes", json=change, headers={"if-match": added.headers["etag"]})
-    assert changed.status_code == 200 and changed.json() == {**body, **change}, changed.text
+    assert changed.status_code == 200 and changed.json() == {**added.json(), **change}, changed.text
     assert changed.headers["etag"] not in {version, added.headers["etag"]}
     unknown = await client.patch(f"{mounts}/other", json=change, headers={"if-match": changed.headers["etag"]})
     assert unknown.status_code == 404
     current = {"if-match": changed.headers["etag"]}
-    again = await client.post(mounts, json={**body, "memory_id": team["id"]}, headers=current)
+    again = await client.post(mounts, json={**body, "memory": {"id": team["id"]}}, headers=current)
     assert again.status_code == 409 and again.json()["error"]["code"] == "already_exists", again.text
     twice = await client.post(mounts, json={**body, "name": "copy"}, headers=current)
     assert twice.status_code == 409 and reason(twice) == "already_mounted", twice.text
-    missing = await client.post(mounts, json={**body, "name": "gone", "memory_id": "mem_" + "0" * 20}, headers=current)
+    missing = await client.post(
+        mounts, json={**body, "name": "gone", "memory": {"id": "mem_" + "0" * 20}}, headers=current
+    )
     assert missing.status_code == 404, missing.text
     removed = await client.delete(f"{mounts}/notes", headers=current)
     assert removed.status_code == 204
@@ -161,12 +167,12 @@ async def test_agent_default_mounts_are_validated_when_authored(service, scripte
             json={
                 "key": "invalid",
                 "name": "Invalid",
-                "config": {"model": {"model_id": model_id}, "memory_mounts": memory_mounts},
+                "config": {"model": {"id": model_id}, "memory_mounts": memory_mounts},
             },
         )
-        assert response.status_code == 400, (memory_mounts, response.text)
+        assert response.status_code == (404 if field else 400), (memory_mounts, response.text)
         if field is not None:
-            assert response.json()["error"]["details"]["field"] == field, response.text
+            assert response.json()["error"]["details"]["kind"] == "memory", response.text
 
 
 async def test_a_fork_copies_its_origins_mounts_and_adds_its_own(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]

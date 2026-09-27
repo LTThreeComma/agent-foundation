@@ -73,11 +73,12 @@ export function ConnectionGroup({
     refetchOnWindowFocus: false,
     queryFn: async ({ signal }): Promise<CatalogTool[]> => {
       if (!connection) return [];
-      const result = await client.http
-        .GET(
-          "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/tools",
-          { params: { path: connectionPath(connection) }, signal },
-        )
+      const result = await client
+        .workspace(connection.workspace_id)
+        .GET("/api/v1/connections/{connection_id}/tools", {
+          params: { path: connectionPath(connection) },
+          signal,
+        })
         .then(data);
       return result.items.map((tool) => ({
         name: tool.name,

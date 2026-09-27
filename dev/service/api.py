@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from copy import copy
 from types import TracebackType
 from typing import Any
 from urllib.parse import urlsplit
@@ -25,6 +26,7 @@ class Api:
 
     def __init__(self, base_url: str) -> None:
         self._http = httpx2.Client(base_url=base_url, trust_env=False, timeout=30)
+        self._workspace_id: str | None = None
 
     def __enter__(self) -> Api:
         return self
@@ -37,6 +39,12 @@ class Api:
     @property
     def base_url(self) -> str:
         return str(self._http.base_url)
+
+    def workspace(self, workspace_id: str) -> Api:
+        """A workspace-bound view sharing this session, without changing other concurrent callers."""
+        scoped = copy(self)
+        scoped._workspace_id = workspace_id
+        return scoped
 
     def login(self, email: str, password: str) -> str:
         """Sign in; returns the principal ID."""
@@ -113,6 +121,8 @@ class Api:
         return signed_in["principal_id"]
 
     def _send(self, method: str, path: str, **options: Any) -> httpx2.Response:
+        if self._workspace_id is not None:
+            options["headers"] = {**options.get("headers", {}), "X-Workspace-ID": self._workspace_id}
         response = self._http.request(method, path, **options)
         if response.is_error:
             # Service error envelopes never echo submitted values.

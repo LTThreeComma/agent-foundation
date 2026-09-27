@@ -1,3 +1,4 @@
+import { configInput } from "../../shared/resource-inputs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, MenuItem, MenuSeparator, ModalFrame } from "a13n-ui";
 import {
@@ -58,32 +59,29 @@ export function AgentDetail() {
     enabled: isResourceKey(agentKey),
     queryFn: async ({ signal }) => {
       const resource = representation(
-        await client.http.GET(
-          "/api/v1/workspaces/{workspace_id}/agents/{agent_id}",
-          {
+        await client
+          .workspace(workspace.id)
+          .GET("/api/v1/agents/{agent_reference}", {
             params: {
-              path: { workspace_id: workspace.id, agent_id: agentKey },
+              path: { agent_reference: `@${agentKey}` },
             },
             signal,
-          },
-        ),
+          }),
       );
       if (!resource.value.default_revision_id)
         throw new Error(t("Agent configuration is unavailable."));
       const revision = data(
-        await client.http.GET(
-          "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions/{revision_id}",
-          {
+        await client
+          .workspace(workspace.id)
+          .GET("/api/v1/agents/{agent_reference}/revisions/{revision_id}", {
             params: {
               path: {
-                workspace_id: workspace.id,
-                agent_id: resource.value.id,
+                agent_reference: resource.value.id,
                 revision_id: resource.value.default_revision_id,
               },
             },
             signal,
-          },
-        ),
+          }),
       );
       return { ...resource, revision };
     },
@@ -106,11 +104,12 @@ export function AgentDetail() {
           t("Version information is unavailable. Reload this page."),
         );
       const { etag, ...requestBody } = body;
-      return client.http
-        .POST("/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions", {
-          params: { path: { workspace_id: workspace.id, agent_id: agentKey } },
+      return client
+        .workspace(workspace.id)
+        .POST("/api/v1/agents/{agent_reference}/revisions", {
+          params: { path: { agent_reference: `@${agentKey}` } },
           headers: ifMatch(etag),
-          body: requestBody,
+          body: { ...requestBody, config: configInput(requestBody.config) },
         })
         .then(data);
     },

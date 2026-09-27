@@ -1,12 +1,45 @@
 import { createClient } from "../../service-client";
 import { expect, it, vi } from "vitest";
 import { initialConfig } from "./configuration";
+import { configInput } from "../../shared/resource-inputs";
 import {
   agentDependencies,
   inspectAgentDependencies,
 } from "./transfer-dependencies";
 
 const signal = new AbortController().signal;
+
+it("requires remapping a secret identity even when its key exists in the destination", async () => {
+  const { client } = clientFor((url) => ({
+    items: url.pathname.endsWith("/secrets")
+      ? [{ id: "sec_target", key: "TOKEN" }]
+      : [{ id: "mdl_local", key: "model", name: "Model", enabled: true }],
+  }));
+  const config = {
+    ...initialConfig(),
+    model: { model_id: "mdl_local" },
+    secret_requirements: [{ secret_id: "sec_source", key: "TOKEN" }],
+  };
+  const checks = await inspectAgentDependencies(
+    client,
+    "org_target",
+    "ws_target",
+    config,
+    signal,
+  );
+  expect(
+    checks.find((item) => item.path === "secret_requirements.0.secret_id"),
+  ).toMatchObject({
+    available: false,
+    options: [{ value: "sec_target", id: "sec_target", label: "TOKEN" }],
+  });
+  const replaced = agentDependencies(config)
+    .find((item) => item.kind === "secret")!
+    .replace("sec_target");
+  expect(configInput(replaced).secret_requirements).toEqual([
+    { secret: { id: "sec_target" } },
+  ]);
+});
 
 function clientFor(read: (url: URL) => object) {
   const fetch = vi.fn<typeof globalThis.fetch>(
@@ -92,8 +125,10 @@ it("checks every catalog page and retains an unavailable pinned version", async 
     ),
   ).toHaveLength(2);
   const models = new URL(new Request(fetch.mock.calls[0]![0]).url);
-  expect(models.pathname).toBe("/api/v1/organizations/org_target/models");
-  expect(models.searchParams.get("workspace_id")).toBe("ws_target");
+  expect(models.pathname).toBe("/api/v1/models");
+  expect(
+    new Request(fetch.mock.calls[0]![0]).headers.get("X-Workspace-ID"),
+  ).toBe("ws_target");
 });
 
 it("only queries dependency kinds actually selected by the configuration", async () => {

@@ -183,9 +183,8 @@ async def test_rows_of_an_archived_workspace_are_read_but_never_changed(service)
     provider = await create(service, "model", body)
     config = {"model_name": "gpt", "model_api": "openai.chat_completions"}
     model = await service.client.post(
-        f"{service.organization}/models",
+        f"{service.workspace}/models",
         json={
-            "workspace_id": workspace_id,
             "provider_id": provider["id"],
             "key": "gpt",
             "name": "GPT",
@@ -193,13 +192,15 @@ async def test_rows_of_an_archived_workspace_are_read_but_never_changed(service)
         },
     )
     assert model.status_code == 201, model.text
-    workspace = (await service.client.get(service.workspace)).json()
-    archived = await service.client.post(f"{service.workspace}/archive", headers={"if-match": etag(workspace)})
+    workspace = (await service.client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()
+    archived = await service.client.post(
+        f"/api/v1/workspaces/{service.tenant.workspace_id}/archive", headers={"if-match": etag(workspace)}
+    )
     assert archived.status_code == 200, archived.text
 
     for path, row in (
         (f"{service.organization}/model-providers/{provider['id']}", provider),
-        (f"{service.organization}/models/{model.json()['id']}", model.json()),
+        (f"{service.workspace}/models/{model.json()['id']}", model.json()),
     ):
         refused = await service.client.patch(path, json={"name": "Renamed"}, headers={"if-match": etag(row)})
         assert refused.status_code == 422, refused.text
@@ -254,7 +255,7 @@ async def test_lists_return_shared_rows_plus_the_requested_or_readable_workspace
     rest = await service.client.get(collection, params={"limit": 2, "cursor": page.json()["next_cursor"]})
     assert len(page.json()["items"]) == 2 and len(rest.json()["items"]) == 1 and rest.json()["next_cursor"] is None
     # A cursor continues its list whether the caller names the workspace by key or by ID.
-    key = (await service.client.get(service.workspace)).json()["key"]
+    key = (await service.client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()["key"]
     by_key = await service.client.get(collection, params={"workspace_id": key, "limit": 1})
     continued = await service.client.get(
         collection, params={"workspace_id": first, "limit": 1, "cursor": by_key.json()["next_cursor"]}
@@ -837,12 +838,12 @@ async def test_the_database_keeps_provider_references_within_their_workspace(ser
     _, confined_connector = await accounts("connector", "composio", credential={"api_key": SECRET})
 
     config = {"model_name": "gpt", "model_api": "openai.chat_completions"}
-    model = {"workspace_id": first, "provider_id": shared_model, "key": "gpt", "name": "GPT", "config": config}
+    model = {"provider_id": shared_model, "key": "gpt", "name": "GPT", "config": config}
     template = {"key": "box", "name": "Box", "provider_id": shared_environment}
     connection = {"type": "mcp", "name": "Remote", "config": {"url": "http://127.0.0.1:9/mcp"}, "auth": "oauth"}
     created = {}
     for name, path, body in (
-        ("model", f"{service.organization}/models", model),
+        ("model", f"{service.workspace}/models", model),
         ("template", f"{service.workspace}/environment-templates", template),
         ("connection", f"{service.workspace}/connections", connection),
     ):

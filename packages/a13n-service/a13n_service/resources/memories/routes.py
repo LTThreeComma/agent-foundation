@@ -3,7 +3,7 @@ a record memory's records."""
 
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query, Response
+from fastapi import APIRouter, Depends, Path, Query, Response
 
 from a13n_service.infra.http import IfMatch, PageLimit, tagged
 from a13n_service.resources.memories import files, records, service
@@ -26,11 +26,13 @@ from a13n_service.resources.memories.schemas import (
     MemoryRevisionPage,
     MemoryUpdate,
 )
-from a13n_service.resources.memories.tables import MemoryKind
-from a13n_service.resources.requests import CurrentRuntime
-from a13n_service.tenancy.requests import Actor
+from a13n_service.resources.memories.tables import MemoryKind, MemoryRow
+from a13n_service.resources.requests import CurrentRuntime, resource_id
+from a13n_service.tenancy.requests import Actor, Workspace
 
-router = APIRouter(prefix="/api/v1/workspaces/{workspace_id}/memories", tags=["memories"])
+MemoryId = Annotated[str, Depends(resource_id(MemoryRow, "memory_reference"))]
+
+router = APIRouter(prefix="/api/v1/memories", tags=["memories"])
 
 # A record ID is the provider's own.
 RecordId = Annotated[str, Path(max_length=256)]
@@ -38,15 +40,17 @@ RecordId = Annotated[str, Path(max_length=256)]
 
 @router.post("", response_model=Memory, status_code=201)
 async def create_memory(
-    response: Response, workspace_id: str, body: MemoryCreate, actor: Actor, runtime: CurrentRuntime
+    response: Response, workspace: Workspace, body: MemoryCreate, actor: Actor, runtime: CurrentRuntime
 ) -> Memory:
-    result = await service.create_memory(runtime.storage, actor, workspace_id, body, settings=runtime.settings.memory)
+    result = await service.create_memory(
+        runtime.storage, actor, workspace.workspace_id, body, settings=runtime.settings.memory
+    )
     return tagged(response, result)
 
 
 @router.get("", response_model=MemoryPage)
 async def list_memories(
-    workspace_id: str,
+    workspace: Workspace,
     actor: Actor,
     runtime: CurrentRuntime,
     label: Annotated[list[str] | None, Query()] = None,
@@ -58,7 +62,7 @@ async def list_memories(
     return await service.list_memories(
         runtime.storage,
         actor,
-        workspace_id,
+        workspace.workspace_id,
         labels=label or [],
         kind=kind,
         type_=type_,
@@ -68,42 +72,50 @@ async def list_memories(
     )
 
 
-@router.get("/{memory_id}", response_model=Memory)
+@router.get("/{memory_reference}", response_model=Memory)
 async def get_memory(
-    response: Response, workspace_id: str, memory_id: str, actor: Actor, runtime: CurrentRuntime
+    response: Response, workspace: Workspace, memory_id: MemoryId, actor: Actor, runtime: CurrentRuntime
 ) -> Memory:
-    result = await service.get_memory(runtime.storage, actor, workspace_id, memory_id, settings=runtime.settings.memory)
+    result = await service.get_memory(
+        runtime.storage, actor, workspace.workspace_id, memory_id, settings=runtime.settings.memory
+    )
     return tagged(response, result)
 
 
-@router.patch("/{memory_id}", response_model=Memory)
+@router.patch("/{memory_reference}", response_model=Memory)
 async def update_memory(
     response: Response,
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     body: MemoryUpdate,
     actor: Actor,
     runtime: CurrentRuntime,
     if_match: IfMatch = None,
 ) -> Memory:
     result = await service.update_memory(
-        runtime.storage, actor, workspace_id, memory_id, body, if_match=if_match, settings=runtime.settings.memory
+        runtime.storage,
+        actor,
+        workspace.workspace_id,
+        memory_id,
+        body,
+        if_match=if_match,
+        settings=runtime.settings.memory,
     )
     return tagged(response, result)
 
 
-@router.delete("/{memory_id}", status_code=204)
+@router.delete("/{memory_reference}", status_code=204)
 async def delete_memory(
-    workspace_id: str, memory_id: str, actor: Actor, runtime: CurrentRuntime, if_match: IfMatch = None
+    workspace: Workspace, memory_id: MemoryId, actor: Actor, runtime: CurrentRuntime, if_match: IfMatch = None
 ) -> Response:
-    await service.delete_memory(runtime.storage, actor, workspace_id, memory_id, if_match=if_match)
+    await service.delete_memory(runtime.storage, actor, workspace.workspace_id, memory_id, if_match=if_match)
     return Response(status_code=204)
 
 
-@router.get("/{memory_id}/files", response_model=MemoryFilePage)
+@router.get("/{memory_reference}/files", response_model=MemoryFilePage)
 async def list_files(
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     actor: Actor,
     runtime: CurrentRuntime,
     prefix: Annotated[str, Query(max_length=1024, description='A directory ending in "/"; "" lists every file')] = "",
@@ -113,7 +125,7 @@ async def list_files(
     return await files.list_files(
         runtime.storage,
         actor,
-        workspace_id,
+        workspace.workspace_id,
         memory_id,
         prefix=prefix,
         limit=limit,
@@ -122,26 +134,26 @@ async def list_files(
     )
 
 
-@router.post("/{memory_id}/files", response_model=MemoryFile, status_code=201)
+@router.post("/{memory_reference}/files", response_model=MemoryFile, status_code=201)
 async def create_file(
     response: Response,
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     body: MemoryFileCreate,
     actor: Actor,
     runtime: CurrentRuntime,
 ) -> MemoryFile:
     result = await files.create_file(
-        runtime.storage, actor, workspace_id, memory_id, body, settings=runtime.settings.memory
+        runtime.storage, actor, workspace.workspace_id, memory_id, body, settings=runtime.settings.memory
     )
     return tagged(response, result)
 
 
-@router.post("/{memory_id}/files/move", response_model=MemoryFile)
+@router.post("/{memory_reference}/files/move", response_model=MemoryFile)
 async def move_file(
     response: Response,
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     body: MemoryFileMove,
     actor: Actor,
     runtime: CurrentRuntime,
@@ -149,26 +161,32 @@ async def move_file(
 ) -> MemoryFile:
     """Move the source file `If-Match` names; the destination must be free."""
     result = await files.move_file(
-        runtime.storage, actor, workspace_id, memory_id, body, if_match=if_match, settings=runtime.settings.memory
+        runtime.storage,
+        actor,
+        workspace.workspace_id,
+        memory_id,
+        body,
+        if_match=if_match,
+        settings=runtime.settings.memory,
     )
     return tagged(response, result)
 
 
-@router.get("/{memory_id}/files/{path:path}", response_model=MemoryFile)
+@router.get("/{memory_reference}/files/{path:path}", response_model=MemoryFile)
 async def read_file(
-    response: Response, workspace_id: str, memory_id: str, path: str, actor: Actor, runtime: CurrentRuntime
+    response: Response, workspace: Workspace, memory_id: MemoryId, path: str, actor: Actor, runtime: CurrentRuntime
 ) -> MemoryFile:
     result = await files.read_file(
-        runtime.storage, actor, workspace_id, memory_id, path, settings=runtime.settings.memory
+        runtime.storage, actor, workspace.workspace_id, memory_id, path, settings=runtime.settings.memory
     )
     return tagged(response, result)
 
 
-@router.put("/{memory_id}/files/{path:path}", response_model=MemoryFile)
+@router.put("/{memory_reference}/files/{path:path}", response_model=MemoryFile)
 async def replace_file(
     response: Response,
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     path: str,
     body: MemoryFileReplace,
     actor: Actor,
@@ -178,7 +196,7 @@ async def replace_file(
     result = await files.replace_file(
         runtime.storage,
         actor,
-        workspace_id,
+        workspace.workspace_id,
         memory_id,
         path,
         body,
@@ -188,25 +206,31 @@ async def replace_file(
     return tagged(response, result)
 
 
-@router.delete("/{memory_id}/files/{path:path}", status_code=204)
+@router.delete("/{memory_reference}/files/{path:path}", status_code=204)
 async def delete_file(
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     path: str,
     actor: Actor,
     runtime: CurrentRuntime,
     if_match: IfMatch = None,
 ) -> Response:
     await files.delete_file(
-        runtime.storage, actor, workspace_id, memory_id, path, if_match=if_match, settings=runtime.settings.memory
+        runtime.storage,
+        actor,
+        workspace.workspace_id,
+        memory_id,
+        path,
+        if_match=if_match,
+        settings=runtime.settings.memory,
     )
     return Response(status_code=204)
 
 
-@router.get("/{memory_id}/revisions", response_model=MemoryRevisionPage)
+@router.get("/{memory_reference}/revisions", response_model=MemoryRevisionPage)
 async def list_revisions(
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     actor: Actor,
     runtime: CurrentRuntime,
     path: Annotated[str | None, Query(max_length=1024)] = None,
@@ -215,36 +239,36 @@ async def list_revisions(
     cursor: str | None = None,
 ) -> MemoryRevisionPage:
     return await files.list_revisions(
-        runtime.storage, actor, workspace_id, memory_id, path=path, run_id=run_id, limit=limit, cursor=cursor
+        runtime.storage, actor, workspace.workspace_id, memory_id, path=path, run_id=run_id, limit=limit, cursor=cursor
     )
 
 
-@router.delete("/{memory_id}/revisions", response_model=HistoryPurge)
+@router.delete("/{memory_reference}/revisions", response_model=HistoryPurge)
 async def purge_history(
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     path: Annotated[str, Query(min_length=1, max_length=1024)],
     actor: Actor,
     runtime: CurrentRuntime,
 ) -> HistoryPurge:
     """Delete every retained revision of one file path."""
     return await files.purge_history(
-        runtime.storage, actor, workspace_id, memory_id, path, settings=runtime.settings.memory
+        runtime.storage, actor, workspace.workspace_id, memory_id, path, settings=runtime.settings.memory
     )
 
 
-@router.get("/{memory_id}/revisions/{seq}", response_model=MemoryRevisionDetail)
+@router.get("/{memory_reference}/revisions/{seq}", response_model=MemoryRevisionDetail)
 async def get_revision(
-    workspace_id: str, memory_id: str, seq: int, actor: Actor, runtime: CurrentRuntime
+    workspace: Workspace, memory_id: MemoryId, seq: int, actor: Actor, runtime: CurrentRuntime
 ) -> MemoryRevisionDetail:
-    return await files.get_revision(runtime.storage, actor, workspace_id, memory_id, seq)
+    return await files.get_revision(runtime.storage, actor, workspace.workspace_id, memory_id, seq)
 
 
-@router.post("/{memory_id}/revisions/{seq}/restore", response_model=MemoryFileState)
+@router.post("/{memory_reference}/revisions/{seq}/restore", response_model=MemoryFileState)
 async def restore_revision(
     response: Response,
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     seq: int,
     actor: Actor,
     runtime: CurrentRuntime,
@@ -252,56 +276,62 @@ async def restore_revision(
 ) -> MemoryFileState:
     """Set the path back to the content the change replaced; `If-Match` names the file there, if any."""
     result = await files.restore_revision(
-        runtime.storage, actor, workspace_id, memory_id, seq, if_match=if_match, settings=runtime.settings.memory
+        runtime.storage,
+        actor,
+        workspace.workspace_id,
+        memory_id,
+        seq,
+        if_match=if_match,
+        settings=runtime.settings.memory,
     )
     if result.file is not None:
         tagged(response, result.file)
     return result
 
 
-@router.get("/{memory_id}/records", response_model=MemoryRecordPage)
+@router.get("/{memory_reference}/records", response_model=MemoryRecordPage)
 async def list_records(
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     actor: Actor,
     runtime: CurrentRuntime,
     limit: PageLimit = 50,
     cursor: Annotated[str | None, Query(max_length=1024, description="The provider's own cursor")] = None,
 ) -> MemoryRecordPage:
-    return await records.list_records(runtime, actor, workspace_id, memory_id, limit=limit, cursor=cursor)
+    return await records.list_records(runtime, actor, workspace.workspace_id, memory_id, limit=limit, cursor=cursor)
 
 
-@router.post("/{memory_id}/records/search", response_model=MemoryRecordPage)
+@router.post("/{memory_reference}/records/search", response_model=MemoryRecordPage)
 async def search_records(
-    workspace_id: str, memory_id: str, body: MemoryRecordSearch, actor: Actor, runtime: CurrentRuntime
+    workspace: Workspace, memory_id: MemoryId, body: MemoryRecordSearch, actor: Actor, runtime: CurrentRuntime
 ) -> MemoryRecordPage:
     """The records most similar to the query; the query travels in the body, never the URL."""
-    return await records.search_records(runtime, actor, workspace_id, memory_id, body)
+    return await records.search_records(runtime, actor, workspace.workspace_id, memory_id, body)
 
 
-@router.post("/{memory_id}/records", response_model=MemoryRecordView, status_code=201)
+@router.post("/{memory_reference}/records", response_model=MemoryRecordView, status_code=201)
 async def add_record(
-    workspace_id: str, memory_id: str, body: MemoryRecordText, actor: Actor, runtime: CurrentRuntime
+    workspace: Workspace, memory_id: MemoryId, body: MemoryRecordText, actor: Actor, runtime: CurrentRuntime
 ) -> MemoryRecordView:
-    return await records.add_record(runtime, actor, workspace_id, memory_id, body)
+    return await records.add_record(runtime, actor, workspace.workspace_id, memory_id, body)
 
 
-@router.put("/{memory_id}/records/{record_id}", response_model=MemoryRecordView)
+@router.put("/{memory_reference}/records/{record_id}", response_model=MemoryRecordView)
 async def update_record(
-    workspace_id: str,
-    memory_id: str,
+    workspace: Workspace,
+    memory_id: MemoryId,
     record_id: RecordId,
     body: MemoryRecordText,
     actor: Actor,
     runtime: CurrentRuntime,
 ) -> MemoryRecordView:
     """Replace the record's text; records carry no version, so the last writer wins."""
-    return await records.update_record(runtime, actor, workspace_id, memory_id, record_id, body)
+    return await records.update_record(runtime, actor, workspace.workspace_id, memory_id, record_id, body)
 
 
-@router.delete("/{memory_id}/records/{record_id}", status_code=204)
+@router.delete("/{memory_reference}/records/{record_id}", status_code=204)
 async def delete_record(
-    workspace_id: str, memory_id: str, record_id: RecordId, actor: Actor, runtime: CurrentRuntime
+    workspace: Workspace, memory_id: MemoryId, record_id: RecordId, actor: Actor, runtime: CurrentRuntime
 ) -> Response:
-    await records.delete_record(runtime, actor, workspace_id, memory_id, record_id)
+    await records.delete_record(runtime, actor, workspace.workspace_id, memory_id, record_id)
     return Response(status_code=204)

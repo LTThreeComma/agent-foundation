@@ -12,7 +12,7 @@ import {
   credentialHint,
   providerKeyLink,
 } from "../providers";
-import { type ModelScope } from "./api";
+import type { ProviderScope } from "../providers/api";
 import {
   ProviderConnection,
   ordinaryConfigurationSchema,
@@ -94,7 +94,7 @@ export function ModelProviderCatalog({
 }
 
 /** Catalog-first provider creation, used for both workspace and organization. */
-export function AddProvider({ scope }: { scope: ModelScope }) {
+export function AddProvider({ scope }: { scope: ProviderScope }) {
   const [open, setOpen] = useState(false),
     [generation, setGeneration] = useState(0);
   const definitions = useModelProviderDefinitions();
@@ -120,7 +120,7 @@ function AddProviderCatalogDialog({
   open,
   onOpenChange,
 }: {
-  scope: ModelScope;
+  scope: ProviderScope;
   definitions?: Definition[];
   error: unknown;
   open: boolean;

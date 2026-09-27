@@ -134,24 +134,21 @@ export function TemplateConfig({
         },
       };
       if (basis)
-        return client.http
-          .PATCH(
-            "/api/v1/workspaces/{workspace_id}/environment-templates/{template_id}",
-            {
-              params: {
-                path: {
-                  workspace_id: basis.value.workspace_id,
-                  template_id: basis.value.id,
-                },
+        return client
+          .workspace(basis.value.workspace_id)
+          .PATCH("/api/v1/environment-templates/{template_reference}", {
+            params: {
+              path: {
+                template_reference: basis.value.id,
               },
-              headers: ifMatch(basis.etag),
-              body: templateConfig,
             },
-          )
+            headers: ifMatch(basis.etag),
+            body: templateConfig,
+          })
           .then(data);
-      return client.http
-        .POST("/api/v1/workspaces/{workspace_id}/environment-templates", {
-          params: { path: { workspace_id: scope.id } },
+      return client
+        .workspace(scope.id)
+        .POST("/api/v1/environment-templates", {
           body: {
             ...templateConfig,
             key,

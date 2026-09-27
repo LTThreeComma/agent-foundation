@@ -44,21 +44,24 @@ async def test_interrupt_cancels_a_running_run_once(stack) -> None:  # type: ign
 async def test_revoking_the_grant_stops_the_run(stack) -> None:  # type: ignore[no-untyped-def]
     api, model = stack.api, stack.model
     agent = await api.create_agent("helper", await api.create_model(model.base_url))
-    account = expect(await api.client.post(f"{api.path}/service-accounts", json={"name": "Runner"}), 201)
-    issued = await api.client.post(f"{api.path}/service-accounts/{account['id']}/keys", json={"name": "journey"})
+    account = expect(await api.client.post(f"{api.management}/service-accounts", json={"name": "Runner"}), 201)
+    issued = await api.client.post(f"{api.management}/service-accounts/{account['id']}/keys", json={"name": "journey"})
     await model.say("Never shown.", to="[revoke]", hold="never")
     async with stack.client(authorization=f"Bearer {expect(issued, 201)['secret']}") as runner:
         started = await runner.post(
             f"{api.path}/threads",
-            json={"agent_id": agent["id"], "payload": {"content": [{"type": "text", "text": "[revoke] Keep going"}]}},
+            json={
+                "agent": {"id": agent["id"]},
+                "payload": {"content": [{"type": "text", "text": "[revoke] Keep going"}]},
+            },
             headers={"idempotency-key": "revoke-1"},
         )
         run_id = expect(started, 201)["run"]["id"]
         await model.arrived("[revoke]", status="held")
 
-        grants = expect(await api.client.get(f"{api.path}/grants"), 200)["items"]
+        grants = expect(await api.client.get(f"{api.management}/grants"), 200)["items"]
         [grant] = [grant for grant in grants if grant["principal"]["id"] == account["id"]]
-        expect(await api.client.delete(f"{api.path}/grants/{grant['id']}"), 204)
+        expect(await api.client.delete(f"{api.management}/grants/{grant['id']}"), 204)
         run = await api.sealed(run_id)
         assert (run["status"], run["failure"]["code"]) == ("failed", "authority_revoked")
         assert (await runner.get(f"{api.path}/runs/{run_id}")).status_code in {401, 403}
@@ -69,7 +72,7 @@ async def test_an_approval_waits_and_resumes_once(stack) -> None:  # type: ignor
     api, model = stack.api, stack.model
     model_id = await api.create_model(model.base_url)
     agent = await api.create_agent("builder", model_id, **CONFIGURATION)
-    config = {"model": {"model_id": model_id}, "instructions": "Greet people."}
+    config = {"model": {"id": model_id}, "instructions": "Greet people."}
     await model.call(
         "create_agent", {"key": "greeter", "name": "Greeter", "config": config}, call_id="call_create", to="[build]"
     )
@@ -79,7 +82,7 @@ async def test_an_approval_waits_and_resumes_once(stack) -> None:  # type: ignor
     assert [(item["tool_call_id"], item["kind"]) for item in waiting["pending"]["items"]] == [
         ("call_create", "approval")
     ]
-    assert (await api.client.get(f"{api.path}/agents/greeter")).status_code == 404
+    assert (await api.client.get(f"{api.path}/agents/@greeter")).status_code == 404
 
     await model.say("Created the greeter.", to="[build]")
     approve = [{"tool_call_id": "call_create", "action": "approve"}]
@@ -92,7 +95,7 @@ async def test_an_approval_waits_and_resumes_once(stack) -> None:  # type: ignor
     done = await api.sealed(successor["id"])
     assert (done["status"], done["output"], done["trigger"]) == ("completed", "Created the greeter.", "resume")
     assert done["parent_run_id"] == waiting["id"]
-    assert expect(await api.client.get(f"{api.path}/agents/greeter"), 200)["name"] == "Greeter"
+    assert expect(await api.client.get(f"{api.path}/agents/@greeter"), 200)["name"] == "Greeter"
     # The wait is answered: it is no longer the thread's head, so another resume conflicts even with a new key.
     stale = await api.resume(waiting["id"], approve, key="approve-2")
     assert expect(stale, 409)["error"]["code"] == "conflict"

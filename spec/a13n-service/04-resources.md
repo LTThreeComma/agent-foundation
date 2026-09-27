@@ -22,10 +22,16 @@ Every mutable row has a `version` that the database advances on each change of a
 - An update that changes nothing keeps the version and records no audit event.
 - A resource row of an archived workspace refuses every verb but `read` with `disabled` (details `kind: workspace`), as the workspace itself does ([03](03-tenancy.md#authorization)). A connection's `revoke` is offboarding and stays allowed ([Connections](#connections)).
 - Every change records one audit event with action `<kind>.<verb>`, such as `agent.update`, `agent.revision.create`, `model_provider.update` or `connection.authorization.complete`, through the function [03](03-tenancy.md#audit) owns. An update's details name the changed `fields`, never values or credentials.
-- References are validated when written, and live references again when used. A failed check is `invalid_argument` naming the field path. A referenced row the caller cannot read is `not_found` and a disabled one is `disabled`, except inside an agent configuration, where a missing, disabled, archived or unusable reference is `invalid_argument` at its field with the referenced `kind` and `id`; a missing verb stays `forbidden`.
+- References are resolved at the input boundary, validated when written, and live references checked again when used. An explicit address missing from the selected workspace is `not_found`. After resolution, a referenced row the caller cannot read is `not_found` and a disabled one is `disabled`, except inside agent configuration validation, where a missing, disabled, archived or unusable ID is `invalid_argument` at its field with the referenced `kind` and `id`; a missing verb stays `forbidden`.
 - Retired rows stay readable. An archived head is listed with `archived_at` and refuses new runs, revisions and pins; a disabled provider resource, model, template or connection is listed and refuses new use. Disabling or removing a credential can fail later execution; it changes no recorded fact and no staged webhook delivery.
 - `labels` is a string map of at most 32 entries, keys and values at most 128 characters, on agents, skills and environment templates (and on sessions, threads and runs, [05](05-runs.md)). It is edited through the resource's own `PATCH`; lists filter with up to eight `?label=key:value` selectors, all of which must match.
 - Lists are cursor-paged in a stable order ([10](10-api.md#collections)).
+
+## Resource identity
+
+Agents, skills, models, memories, environment templates and secrets each have an immutable `key`, unique within that kind and workspace: `UNIQUE (workspace_id, key)`. Different kinds and different workspaces may use the same key. Disabling or archiving a resource retains its key. Only physical deletion releases a key, for kinds whose lifecycle permits deletion. A new resource using a released key always receives a new ID; IDs are never reused, and no historical reference moves to the new resource.
+
+Keys are client addresses. The [HTTP input boundary](10-api.md#paths-and-scope) resolves explicit references once, in the selected workspace, before handing canonical IDs to domain operations. Persisted configurations, queued entries, runs and worker inputs retain those IDs. Revisions pin their existing revision selections independently of this address resolution. ETags include both identity and version, so an old instance's ETag cannot change a replacement at the same key.
 
 ## Revisioned heads
 
@@ -49,7 +55,7 @@ Agents and skills share the head and revision shape and one set of helpers in `r
 - **Revisions.** A revision is immutable by trigger. `number` increments per head under the head's row lock. `config` is the complete validated configuration, and `digest` is the SHA-256 of its canonical JSON. The head's `version` orders every head mutation, publication included, through its ETag ([data conventions](../data-conventions.md#resource-revisions-and-concurrency)).
 - **Publication.** `POST …/revisions` takes the configuration, an optional `note` and `make_default` (default true) and requires `If-Match` on the head. A new revision changes the head's ETag whether or not it becomes the default, and is audited as `<kind>.revision.create` on the head with its `revision_id`. A configuration whose digest equals the head's current default creates nothing, whatever `make_default` says: the request answers 201 with that revision, and the head's version, ETag and audit trail stay unchanged. With `make_default: false`, any other digest creates a revision that is not the default.
 - **Default.** `set-default` (with `If-Match`) repoints the head at one of its revisions, audited as `<kind>.revision.set_default`; repointing at the current default changes nothing.
-- **Keys.** `key` is a URL-safe handle unique in the workspace. A custom agent's key may change; links that use the old key stop resolving, while runs and revisions refer to IDs. Path parameters accept an ID or a key, and an ID wins.
+- **Keys.** The [resource identity](#resource-identity) rules apply to both custom and built-in heads.
 - **Archive.** An archived head changes only by `unarchive`: metadata `PATCH`, new revisions and default changes are 409 `conflict` with reason `archived`. A new run naming an archived agent is `disabled`, and a configuration cannot newly pin an archived skill or subagent; a run's override keeps the pins its revision holds without that check.
 - **Lists.** Head lists filter by `label`, `q` (a case-insensitive substring of key, name or description, with `%` and `_` taken literally) and `archived` (true: only archived; false: only open; omitted: all). Revision lists are newest first.
 
@@ -61,11 +67,11 @@ agents            head columns + source  image NULL
 agent_revisions   revision columns; config: AgentConfig
 ```
 
-`AgentConfig` is the agent definition as the Service accepts it:
+`AgentConfig` is the canonical definition stored and returned by the Service. Public inputs use the explicit reference forms in [10](10-api.md#paths-and-scope); the following fields are the resolved representation:
 
 - `model`: `model_id`, native `settings` for the model's calling API and context `characteristics`.
 - `instructions`.
-- `toolsets`: the built-in toolsets `files`, `shell`, `web`, `memory`, `assets` and `configuration`, stored normalized against the catalogue `GET /workspaces/{ws}/toolsets` serves. Enabled web search and scrape name a web provider resource.
+- `toolsets`: the built-in toolsets `files`, `shell`, `web`, `memory`, `assets` and `configuration`, stored normalized against the catalogue `GET /toolsets` serves. Enabled web search and scrape name a web provider resource.
 - `skills`: `{skill_id, revision_id}` selections.
 - `connection_tools`: `{connection_id, tools, defer_loading, permission, permissions}` selections ([Connections](#connections)).
 - `client_tools`, whose results a client supplies through resume, and `user_questions`, which offers `ask_user_question`.
@@ -81,7 +87,7 @@ Tool permissions live on each selection and compile into one Harness tool-permis
 
 ### Validation
 
-Revision creation, `set-default`, duplication and `POST /agents/validate` apply one validation. It pins every skill and subagent edge whose `revision_id` is omitted to that head's current default, and it reports the first failure as `invalid_argument` with the field path relative to the configuration:
+Revision creation, `set-default`, duplication and `POST /agents/validate` apply one validation. After input references resolve (a missing or out-of-workspace reference is `not_found`), it pins every skill and subagent edge whose `revision_id` is omitted to that head's current default, and it reports the first failure as `invalid_argument` with the field path relative to the configuration:
 
 01. Rules the configuration obeys on its own: enabled web search and scrape name `provider_id`; client tool names do not collide with built-in tool names, and their parameter schemas are valid, self-contained JSON Schemas; the `review` permission requires a `reviewer`; an async agent's edges set only `usage_limits.request_limit`.
 02. The output schema compiles, and each plugin's installed factory accepts its configuration.
@@ -101,7 +107,7 @@ An author's references need `read`. A run's override (`options.overrides`, [05](
 - `POST /agents` `{key, name, description, labels, config}` creates the head and revision 1.
 - `POST /agents/validate` `{config, agent_id?}` needs `write`, applies revision validation and writes nothing: 204, or the same `invalid_argument`. `agent_id` names the agent the configuration would become a revision of, so the graph check sees cycles through it.
 - `GET /agents` filters by `label`, `q`, `archived`, `skill_id` and `skill_revision_id`.
-- `PATCH /agents/{agent}` changes `name`, `key`, `description` and `labels`.
+- `PATCH /agents/{agent}` changes `name`, `description` and `labels`.
 - `POST /agents/{agent}/archive` and `/unarchive` take `If-Match`.
 - `POST /agents/{agent}/duplicate` `{key, name, description, labels, revision_id?}` creates a custom head whose revision 1 copies one revision of an unarchived source, validated again. The avatar is not copied.
 - Revisions: `POST`, list, get, and `POST …/revisions/{rev}/set-default`, which validates the configuration again.
@@ -111,7 +117,7 @@ Export and import are Console features: the Console serializes one revision's co
 
 ### Agent Composer
 
-**Agent Composer** is an ordinary agent with key `agent-composer` and `source = 'builtin'`. `POST /workspaces/{ws}/agent-composer` (needs `write`) creates or refreshes it on demand and returns it:
+The Agent Composer is an ordinary agent with key `agent-composer` and `source = 'builtin'`. `POST /agent-composer` (needs `write`) creates or refreshes it on demand and returns it:
 
 - Its model is the one it already uses while that model stays usable, else the first model whose upstream name, after its last `/`, matches `composer.models` in preference order, else the workspace's first usable model by key. Without a usable model the call is 409 `model_required`. A custom agent holding the key makes the call 409 `key_in_use`.
 - A refresh synchronizes the deployment-owned name and description and appends a revision only when the configuration's digest changed. A preparation that changes neither metadata nor configuration leaves the head version unchanged and emits no update audit event.
@@ -161,30 +167,30 @@ memory_providers       (memprov_)
 - **Same-scope references.** Constraint triggers `models_provider_id_in_scope`, `environment_templates_provider_id_in_scope`, `connections_connector_provider_id_in_scope`, `environments_provider_id_in_scope` and `memories_provider_id_in_scope` refuse a row that references a provider of another organization, or of another workspace unless the provider is shared.
 - **Test.** `POST /{kind}-providers/{id}/test` needs `run`. It makes one non-billable probe of the current configuration outside any transaction, bounded by `providers.operation_seconds` and `providers.response_bytes`, and changes nothing. It returns `{provider_id, provider_version, status, message}` with status `succeeded`, `failed` or `unsupported`; the message is fixed text or the provider's classified code, never an upstream body. A model type is probed when its definition has a connection probe; a connector provider runs its own account test; a memory provider lists one page of a namespace no memory owns ([11](11-memory.md#memory-providers)); web types are `unsupported`. Of the environment types only Docker is probed, and its test only reads. A remote engine the account names passes the endpoint policy first ([08](08-providers.md#outbound-endpoint-policy)): a denied one fails with `provider_endpoint_denied` and a host that does not resolve with `provider_unavailable`, without being dialed; the engine then answers one ping. Nothing is pulled, created or started, and a failure reports only the provider's error code. Billable verification goes through a run and its admission checks, so a test never becomes an unmetered execution path.
 
-Environment providers serve [environment templates](#environment-templates) and the managed instances created from them ([06](06-environments.md)); an external envd target is no provider resource. Memory providers serve [record memories](11-memory.md#memory-providers), each owning one namespace of the provider's backend. A connector provider, such as Composio, is configured once per organization or workspace with the platform's API key as its credential; each [connection](#connections) through it binds one external account. `GET /workspaces/{ws}/connector-providers/{id}/apps` (`query`, `refresh`, cursor), `…/apps/{app}` and `…/apps/{app}/actions` read its app catalogue with the provider's credential and need `run`; app and action listings are cached for `providers.discovery_ttl` per provider version, and `refresh=true` reads the apps again.
+Environment providers serve [environment templates](#environment-templates) and the managed instances created from them ([06](06-environments.md)); an external envd target is no provider resource. Memory providers serve [record memories](11-memory.md#memory-providers), each owning one namespace of the provider's backend. A connector provider, such as Composio, is configured once per organization or workspace with the platform's API key as its credential; each [connection](#connections) through it binds one external account. `GET /connector-providers/{id}/apps` (`query`, `refresh`, cursor), `…/apps/{app}` and `…/apps/{app}/actions` read its app catalogue with the provider's credential and need `run`; app and action listings are cached for `providers.discovery_ttl` per provider version, and `refresh=true` reads the apps again.
 
 ## Models
 
 ```
 models   (mdl_)
-  id  organization_id  workspace_id NULL  provider_id  key  name  description  config  pricing NULL
+  id  organization_id  workspace_id  provider_id  key  name  description  config  pricing NULL
   catalog_ref NULL  enabled  version  created_by_id  updated_by_id  created_at  updated_at
-  UNIQUE (provider_id, key)
+  UNIQUE (workspace_id, key)
 ```
 
-A model is one upstream model served by one model provider, in the same organization collection as providers (`/organizations/{org}/models`).
+A model is one upstream model served by one model provider, owned exclusively by the selected workspace and managed through `/models`. Its provider may be shared by the organization or confined to that workspace. Creation takes no `workspace_id` field; the request context owns scope.
 
 - `config` holds `model_name`, `model_api`, `characteristics` (context window, modalities and understanding capabilities) and optional `max_tokens`, `temperature` and `top_p`. `model_api` must be one of the provider type's calling APIs (`invalid_argument` on `config.model_api`).
 - `pricing`, when present, prices the model's own calls, whatever `pricing.provider` and `pricing.model` name: they only record where the prices came from, such as the catalog channel and model ID they were copied from.
 - Creation takes `config` and optional `pricing`; clients seed both from the [model catalog](08-providers.md#model-catalog) and submit them whole.
 - `catalog_ref` `{provider, model}` optionally records the catalog model a model started from: a channel ID (`^[a-z0-9][a-z0-9_-]{0,127}$`) and a model ID of 1 to 256 characters. It is provenance for clients, checked for shape only and never resolved, so it may name a model the catalog no longer lists. `PATCH` replaces it when present and removes it with `null`.
 - `description` is optional (default empty), and a model may be created disabled.
-- A model spends its provider's credential: creating one or changing its `config` needs `write` on the provider, so models under a shared provider are configured by organization-scope grants. A workspace provider serves only models of its own workspace (`invalid_argument` on `workspace_id`); a disabled provider refuses new models (`disabled`); a duplicate key under the provider is `already_exists`.
+- A model spends its provider's credential: creating one or changing its `config` needs `write` on the provider, so models under a shared provider are configured by organization-scope grants. A workspace provider serves only models of its own workspace (`invalid_argument` on `provider_id`); a disabled provider refuses new models (`disabled`); a duplicate key in the workspace is `already_exists`.
 - A model the caller cannot read is `not_found`. Using a model at execution needs it and its provider enabled and usable under the run's authority.
 
 Execution selects every model of an agent graph by its model ID, and every call keeps that selection: the agents' own requests and their compaction, the tool reviewer and media understanding alike. Each model call is therefore admitted as, attributed to and priced by the model that selected it, even when another model of the graph names the same upstream model or the provider answers under another model name; its usage record carries the model and a price snapshot ([07](07-facts-and-delivery.md#usage-records)) and keeps the reported names only as information. A call that names no model of the graph is refused, failing the run with `model_call_unknown`.
 
-**Media-understanding defaults.** `GET` and `PUT /workspaces/{ws}/media-understanding-defaults` hold the workspace's image, video and audio models in `workspaces.settings.media`. `PUT` replaces all three, needs workspace `admin` and `If-Match` on the workspace version, and refuses a model that does not declare `{kind}_understanding`; it records `workspace.media.replace`. At execution an agent's own selection wins and must be usable; an unusable workspace default is skipped with a warning, leaving that media kind without understanding.
+**Media-understanding defaults.** `GET` and `PUT /media-understanding-defaults` hold the workspace's image, video and audio models in `workspaces.settings.media`. `PUT` replaces all three, needs workspace `admin` and `If-Match` on the workspace version, and refuses a model that does not declare `{kind}_understanding`; it records `workspace.media.replace`. At execution an agent's own selection wins and must be usable; an unusable workspace default is skipped with a warning, leaving that media kind without understanding.
 
 ## Environment templates
 
@@ -302,22 +308,22 @@ There is no per-connection allow list and no check against an agent revision, be
 
 ```
 secrets   (sec_)
-  id  organization_id  workspace_id  principal_id NULL  key  ciphertext
+  id  organization_id  workspace_id  key  ciphertext
   version  created_by_id  updated_by_id  created_at  updated_at
-  UNIQUE (workspace_id, COALESCE(principal_id, ''), key)
+  UNIQUE (workspace_id, key)
 ```
 
-A secret is an opaque value a caller stores and never reads back. `key` matches `^[A-Za-z_][A-Za-z0-9_]{0,127}$`, and the value is 1 to 16384 characters, encrypted for its row ([03](03-tenancy.md#credential-encryption)).
+A secret is a workspace-owned opaque value, with no personal scope or per-user value. `key` matches `^[A-Za-z_][A-Za-z0-9_]{0,127}$`, and the value is 1 to 16384 characters, encrypted for its row ([03](03-tenancy.md#credential-encryption)). Workspace `read` lists and reads metadata only; `write` creates, replaces and deletes a secret. Authorized execution uses the workspace's value under `run` authority. No API returns plaintext.
 
-- `scope: workspace` (`principal_id` null) serves every principal of the workspace; creating or changing one needs `write`.
-- `scope: user` is private to its creator: the owner needs `run` to change it, and nobody else sees it in lists or reads or may replace it. A workspace admin may delete another principal's private secret.
-- `PUT` replaces the value and `DELETE` deletes the row; both require `If-Match`. A duplicate key in the same scope is `already_exists`. Audit events carry the key and scope.
+`PUT` replaces the value and `DELETE` physically deletes the row; both require `If-Match`. Keys are immutable. A duplicate key in the workspace is `already_exists`. Audit events carry the key and never the value.
 
-An agent revision declares `secret_requirements: [{key, scope}]`. Before a run starts, every declared requirement of the run's agent graph must resolve, workspace secrets by key and user secrets by key among the run principal's own; a missing one fails the run naming the key. During execution a managed tool may use only the audiences its own agent node declares, so an inline subagent never borrows its parent's secrets. Each value is read fresh when the call is authorized, lives only in that call's credential lease and is cleared when the call ends; no value reaches the model, logs, errors, events or Harness state.
+Agent configuration input declares `secret_requirements: [{secret: {id}}]` or `[{secret: {key}}]`. Resolution stores `{secret_id, key}`: `secret_id` is the fixed identity, while `key` names the tool credential audience, never a later lookup address. Before a run starts, every declared ID of the agent graph must still exist; a missing one fails the run naming its ID. This check does not decrypt values.
+
+A managed tool may use only the audiences its own agent node declares, so an inline subagent never borrows its parent's secrets. Each value is fetched by its fixed ID and decrypted fresh when the call is authorized, lives only in that call's credential lease and is cleared when the call ends. Rotation affects subsequent calls. Deleting the secret makes subsequent uses of its ID fail, including after the key is reused. No value reaches the model, logs, errors, events or Harness state.
 
 ## Uploads and assets
 
-`POST /workspaces/{ws}/uploads` stages bytes: a multipart `file` with a required `Idempotency-Key`, needing `write`. Its size is at most the smaller of `objects.upload_bytes` and `objects.max_bytes`.
+`POST /uploads` stages bytes: a multipart `file` with a required `Idempotency-Key`, needing `write`. Its size is at most the smaller of `objects.upload_bytes` and `objects.max_bytes`.
 
 Stored bytes are never reclaimed, so each principal has one **upload budget** of `objects.upload_limit` requests per `objects.upload_window_seconds`, spent by every upload, every stored image ([03](03-tenancy.md#images)) and every [GitHub read](#skills); an exhausted budget is `rate_limited`.
 
@@ -343,7 +349,7 @@ subscriptions   (sub_)
   CHECK (kinds is a non-empty array)
 ```
 
-A subscription is a webhook. `kinds` lists the lifecycle kinds it wants, any of `run.accepted`, `run.running`, `run.waiting`, `run.completed`, `run.failed`, `run.cancelled`, `run_attempt.leased`, `run_attempt.running`, `run_attempt.succeeded`, `run_attempt.yielded`, `run_attempt.failed` and `run_attempt.cancelled`; `filter` optionally narrows by `agent_id`, `session_id` and `thread_id`.
+A subscription is a webhook. `kinds` lists the lifecycle kinds it wants, any of `run.accepted`, `run.running`, `run.waiting`, `run.completed`, `run.failed`, `run.cancelled`, `run_attempt.leased`, `run_attempt.running`, `run_attempt.succeeded`, `run_attempt.yielded`, `run_attempt.failed` and `run_attempt.cancelled`; `filter` optionally narrows by an `agent` reference (`{id}` or `{key}`), `session_id` and `thread_id`. The input boundary resolves the agent once; stored filters and read representations use `agent_id`, so key reuse cannot redirect an existing subscription.
 
 - Every operation needs workspace `admin`. A workspace holds at most `control.subscriptions` subscriptions; more are 409 `subscription_limit`.
 - `url` passes the endpoint policy when written.

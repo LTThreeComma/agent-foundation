@@ -11,7 +11,9 @@ const http = vi.hoisted(() => ({
   DELETE: vi.fn(),
   PATCH: vi.fn(),
 }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_test" },
@@ -83,9 +85,9 @@ it("preserves metadata drafts across avatar uploads and uses each returned ETag"
     "Draft name",
   );
   expect(http.PUT).toHaveBeenCalledWith(
-    "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/avatar",
+    "/api/v1/agents/{agent_reference}/avatar",
     {
-      params: { path: { workspace_id: "ws_test", agent_id: "ap_test" } },
+      params: { path: { agent_reference: "ap_test" } },
       headers: { "If-Match": '"initial"', "Content-Type": "image/png" },
       body: file,
     },
@@ -93,9 +95,9 @@ it("preserves metadata drafts across avatar uploads and uses each returned ETag"
   await user.click(screen.getByRole("button", { name: "Remove image" }));
   await waitFor(() => expect(onImageSaved).toHaveBeenCalledTimes(2));
   expect(http.DELETE).toHaveBeenCalledWith(
-    "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/avatar",
+    "/api/v1/agents/{agent_reference}/avatar",
     {
-      params: { path: { workspace_id: "ws_test", agent_id: "ap_test" } },
+      params: { path: { agent_reference: "ap_test" } },
       headers: { "If-Match": '"uploaded"' },
     },
   );
@@ -104,35 +106,24 @@ it("preserves metadata drafts across avatar uploads and uses each returned ETag"
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(http.PATCH).toHaveBeenCalledWith(
-      "/api/v1/workspaces/{workspace_id}/agents/{agent_id}",
+      "/api/v1/agents/{agent_reference}",
       {
-        params: { path: { workspace_id: "ws_test", agent_id: "ap_test" } },
+        params: { path: { agent_reference: "ap_test" } },
         headers: { "If-Match": '"removed"' },
-        body: { name: "Draft name", key: "research", description: "" },
+        body: { name: "Draft name", description: "" },
       },
     ),
   );
 });
 
-it("follows a changed key to the agent's new address", async () => {
-  http.PATCH.mockResolvedValue(
-    response({ ...agent, key: "deep-research" }, '"saved"'),
-  );
-  const close = vi.fn(),
-    reload = vi.fn();
-  const { user } = renderDetails(close, reload);
-  const key = screen.getByLabelText("URL key");
-  await user.clear(key);
-  await user.type(key, "deep-research");
-  await user.click(screen.getByRole("button", { name: "Save changes" }));
-  await waitFor(() => expect(close).toHaveBeenCalledOnce());
-  expect(http.PATCH.mock.calls[0]?.[1].body).toEqual({
-    name: "Research",
-    key: "deep-research",
-    description: "Finds sources",
-  });
+it("shows an immutable key while other metadata can change", async () => {
+  const { user } = renderDetails();
+  const key = screen.getByLabelText("Key");
+  expect(key.textContent).toContain("research");
+  await user.type(key, "renamed");
+  expect(key.textContent).toContain("research");
+  expect(http.PATCH).not.toHaveBeenCalled();
   expect(screen.getByLabelText("Current path").textContent).toBe(
-    "/workspace/test/agents/deep-research",
+    "/workspace/test/agents/research",
   );
-  expect(reload).not.toHaveBeenCalled();
 });

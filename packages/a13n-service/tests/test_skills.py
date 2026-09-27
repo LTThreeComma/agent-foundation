@@ -83,7 +83,7 @@ async def test_skill_revisions_and_package_content(service) -> None:  # type: ig
     assert (skill["key"], skill["name"]) == ("code-review", "code-review")
     assert skill["description"] == "Review a change for correctness."
     base = f"{service.workspace}/skills"
-    by_key = await service.client.get(f"{base}/code-review")
+    by_key = await service.client.get(f"{base}/@code-review")
     assert by_key.json()["id"] == skill["id"] and by_key.headers["etag"] == etag(skill)
 
     item = f"{base}/{skill['id']}"
@@ -497,13 +497,13 @@ async def test_skill_lists_filter_and_summarize_the_default_revision(service) ->
     }
 
 
-async def test_skill_ids_take_precedence_over_keys(service) -> None:  # type: ignore[no-untyped-def]
+async def test_skill_ids_and_keys_have_explicit_address_forms(service) -> None:  # type: ignore[no-untyped-def]
     first = await create(service, archive({"SKILL.md": DOCUMENT}), "first")
-    # A key may look like an ID; a reference naming an existing ID still resolves to that skill.
+    # An ID-shaped key is unambiguous when explicitly addressed as a key.
     shadow = await create(service, archive({"SKILL.md": DOCUMENT}), "shadow", key=first["id"])
     base = f"{service.workspace}/skills"
     assert (await service.client.get(f"{base}/{first['id']}")).json()["id"] == first["id"]
-    assert (await service.client.get(f"{base}/{shadow['id']}")).json()["key"] == first["id"]
+    assert (await service.client.get(f"{base}/@{first['id']}")).json()["id"] == shadow["id"]
 
 
 def with_declared(files: dict[str, bytes], change: str) -> bytes:
@@ -591,10 +591,11 @@ async def test_pins_and_the_agents_pinning_a_skill(service) -> None:  # type: ig
         assert response.status_code == 200, response.text
         return [item["id"] for item in response.json()["items"]]
 
-    assert await pinning(skill_id=skill["id"]) == [agent_id]
-    assert await pinning(skill_id=skill["id"], skill_revision_id=revision_id) == [agent_id]
+    assert await pinning(skill=skill["id"]) == [agent_id]
+    assert await pinning(skill=skill["id"], skill_revision_id=revision_id) == [agent_id]
     assert await pinning(skill_revision_id="skr_" + "0" * 24) == []
-    assert await pinning(skill_id="sk_" + "0" * 20) == []
+    missing = await service.client.get(f"{service.workspace}/agents", params={"skill": "sk_" + "0" * 20})
+    assert missing.status_code == 404
 
     # A new pin is refused at its field path.
     pin = SkillPin(skill_id=skill["id"], revision_id=revision_id)
@@ -634,8 +635,8 @@ async def _skilled_run(service, runs_kit, scripted_model, tmp_path) -> tuple[dic
     agent = await runs_kit.create_agent(
         service,
         scripted_model,
-        skills=[{"skill_id": skill["id"]}],
-        default_environment_template_id=template.json()["id"],
+        skills=[{"id": skill["id"]}],
+        default_environment_template={"id": template.json()["id"]},
     )
     run = (await runs_kit.start_thread(service, agent, "review it"))["run"]
     [mount] = run["environment_mounts"]

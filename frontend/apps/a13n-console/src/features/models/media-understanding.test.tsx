@@ -11,9 +11,17 @@ import { MediaUnderstandingFields } from "./media-understanding-fields";
 const state = vi.hoisted(() => ({
   admin: true,
   http: { GET: vi.fn(), PUT: vi.fn() },
+  workspace() {
+    return this.http;
+  },
 }));
 vi.mock("../../auth/context", () => ({
-  useClient: () => ({ http: state.http }),
+  useClient: () => ({
+    http: state.http,
+    workspace() {
+      return this.http;
+    },
+  }),
 }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
@@ -67,8 +75,7 @@ const models = [
     provider_id: "disabled",
   }),
 ];
-const defaultsPath =
-  "/api/v1/workspaces/{workspace_id}/media-understanding-defaults";
+const defaultsPath = "/api/v1/media-understanding-defaults";
 function setup(content = <MediaUnderstandingDefaults />) {
   const cache = new QueryClient({
     defaultOptions: {
@@ -130,9 +137,8 @@ it("offers only compatible enabled models and saves the whole selection on chang
   await user.click(vision);
   await waitFor(() =>
     expect(state.http.PUT).toHaveBeenCalledWith(defaultsPath, {
-      params: { path: { workspace_id: "ws_test" } },
       headers: { "If-Match": '"ws_test:0"' },
-      body: { image: "mdl_vision", video: null, audio: null },
+      body: { image: { id: "mdl_vision" }, video: null, audio: null },
     }),
   );
   await waitFor(() => expect(image.textContent).toContain("Vision"));

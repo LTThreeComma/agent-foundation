@@ -127,7 +127,7 @@ async def _model(
             select(ModelRow)
             .where(
                 ModelRow.organization_id == scope.organization_id,
-                ModelRow.workspace_id.is_(None) | (ModelRow.workspace_id == scope.workspace_id),
+                ModelRow.workspace_id == scope.workspace_id,
                 ModelRow.enabled,
             )
             .order_by(ModelRow.key, ModelRow.id)

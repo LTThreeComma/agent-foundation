@@ -8,17 +8,18 @@ import { useCursor } from "../../shared/collection";
 import { useResourceEditorState, useResourceRows } from "../../shared/dialogs";
 import { EditProviderDialog, ProviderTable } from "../providers";
 import { AddProvider } from "./add-provider";
-import { modelApi, type ModelScope } from "./api";
+import { modelProviderApi } from "./api";
+import type { ProviderScope } from "../providers/api";
 import { useModelProviderDefinitions } from "./provider-definitions";
 import { ProviderForm } from "./provider-form";
 
-export function Providers({ scope }: { scope: ModelScope }) {
+export function Providers({ scope }: { scope: ProviderScope }) {
   const client = useClient(),
     { organization, organizationCan, can } = useAccess(),
     page = useCursor();
   const rows = useResourceRows<Schema["Provider"]>();
   const { selected } = rows;
-  const api = modelApi(client, organization.id, scope);
+  const api = modelProviderApi(client, organization.id, scope);
   const query = useQuery({
     queryKey: ["model-providers", scope.kind, scope.id, page.cursor],
     queryFn: ({ signal }) => api.providers(signal, page.cursor),
@@ -87,7 +88,7 @@ export function EditProvider({
   onClose,
   finalFocus,
 }: {
-  scope: ModelScope;
+  scope: ProviderScope;
   provider: Schema["Provider"];
   controlledOpen?: boolean;
   onClose?: () => void;
@@ -97,7 +98,7 @@ export function EditProvider({
     { organization } = useAccess(),
     [generation, setGeneration] = useState(0);
   const state = useResourceEditorState({ controlledOpen, onClose, finalFocus });
-  const api = modelApi(client, organization.id, scope);
+  const api = modelProviderApi(client, organization.id, scope);
   const definitions = useModelProviderDefinitions();
   const resource = useQuery({
     queryKey: ["model-provider", scope.kind, scope.id, provider.id],

@@ -25,7 +25,7 @@ from a13n_service.providers.traces.langfuse import Langfuse
 from a13n_service.providers.traces.logfire import Logfire
 from a13n_service.runs import traces
 from a13n_service.runs.claim import claim, start
-from a13n_service.runs.schemas import NewThread
+from a13n_service.runs.commands import NewThreadInput
 from a13n_service.runs.submit import create_thread
 from a13n_service.settings import Telemetry
 from a13n_service.tenancy.authorize import BUILT_IN_ROLES, Grant, Principal
@@ -171,9 +171,8 @@ async def started_attempt(service: SimpleNamespace) -> tuple[str, str]:
     )
     model = await post(
         service,
-        f"{service.organization}/models",
+        f"{service.workspace}/models",
         {
-            "workspace_id": None,
             "provider_id": provider["id"],
             "key": "gpt",
             "name": "GPT",
@@ -183,10 +182,10 @@ async def started_attempt(service: SimpleNamespace) -> tuple[str, str]:
     agent = await post(
         service,
         f"{service.workspace}/agents",
-        {"key": "traced", "name": "Traced", "config": {"model": {"model_id": model["id"]}}},
+        {"key": "traced", "name": "Traced", "config": {"model": {"id": model["id"]}}},
     )
-    message = NewThread.model_validate(
-        {"payload": {"content": [{"type": "text", "text": "hi"}]}, "agent_id": agent["id"]}
+    message = NewThreadInput.model_validate(
+        {"payload": {"content": [{"type": "text", "text": "hi"}]}, "agent": {"id": agent["id"]}}
     )
     await create_thread(service.runtime, admin(service), service.tenant.workspace_id, message, request_key="trace-1")
     [lease] = await claim(service.runtime, worker_id="worker", worker_build="test", limit=1)

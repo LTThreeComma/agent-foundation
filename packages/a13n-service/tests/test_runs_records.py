@@ -32,7 +32,7 @@ async def facts(service: SimpleNamespace, *texts: str) -> dict[str, Any]:
 
 
 def mount(memory: dict[str, Any], access: str = "write", **fields: Any) -> dict[str, Any]:
-    return {"name": "facts", "memory_id": memory["id"], "access": access, **fields}
+    return {"name": "facts", "memory": {"id": memory["id"]}, "access": access, **fields}
 
 
 def memory_tools(request: dict[str, Any]) -> set[str]:
@@ -162,7 +162,7 @@ async def test_record_store_calls_recheck_the_run_and_the_provider(service) -> N
         organization_id=tenant.organization_id,
         workspace_id=tenant.workspace_id,
         principal_id=tenant.principal_id,
-        memory_mounts=[mount(memory)],
+        memory_mounts=[{"name": "facts", "memory_id": memory["id"], "access": "write"}],
     )
     async with short_session(service.runtime.storage) as session:
         planned = await resolve_memories(session, run)

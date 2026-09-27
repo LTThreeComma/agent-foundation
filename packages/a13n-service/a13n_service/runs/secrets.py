@@ -19,40 +19,32 @@ from a13n_harness.tools import (
 from a13n_harness.tools.metadata import HarnessToolMetadata
 
 from a13n_service.resources.secrets.schemas import SecretRequirement
-from a13n_service.resources.secrets.service import resolve_secrets
+from a13n_service.resources.secrets.service import required_secrets, resolve_secrets
 from a13n_service.runs.runtime import Runtime
 
 # Requirements by the definition ID of the agent node declaring them: the run's revision and inline children's.
 type Requirements = Mapping[str, Sequence[SecretRequirement]]
 
 
-async def require_secrets(runtime: Runtime, workspace_id: str, principal_id: str, requirements: Requirements) -> None:
-    """Fail before the run starts, with the missing key, when a declared secret is not set."""
-    declared = {(item.key, item.scope): item for items in requirements.values() for item in items}
-    await resolve_secrets(
-        runtime.storage,
-        runtime.keys,
-        workspace_id=workspace_id,
-        principal_id=principal_id,
-        requirements=list(declared.values()),
-    )
+async def require_secrets(runtime: Runtime, workspace_id: str, requirements: Requirements) -> None:
+    """Fail before the run starts, with the missing ID, when a declared secret is not set."""
+    declared = {item.secret_id: item for items in requirements.values() for item in items}
+    await required_secrets(runtime.storage, workspace_id, list(declared.values()))
 
 
 def secrets_policy(
-    runtime: Runtime, workspace_id: str, principal_id: str, root_revision_id: str, requirements: Requirements
+    runtime: Runtime, workspace_id: str, root_revision_id: str, requirements: Requirements
 ) -> InvocationPolicyCapability:
     """The run's invocation policy, for `RunBindings.capabilities`; inline children inherit it."""
-    broker = _Broker(runtime, workspace_id, principal_id, root_revision_id, requirements)
+    broker = _Broker(runtime, workspace_id, root_revision_id, requirements)
     # No automatic redispatch, as without a policy: a repeated provider call could repeat its effect and cost.
     return InvocationPolicyCapability(evaluator=broker, credential_broker=broker, max_dispatch_retries=0)
 
 
 class _Broker:
-    def __init__(
-        self, runtime: Runtime, workspace_id: str, principal_id: str, root_revision_id: str, requirements: Requirements
-    ):
+    def __init__(self, runtime: Runtime, workspace_id: str, root_revision_id: str, requirements: Requirements):
         self.runtime = runtime
-        self.workspace_id, self.principal_id, self.root = workspace_id, principal_id, root_revision_id
+        self.workspace_id, self.root = workspace_id, root_revision_id
         self.requirements = {node: {item.key: item for item in items} for node, items in requirements.items()}
 
     async def __call__(
@@ -71,7 +63,6 @@ class _Broker:
             self.runtime.storage,
             self.runtime.keys,
             workspace_id=self.workspace_id,
-            principal_id=self.principal_id,
             requirements=[requirement],
         )
         lease = CredentialLease(audience=audience, value=values[audience].get_secret_value())

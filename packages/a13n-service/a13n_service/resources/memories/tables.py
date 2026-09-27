@@ -20,7 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from a13n_service.infra.db import Base, Stamped, identity_guarded, rules
+from a13n_service.infra.db import Base, Stamped, identity_guarded, immutable_columns, rules
 from a13n_service.resources.providers.tables import provider_in_scope
 
 type MemoryKind = Literal["file", "record"]
@@ -46,7 +46,11 @@ class MemoryRow(Stamped, Base):
             name="provider",
         ),
         CheckConstraint("kind = 'file' OR always_load = '[]'::jsonb", name="always_load"),
-        rules(identity_guarded("memories"), *provider_in_scope("memories", "provider_id", "memory_providers")),
+        rules(
+            identity_guarded("memories"),
+            immutable_columns("memories", "key"),
+            *provider_in_scope("memories", "provider_id", "memory_providers"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))

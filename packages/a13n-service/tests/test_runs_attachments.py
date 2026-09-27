@@ -41,9 +41,8 @@ async def _model(service, scripted_model, *capabilities: str) -> str:  # type: i
         "characteristics": {"capabilities": list(capabilities)},
     }
     model = await service.client.post(
-        f"{service.organization}/models",
+        f"{service.workspace}/models",
         json={
-            "workspace_id": None,
             "provider_id": provider.json()["id"],
             "key": "scripted",
             "name": "S",
@@ -68,7 +67,7 @@ async def _asset(service, runs_kit, name: str, content_type: str, data: bytes) -
 
 def _message(agent: dict[str, Any], *parts: dict[str, Any], **fields: Any) -> dict[str, Any]:
     return {
-        "agent_id": agent["id"],
+        "agent": {"id": agent["id"]},
         "payload": {"content": [{"type": "text", "text": "see attached"}, *parts]},
         **fields,
     }
@@ -220,7 +219,7 @@ async def test_other_files_are_placed_in_the_primary_environment(
             "unpacker",
             await _model(service, scripted_model),
             toolsets={"configuration": {"enabled": True}},
-            default_environment_template_id=await _local_template(service, tmp_path),
+            default_environment_template={"id": await _local_template(service, tmp_path)},
         )
         # A name longer than a file name may be is cut to 200 UTF-8 bytes, keeping its extension.
         archive = await _asset(service, runs_kit, "报告" * 60 + ".zip", "application/zip", ARCHIVE)
@@ -291,7 +290,9 @@ async def test_acceptance_refuses_a_queued_file_its_run_could_not_read(
         await runs_kit.pause_sweeps(service)
         agent = await runs_kit.add_agent(service, "reader", await _model(service, scripted_model))
         template_id = await _local_template(service, tmp_path)
-        reserved = await service.client.post(f"{service.workspace}/environments", json={"template_id": template_id})
+        reserved = await service.client.post(
+            f"{service.workspace}/environments", json={"template": {"id": template_id}}
+        )
         assert reserved.status_code == 201, reserved.text
         mounts = [{"name": "workspace", "environment_id": reserved.json()["id"]}]
         started = await runs_kit.start_thread(service, agent, "first", environments=mounts)

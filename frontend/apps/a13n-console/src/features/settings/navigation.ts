@@ -163,12 +163,6 @@ const sections: Record<SettingsScope, SettingsSectionDefinition[]> = {
       icon: EnvelopeIcon,
     },
     {
-      value: "models",
-      label: "Models",
-      description: "Models available across your organization.",
-      icon: CubeIcon,
-    },
-    {
       value: "providers",
       label: "Providers",
       icon: SlidersIcon,

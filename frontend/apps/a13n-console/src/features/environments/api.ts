@@ -23,9 +23,10 @@ export function environmentTemplates(
   signal: AbortSignal,
   cursor?: string,
 ) {
-  return client.http
-    .GET("/api/v1/workspaces/{workspace_id}/environment-templates", {
-      params: { path: { workspace_id: workspaceId }, query: { cursor } },
+  return client
+    .workspace(workspaceId)
+    .GET("/api/v1/environment-templates", {
+      params: { query: { cursor } },
       signal,
     })
     .then(data);
@@ -38,11 +39,11 @@ export function environmentTemplates(
 export function createManagedEnvironment(
   client: Client,
   workspaceId: string,
-  body: Schema["ManagedEnvironmentCreate"],
+  body: Schema["ManagedEnvironmentInput"],
 ) {
-  return client.http
-    .POST("/api/v1/workspaces/{workspace_id}/environments", {
-      params: { path: { workspace_id: workspaceId } },
+  return client
+    .workspace(workspaceId)
+    .POST("/api/v1/environments", {
       body,
     })
     .then(data);
@@ -56,14 +57,12 @@ export function environmentQuery(
   return queryOptions({
     queryKey: ["environment", id],
     queryFn: ({ signal }) =>
-      client.http
-        .GET(
-          "/api/v1/workspaces/{workspace_id}/environments/{environment_id}",
-          {
-            params: { path: { workspace_id: workspaceId, environment_id: id } },
-            signal,
-          },
-        )
+      client
+        .workspace(workspaceId)
+        .GET("/api/v1/environments/{environment_id}", {
+          params: { path: { environment_id: id } },
+          signal,
+        })
         .then(representation),
   });
 }

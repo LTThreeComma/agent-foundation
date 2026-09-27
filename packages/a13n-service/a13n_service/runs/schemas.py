@@ -119,14 +119,14 @@ class UsageLimit(_Frozen):
     requests: int = Field(ge=1, le=10000)
 
 
-class RunOptions(_Frozen):
+class RunOptions[Override = AgentOverride](_Frozen):
     """What a message may choose for the run it starts. A steer joins a run with the defaults or equal options."""
 
     labels: Labels = Field(default_factory=dict)
     max_usage: UsageLimit | None = None
     # Changes to the revision's configuration for this run only. Submission validates them; acceptance freezes
     # them into the run's options with their pins resolved, validating them again in any later transaction.
-    overrides: AgentOverride | None = None
+    overrides: Override | None = None
 
     def digest(self) -> str:
         """What a steer's options must match: the options as submitted, since acceptance freezes the run's."""
@@ -151,28 +151,37 @@ type McpHeaders = Annotated[
 type InitialMounts = Annotated[tuple[MountCreate, ...], Field(max_length=MAX_MOUNTS)]
 
 
-class Message(_Frozen):
+class MessageFields(_Frozen):
     kind: Literal["message"] = "message"
     delivery: Delivery = "steer"
     payload: MessagePayload
-    agent_id: ObjectId
     agent_revision_id: ObjectId | None = None
+
+
+class Message(MessageFields):
+    agent_id: ObjectId
     options: RunOptions = Field(default_factory=RunOptions)
 
 
-class NewThread(Message):
+class NewThreadFields(_Frozen):
     session_id: ObjectId | None = None
     mcp_headers: McpHeaders = Field(default_factory=dict)
     environments: InitialMounts = ()
-    # Mounted with the checks of `POST .../threads/{thread}/memories` before the first run is accepted.
+
+
+class NewThread(Message, NewThreadFields):
+    # Mounted before the first run is accepted.
     memories: MemoryMounts = ()
 
 
-class Fork(Message):
+class ForkFields(_Frozen):
     # Leave out the origin thread's desired mounts, which a fork otherwise shares.
     fresh_environments: bool = False
     # Mounted in addition to the shared ones.
     environments: InitialMounts = ()
+
+
+class Fork(Message, ForkFields):
     # Mounted in addition to the origin thread's memory mounts, which a fork copies.
     memories: MemoryMounts = ()
 
@@ -182,13 +191,13 @@ class ThreadUpdate(_Frozen):
     mcp_headers: McpHeaders | None = None
 
 
-class EntryUpdate(_Frozen):
+class EntryUpdate[Options = RunOptions](_Frozen):
     """Pending entries only; the original request digest never changes."""
 
     delivery: Delivery | None = None
     payload: MessagePayload | None = None
     agent_revision_id: ObjectId | None = None
-    options: RunOptions | None = None
+    options: Options | None = None
 
 
 class InboxOrder(_Frozen):
@@ -314,12 +323,11 @@ class SessionUpdate(_Frozen):
     labels: Labels
 
 
-class SessionQuery(_Frozen):
+class SessionFilters(_Frozen):
     """One page of the session list and its filters. Agent, status and trigger match the session's latest run,
     the one its preview shows."""
 
     q: str | None = Field(default=None, max_length=72, description="A session or thread ID")
-    agent_id: str | None = Field(default=None, max_length=72)
     status: tuple[RunStatus, ...] = Field(default=(), max_length=6)
     trigger: tuple[Trigger, ...] = Field(default=(), max_length=5)
     updated_after: AwareDatetime | None = None
@@ -327,6 +335,10 @@ class SessionQuery(_Frozen):
     label: tuple[str, ...] = Field(default=(), max_length=8)
     limit: PageLimit = 50
     cursor: str | None = None
+
+
+class SessionQuery(SessionFilters):
+    agent_id: ObjectId | None = None
 
 
 class SessionPreview(BaseModel):

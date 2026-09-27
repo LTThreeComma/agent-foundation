@@ -54,7 +54,7 @@ const keys = [
 export function readSessionFilters(search: URLSearchParams): SessionFilters {
   return {
     q: search.get("q")?.trim() || undefined,
-    agent_id: search.get("agent_id") || undefined,
+    agent: search.get("agent_id") || undefined,
     status: known(search.getAll("status"), statuses),
     trigger: known(search.getAll("trigger"), triggers),
     updated_after: search.get("updated_after") || undefined,
@@ -88,10 +88,10 @@ export function SessionFilterBar({
     staleTime: 60_000,
     queryFn: ({ signal }) =>
       allPages((cursor) =>
-        client.http
-          .GET("/api/v1/workspaces/{workspace_id}/agents", {
+        client
+          .workspace(workspace.id)
+          .GET("/api/v1/agents", {
             params: {
-              path: { workspace_id: workspace.id },
               query: { cursor, limit: 100 },
             },
             signal,

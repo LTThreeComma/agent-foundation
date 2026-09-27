@@ -114,9 +114,9 @@ async def test_upload_bounds_and_workspace_binding(service) -> None:  # type: ig
     async with transaction(storage) as session:
         session.add(WorkspaceRow(id=other, organization_id=organization_id, key="other", name="Other"))
     elsewhere = await service.client.post(
-        f"/api/v1/workspaces/{other}/uploads",
+        "/api/v1/uploads",
         files={"file": ("a.txt", b"a", "text/plain")},
-        headers={"idempotency-key": "elsewhere"},
+        headers={"idempotency-key": "elsewhere", "X-Workspace-ID": other},
     )
     assert elsewhere.status_code == 200, elsewhere.text
     borrowed = await service.client.post(

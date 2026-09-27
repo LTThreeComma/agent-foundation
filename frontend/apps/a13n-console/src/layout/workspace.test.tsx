@@ -17,7 +17,12 @@ vi.mock("../auth/context", () => ({
       user: { value: { id: mocks.userId } },
     },
   }),
-  useClient: () => ({ http: { GET: mocks.GET } }),
+  useClient: () => ({
+    http: { GET: mocks.GET },
+    workspace() {
+      return this.http;
+    },
+  }),
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),

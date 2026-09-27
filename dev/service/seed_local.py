@@ -51,11 +51,11 @@ def seed_local(api: Api, org: str, ws: str, model_url: str, environments: Path) 
             "credential": {"api_key": "local-scripted"},
         },
     )
-    model = _model(api, org, provider, MODEL_KEY, "Local scripted model", ())
+    model = _model(api, ws, provider, MODEL_KEY, "Local scripted model", ())
     # A distinct upstream name: one run may resolve both models, and a shared name would be ambiguous.
-    media = _model(api, org, provider, "local-scripted-media", "Local scripted media model", (*MEDIA, "document"))
+    media = _model(api, ws, provider, "local-scripted-media", "Local scripted media model", (*MEDIA, "document"))
     defaults = api.get(f"{ws}/media-understanding-defaults")
-    api.put(f"{ws}/media-understanding-defaults", defaults, dict.fromkeys(MEDIA, media["id"]))
+    api.put(f"{ws}/media-understanding-defaults", defaults, {kind: {"id": media["id"]} for kind in MEDIA})
     local = api.post(
         f"{org}/environment-providers",
         {"workspace_id": None, "type": "local", "name": "Local directories (development)", "config": {}},
@@ -72,20 +72,22 @@ def seed_local(api: Api, org: str, ws: str, model_url: str, environments: Path) 
             "config": {"recipe": recipe},
         },
     )
-    environment = api.post(f"{ws}/environments", {"template_id": template["id"], "name": "Release review workspace"})
+    environment = api.post(
+        f"{ws}/environments", {"template": {"id": template["id"]}, "name": "Release review workspace"}
+    )
     return Local(model, media, template, environment)
 
 
-def _model(api: Api, org: str, provider: Json, key: str, name: str, understands: tuple[str, ...]) -> Json:
+def _model(api: Api, ws: str, provider: Json, key: str, name: str, understands: tuple[str, ...]) -> Json:
     characteristics = {"capabilities": [f"{kind}_understanding" for kind in understands]}
     config = {"model_name": key, "model_api": "openai.chat_completions", "characteristics": characteristics}
-    body = {"workspace_id": None, "provider_id": provider["id"], "key": key, "name": name, "config": config}
-    return api.post(f"{org}/models", {**body, "pricing": PRICING})
+    body = {"provider_id": provider["id"], "key": key, "name": name, "config": config}
+    return api.post(f"{ws}/models", {**body, "pricing": PRICING})
 
 
 def stopped_environment(api: Api, ws: str, template: Json) -> dict[str, str]:
     """A second instance, created and then stopped, so the lifecycle shows more than `ready`."""
-    reserved = api.post(f"{ws}/environments", {"template_id": template["id"], "name": "Sprint archive"})
+    reserved = api.post(f"{ws}/environments", {"template": {"id": template["id"]}, "name": "Sprint archive"})
     path = f"{ws}/environments/{reserved['id']}"
     api.post(f"{path}/stop", current=api.until(path, lambda environment: environment["status"] == "ready"))
     api.until(path, lambda environment: environment["status"] == "stopped")

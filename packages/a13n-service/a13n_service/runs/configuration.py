@@ -17,16 +17,24 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.toolsets import FunctionToolset
 
+from a13n_service.infra.db import short_session
 from a13n_service.infra.errors import ServiceError, invalid
 from a13n_service.infra.http import etag
 from a13n_service.resources.agents import service as agents
-from a13n_service.resources.agents.schemas import AgentConfig, AgentCreate, AgentRevisionCreate
+from a13n_service.resources.agents.inputs import AgentCreateInput, AgentRevisionCreateInput, ConfigInput
+from a13n_service.resources.agents.resolve_inputs import collect_config, config_ids, resolve_config
+from a13n_service.resources.agents.schemas import AgentCreate, AgentRevisionCreate
+from a13n_service.resources.agents.tables import AgentRow
 from a13n_service.resources.agents.toolsets import CONFIGURATION_TOOL_IDS
 from a13n_service.resources.connections import service as connections
 from a13n_service.resources.environment_templates import service as templates
+from a13n_service.resources.environment_templates.tables import EnvironmentTemplateRow
 from a13n_service.resources.models import service as models
+from a13n_service.resources.models.tables import ModelRow
 from a13n_service.resources.providers.service import rejection_reason
+from a13n_service.resources.references import IdReference, Reference, ReferenceBatch
 from a13n_service.resources.skills import service as skills
+from a13n_service.resources.skills.tables import SkillRow
 from a13n_service.runs.attempts import Lease
 from a13n_service.runs.runtime import Runtime
 from a13n_service.runs.tools import tool_failures
@@ -131,8 +139,7 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
                     page = await models.list_models(
                         storage,
                         actor,
-                        self.scope.organization_id,
-                        workspace_id=workspace_id,
+                        workspace_id,
                         limit=_PAGE,
                         cursor=cursor,
                     )
@@ -149,7 +156,7 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
     async def read_resource(
         self,
         kind: ResourceKind,
-        resource_id: Annotated[str, Field(min_length=1, max_length=128)],
+        resource: Reference,
         revision_id: Annotated[
             str | None, Field(min_length=1, max_length=128, description="An agent's revision to read, not its default")
         ] = None,
@@ -159,6 +166,22 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
         with self._acting("read"):
             if revision_id is not None and kind != "agent":
                 raise invalid("revision_id", "only an agent is read at a revision")
+            if kind == "connection":
+                if not isinstance(resource, IdReference):
+                    raise invalid("resource", "connections require an ID")
+                resource_id = resource.id
+            else:
+                table = {
+                    "agent": AgentRow,
+                    "model": ModelRow,
+                    "skill": SkillRow,
+                    "environment_template": EnvironmentTemplateRow,
+                }[kind]
+                batch = ReferenceBatch()
+                batch.add(table, resource)
+                async with short_session(storage) as session:
+                    await batch.resolve(session, workspace_id)
+                resource_id = batch.id(table, resource)
             match kind:
                 case "agent":
                     agent = await agents.get_agent(storage, actor, workspace_id, resource_id)
@@ -173,7 +196,7 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
                         "revision": None if revision is None else revision.model_dump(mode="json"),
                     }
                 case "model":
-                    view = await models.get_model(storage, actor, self.scope.organization_id, resource_id)
+                    view = await models.get_model(storage, actor, workspace_id, resource_id)
                 case "skill":
                     view = await skills.get_skill(storage, actor, workspace_id, resource_id)
                 case "connection":
@@ -187,7 +210,7 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
             catalog = await agents.toolset_catalog(
                 self.runtime.storage, self.principal, self.scope.workspace_id, registry=self.runtime.registry
             )
-        return {"schema": AgentConfig.model_json_schema(), "toolsets": catalog.model_dump(mode="json")}
+        return {"schema": ConfigInput.model_json_schema(), "toolsets": catalog.model_dump(mode="json")}
 
     async def create_agent(
         self,
@@ -197,12 +220,15 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
         description: Annotated[str, Field(max_length=2048)] = "",
     ) -> JsonValue:
         with self._acting("write"):
-            body = _parsed(AgentCreate, {"key": key, "name": name, "description": description, "config": config})
+            body = _parsed(AgentCreateInput, {"key": key, "name": name, "description": description, "config": config})
+            async with short_session(self.runtime.storage) as session:
+                selected = await resolve_config(session, self.scope.workspace_id, body.config)
+            command = AgentCreate(**body.model_dump(exclude={"config"}), config=selected)
             agent = await agents.create_agent(
                 self.runtime.storage,
                 self.principal,
                 self.scope.workspace_id,
-                body,
+                command,
                 registry=self.runtime.registry,
                 plugins=self.runtime.plugins,
             )
@@ -210,27 +236,35 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
 
     async def create_agent_revision(
         self,
-        agent_id: Annotated[str, Field(min_length=1, max_length=128)],
+        agent: Reference,
         config: Annotated[dict[str, JsonValue], Field(description="The whole new configuration, not a patch")],
         note: Annotated[str | None, Field(max_length=2048)] = None,
         make_default: bool = True,
     ) -> JsonValue:
         storage, workspace_id = self.runtime.storage, self.scope.workspace_id
         with self._acting("write"):
-            body = _parsed(AgentRevisionCreate, {"config": config, "note": note, "make_default": make_default})
+            body = _parsed(AgentRevisionCreateInput, {"config": config, "note": note, "make_default": make_default})
+            batch = ReferenceBatch()
+            batch.add(AgentRow, agent)
+            collect_config(batch, body.config)
+            async with short_session(storage) as session:
+                await batch.resolve(session, workspace_id)
+            selected = config_ids(batch, body.config)
+            command = AgentRevisionCreate(**body.model_dump(exclude={"config"}), config=selected)
+            agent_id = batch.id(AgentRow, agent)
             # Revisions are immutable and appended, so the head's current version is the one to extend.
-            agent = await agents.get_agent(storage, self.principal, workspace_id, agent_id)
+            head = await agents.get_agent(storage, self.principal, workspace_id, agent_id)
             revision = await agents.create_revision(
                 storage,
                 self.principal,
                 workspace_id,
-                agent.id,
-                body,
-                if_match=etag(agent.id, agent.version),
+                head.id,
+                command,
+                if_match=etag(head.id, head.version),
                 registry=self.runtime.registry,
                 plugins=self.runtime.plugins,
             )
-        return {"agent_id": agent.id, "revision_id": revision.id, "number": revision.number}
+        return {"agent_id": head.id, "revision_id": revision.id, "number": revision.number}
 
     @contextmanager
     def _acting(self, verb: Verb) -> Iterator[None]:

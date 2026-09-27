@@ -7,7 +7,9 @@ import { RunOptions } from "./option-chips";
 import { useRunOptions } from "./options-dialog";
 
 const http = vi.hoisted(() => ({ GET: vi.fn() }));
-vi.mock("../../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("../../../layout/workspace", () => ({
   useWorkspace: () => ({
     organization: { id: "org_test" },
@@ -92,7 +94,7 @@ it("distinguishes new allocation from reuse and submits the selected identity", 
   ).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Submit" }));
   expect(submit).toHaveBeenLastCalledWith(
-    expect.objectContaining({ environment: { template_id: "envt_test" } }),
+    expect.objectContaining({ environment: { template: { id: "envt_test" } } }),
   );
   await user.click(screen.getByRole("button", { name: "Options" }));
   await user.click(screen.getByRole("combobox", { name: "Environment" }));
@@ -214,7 +216,7 @@ it("overrides media understanding per kind and names the choice on its chip", as
   expect(submit.mock.lastCall?.[0].options).toEqual({
     overrides: {
       media_understanding: {
-        image: "mdl_0123456789abcdef0123",
+        image: { id: "mdl_0123456789abcdef0123" },
         video: null,
         audio: null,
       },
@@ -271,7 +273,7 @@ it("sends the chosen model and instructions as the run's overrides", async () =>
   expect(submit.mock.lastCall?.[0]).toEqual({
     options: {
       overrides: {
-        model: { model_id: "mdl_0123456789abcdef0123" },
+        model: { id: "mdl_0123456789abcdef0123" },
         instructions: "Answer briefly.",
       },
     },
@@ -325,7 +327,7 @@ it("mounts initial memories on the new thread and changes their access before se
   expect(submit).toHaveBeenLastCalledWith(
     expect.objectContaining({
       memories: [
-        { name: "user-prefs", memory_id: "mem_prefs", access: "read" },
+        { name: "user-prefs", memory: { id: "mem_prefs" }, access: "read" },
       ],
     }),
   );

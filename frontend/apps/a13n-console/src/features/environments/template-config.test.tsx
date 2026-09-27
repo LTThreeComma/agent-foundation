@@ -14,6 +14,9 @@ const state = vi.hoisted(() => ({
 vi.mock("../../auth/context", () => ({
   useClient: () => ({
     http: { GET: state.GET, POST: state.POST, PATCH: state.PATCH },
+    workspace() {
+      return this.http;
+    },
   }),
 }));
 vi.mock("../../layout/workspace", () => ({
@@ -193,23 +196,19 @@ it("creates an E2B template configuration from ordinary fields without a schema-
   ).toBeNull();
   await user.click(screen.getByRole("button", { name: "Create template" }));
   await waitFor(() =>
-    expect(state.POST).toHaveBeenCalledWith(
-      "/api/v1/workspaces/{workspace_id}/environment-templates",
-      {
-        params: { path: { workspace_id: "ws_test" } },
-        body: {
-          key: "project",
-          name: "Project template",
-          description: null,
-          provider_id: "eprov_e2b",
-          config: {
-            recipe: { template: "my-template" },
-            stop_after_seconds: null,
-            delete_after_seconds: null,
-          },
+    expect(state.POST).toHaveBeenCalledWith("/api/v1/environment-templates", {
+      body: {
+        key: "project",
+        name: "Project template",
+        description: null,
+        provider_id: "eprov_e2b",
+        config: {
+          recipe: { template: "my-template" },
+          stop_after_seconds: null,
+          delete_after_seconds: null,
         },
       },
-    ),
+    }),
   );
 });
 
@@ -397,10 +396,10 @@ it("saves an existing template's recipe and idle policy against its ETag", async
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(state.PATCH).toHaveBeenCalledWith(
-      "/api/v1/workspaces/{workspace_id}/environment-templates/{template_id}",
+      "/api/v1/environment-templates/{template_reference}",
       {
         params: {
-          path: { workspace_id: "ws_test", template_id: "envtpl_test" },
+          path: { template_reference: "envtpl_test" },
         },
         headers: { "If-Match": '"envtpl_test:4"' },
         body: {

@@ -55,7 +55,7 @@ it("sends a pending message again with the options it was accepted with", () => 
     }),
   ).toEqual({
     payload: textInput("Run the checks"),
-    agent_id: "agt_1",
+    agent: { id: "agt_1" },
     agent_revision_id: null,
     delivery: "next_run",
     options,

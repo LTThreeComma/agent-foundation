@@ -5,7 +5,7 @@ import {
   validateAgentConfig,
 } from "../../shared/forms/validation";
 
-export type AgentConfig = Schema["AgentConfig-Input"];
+export type AgentConfig = Schema["AgentConfig"];
 const commonFields = new Set([
   "toolsets",
   "model",

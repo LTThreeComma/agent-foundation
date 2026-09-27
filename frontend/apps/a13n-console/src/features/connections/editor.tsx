@@ -60,10 +60,11 @@ export function ConnectionDetails({
   const query = useQuery({
     queryKey: ["connections", workspace.id, connectionId],
     queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/connections/{connection_id}", {
+      client
+        .workspace(workspace.id)
+        .GET("/api/v1/connections/{connection_id}", {
           params: {
-            path: { workspace_id: workspace.id, connection_id: connectionId },
+            path: { connection_id: connectionId },
           },
           signal,
         })
@@ -231,10 +232,12 @@ function ConnectionMenu({
           }
           action={async () => {
             data(
-              await client.http.PATCH(
-                "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
-                { ...request, body: { enabled: !connection.enabled } },
-              ),
+              await client
+                .workspace(connection.workspace_id)
+                .PATCH("/api/v1/connections/{connection_id}", {
+                  ...request,
+                  body: { enabled: !connection.enabled },
+                }),
             );
             done();
           }}
@@ -257,10 +260,12 @@ function ConnectionMenu({
               danger
               action={async () => {
                 const revoked = data(
-                  await client.http.POST(
-                    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/revoke",
-                    request,
-                  ),
+                  await client
+                    .workspace(connection.workspace_id)
+                    .POST(
+                      "/api/v1/connections/{connection_id}/revoke",
+                      request,
+                    ),
                 );
                 onCleanup(revokeCleanup(revoked));
                 done();
@@ -288,15 +293,13 @@ function ConnectionSettings({
     [name, setName] = useState(connection.name);
   const save = useMutation({
     mutationFn: () =>
-      client.http
-        .PATCH(
-          "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
-          {
-            params: { path: connectionPath(connection) },
-            headers: ifMatch(rowTag(connection)),
-            body: { name },
-          },
-        )
+      client
+        .workspace(connection.workspace_id)
+        .PATCH("/api/v1/connections/{connection_id}", {
+          params: { path: connectionPath(connection) },
+          headers: ifMatch(rowTag(connection)),
+          body: { name },
+        })
         .then(data),
     onSuccess: async () => {
       void cache.invalidateQueries({ queryKey: ["connections"] });

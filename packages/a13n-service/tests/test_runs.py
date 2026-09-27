@@ -286,9 +286,9 @@ async def test_a_run_whose_principal_lost_authority_before_its_attempt_fails_as_
 
 
 async def _archive(service) -> None:  # type: ignore[no-untyped-def]
-    workspace = await service.client.get(service.workspace)
+    workspace = await service.client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")
     archived = await service.client.post(
-        f"{service.workspace}/archive", headers={"if-match": workspace.headers["etag"]}
+        f"/api/v1/workspaces/{service.tenant.workspace_id}/archive", headers={"if-match": workspace.headers["etag"]}
     )
     assert archived.status_code == 200, archived.text
 
@@ -430,19 +430,19 @@ async def test_the_agent_composer_creates_an_agent_once_approved(executing, scri
     assert again["default_revision_id"] == composer["default_revision_id"]
     edited = await executing.client.post(
         f"{executing.workspace}/agents/{composer['id']}/revisions",
-        json={"config": {"model": {"model_id": model_id}}},
+        json={"config": {"model": {"id": model_id}}},
         headers={"if-match": f'"{composer["id"]}:{composer["version"]}"'},
     )
     assert edited.status_code == 409 and edited.json()["error"]["details"]["reason"] == "builtin"
 
     scripted_model.call("find_resources", {"kind": "model"}, call_id="call_find")
-    config = {"model": {"model_id": model_id}, "instructions": "Greet people."}
+    config = {"model": {"id": model_id}, "instructions": "Greet people."}
     scripted_model.call("create_agent", {"key": "greeter", "name": "Greeter", "config": config}, call_id="call_create")
     waiting = await runs_kit.sealed(
         executing, (await runs_kit.start_thread(executing, composer, "make a greeter"))["run"]["id"]
     )
     assert waiting["status"] == "waiting" and waiting["wait_reason"] == "approval", waiting
-    assert (await executing.client.get(f"{executing.workspace}/agents/greeter")).status_code == 404
+    assert (await executing.client.get(f"{executing.workspace}/agents/@greeter")).status_code == 404
 
     scripted_model.say("Created the greeter")
     approve = {"answers": [{"tool_call_id": "call_create", "action": "approve"}]}
@@ -451,9 +451,9 @@ async def test_the_agent_composer_creates_an_agent_once_approved(executing, scri
     )
     assert resumed.status_code == 201, resumed.text
     assert (await runs_kit.sealed(executing, resumed.json()["id"]))["status"] == "completed"
-    greeter = await executing.client.get(f"{executing.workspace}/agents/greeter")
+    greeter = await executing.client.get(f"{executing.workspace}/agents/@greeter")
     assert greeter.status_code == 200, greeter.text
-    revision = f"{executing.workspace}/agents/greeter/revisions/{greeter.json()['default_revision_id']}"
+    revision = f"{executing.workspace}/agents/@greeter/revisions/{greeter.json()['default_revision_id']}"
     # Created with the authority of the user whose message started the run.
     assert (await executing.client.get(revision)).json()["created_by_id"] == executing.tenant.principal_id
     requests = [await scripted_model.request() for _ in range(3)]
@@ -464,7 +464,7 @@ async def test_the_agent_composer_creates_an_agent_once_approved(executing, scri
 async def test_the_agent_composer_reads_where_its_arguments_do_not_fit(executing, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
     model_id = await runs_kit.create_model(executing, scripted_model)
     composer = (await executing.client.post(f"{executing.workspace}/agent-composer")).json()
-    config = {"model": {"model_id": model_id}, "instructions": "Greet people."}
+    config = {"model": {"id": model_id}, "instructions": "Greet people."}
     scripted_model.call("create_agent", {"key": "Bad Key", "name": "Greeter", "config": config}, call_id="call_create")
     waiting = await runs_kit.sealed(
         executing, (await runs_kit.start_thread(executing, composer, "make a greeter"))["run"]["id"]
@@ -489,15 +489,15 @@ async def test_the_agent_composer_reads_the_revision_it_starts_from(executing, s
     target = await runs_kit.add_agent(executing, "research", model_id, instructions="Version one.")
     newer = await executing.client.post(
         f"{executing.workspace}/agents/{target['id']}/revisions",
-        json={"config": {"model": {"model_id": model_id}, "instructions": "Version two."}},
+        json={"config": {"model": {"id": model_id}, "instructions": "Version two."}},
         headers=runs_kit.if_match(target),
     )
     assert newer.status_code == 201, newer.text
     composer = (await executing.client.post(f"{executing.workspace}/agent-composer")).json()
 
-    older = {"kind": "agent", "resource_id": target["id"], "revision_id": target["default_revision_id"]}
+    older = {"kind": "agent", "resource": {"id": target["id"]}, "revision_id": target["default_revision_id"]}
     scripted_model.call("read_resource", older, call_id="call_read")
-    scripted_model.call("read_resource", {**older, "kind": "model", "resource_id": model_id}, call_id="call_model")
+    scripted_model.call("read_resource", {**older, "kind": "model", "resource": {"id": model_id}}, call_id="call_model")
     scripted_model.say("Read it")
     started = await runs_kit.start_thread(executing, composer, "change research from version 1")
     assert (await runs_kit.sealed(executing, started["run"]["id"]))["status"] == "completed"
@@ -519,10 +519,9 @@ async def test_the_agent_composer_follows_the_usable_models(service, scripted_mo
 
     # Disabling the model it runs on moves it to another usable model with a new revision.
     second = await service.client.post(
-        f"{service.organization}/models",
+        f"{service.workspace}/models",
         json={
-            "workspace_id": None,
-            "provider_id": (await service.client.get(f"{service.organization}/models/{first}")).json()["provider_id"],
+            "provider_id": (await service.client.get(f"{service.workspace}/models/{first}")).json()["provider_id"],
             "key": "backup",
             "name": "Backup",
             "config": {"model_name": "vendor/claude-sonnet-5", "model_api": "openai.chat_completions"},
@@ -530,9 +529,9 @@ async def test_the_agent_composer_follows_the_usable_models(service, scripted_mo
     )
     assert second.status_code == 201, second.text
     assert (await service.client.post(prepare)).json()["default_revision_id"] == composer["default_revision_id"]
-    model = (await service.client.get(f"{service.organization}/models/{first}")).json()
+    model = (await service.client.get(f"{service.workspace}/models/{first}")).json()
     disabled = await service.client.patch(
-        f"{service.organization}/models/{first}",
+        f"{service.workspace}/models/{first}",
         json={"enabled": False},
         headers={"if-match": f'"{model["id"]}:{model["version"]}"'},
     )

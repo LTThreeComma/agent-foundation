@@ -17,7 +17,14 @@ const mocks = vi.hoisted(() => ({
   thread: {} as Schema["ThreadView"],
   mounts: [] as Schema["MemoryMount"][],
 }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http: mocks }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({
+    http: mocks,
+    workspace() {
+      return this.http;
+    },
+  }),
+}));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_test" },
@@ -112,11 +119,11 @@ it("adds a memory to the Thread it was read with", async () => {
   await user.click(within(dialog).getByRole("button", { name: "Add memory" }));
   await waitFor(() => expect(mocks.POST).toHaveBeenCalledOnce());
   expect(mocks.POST.mock.calls[0]).toEqual([
-    "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/memories",
+    "/api/v1/threads/{thread_id}/memories",
     {
-      params: { path: { workspace_id: "ws_test", thread_id: "thr_1" } },
+      params: { path: { thread_id: "thr_1" } },
       headers: { "If-Match": '"thr_1:4"' },
-      body: { name: "prefs", memory_id: "mem_prefs", access: "write" },
+      body: { name: "prefs", memory: { id: "mem_prefs" }, access: "write" },
     },
   ]);
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -135,7 +142,7 @@ it("adds a record memory without recall", async () => {
   await waitFor(() => expect(mocks.POST).toHaveBeenCalledOnce());
   expect(mocks.POST.mock.calls[0]?.[1].body).toEqual({
     name: "team",
-    memory_id: "mem_team",
+    memory: { id: "mem_team" },
     access: "write",
     recall: false,
   });
@@ -155,10 +162,10 @@ it("changes a mount's recall and access in place under the Thread's ETag", async
   );
   await waitFor(() => expect(mocks.PATCH).toHaveBeenCalledOnce());
   expect(mocks.PATCH.mock.calls[0]).toEqual([
-    "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/memories/{name}",
+    "/api/v1/threads/{thread_id}/memories/{name}",
     {
       params: {
-        path: { workspace_id: "ws_test", thread_id: "thr_1", name: "facts" },
+        path: { thread_id: "thr_1", name: "facts" },
       },
       headers: { "If-Match": '"thr_1:4"' },
       body: { recall: false },
@@ -181,10 +188,10 @@ it("removes a mount under the Thread's ETag", async () => {
   );
   await waitFor(() => expect(mocks.DELETE).toHaveBeenCalledOnce());
   expect(mocks.DELETE.mock.calls[0]).toEqual([
-    "/api/v1/workspaces/{workspace_id}/threads/{thread_id}/memories/{name}",
+    "/api/v1/threads/{thread_id}/memories/{name}",
     {
       params: {
-        path: { workspace_id: "ws_test", thread_id: "thr_1", name: "handbook" },
+        path: { thread_id: "thr_1", name: "handbook" },
       },
       headers: { "If-Match": '"thr_1:4"' },
     },

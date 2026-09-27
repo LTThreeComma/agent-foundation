@@ -33,6 +33,8 @@ from a13n_service.tenancy.authorize import BUILT_IN_ROLES, Grant, Principal
 from a13n_service.tenancy.tables import GrantRow, PrincipalRow
 from sqlalchemy import select
 
+from .conftest import create_agent
+
 pytestmark = pytest.mark.anyio
 
 SECRET = "whsec_test_signing_secret_value"
@@ -271,13 +273,20 @@ async def webhook_rows(service: SimpleNamespace) -> list[OutboxRow]:
         return list(await session.scalars(select(OutboxRow).where(OutboxRow.kind == "webhook").order_by(OutboxRow.id)))
 
 
-async def test_staging_selects_matching_subscriptions_and_binds_each_secret(service: SimpleNamespace) -> None:
+async def test_staging_selects_matching_subscriptions_and_binds_each_secret(
+    service: SimpleNamespace, scripted_model
+) -> None:
     runtime, url = service.runtime, "http://127.0.0.1:9/hook"
-    run = RunFacts(service.tenant.workspace_id, new_object_id("ap"), new_object_id("ses"), new_object_id("thr"))
+    agent = await create_agent(service, scripted_model)
+    run = RunFacts(service.tenant.workspace_id, agent["id"], new_object_id("ses"), new_object_id("thr"))
     every = await subscribe(service, url, ["run.accepted", "run.completed"])
     narrow = await subscribe(
-        service, url, ["run.completed", "run.failed"], filter={"agent_id": run.agent_id, "thread_id": run.thread_id}
+        service,
+        url,
+        ["run.completed", "run.failed"],
+        filter={"agent": {"key": agent["key"]}, "thread_id": run.thread_id},
     )
+    assert narrow["filter"]["agent_id"] == run.agent_id
     await subscribe(service, url, ["run.failed"])
     await subscribe(service, url, ["run.completed"], filter={"thread_id": new_object_id("thr")})
     await subscribe(service, url, ["run.completed"], filter={"session_id": new_object_id("ses")})

@@ -24,9 +24,10 @@ ATTACHMENT = re.compile(r'Attachment "(.+?)" \(')
 
 
 def verify(api: Api, seeded: Seeded) -> list[Check]:
-    org, ws, index = seeded.organization, seeded.workspace, seeded.index
+    org, ws, index = seeded.organization, "/api/v1", seeded.index
+    api = api.workspace(seeded.workspace)
     return [
-        *_identity(api, org, ws, index),
+        *_identity(api, org, f"/api/v1/workspaces/{seeded.workspace}", index),
         *_providers(api, org, ws),
         *_resources(api, org, ws, index),
         *_execution(api, ws, index),
@@ -61,7 +62,7 @@ def _identity(api: Api, org: str, ws: str, index: dict[str, str]) -> Iterator[Ch
         "Workspaces: this one, an empty one and an archived one",
         len(workspaces) == 3
         and workspaces[index["archived_workspace"]]["archived_at"] is not None
-        and not api.items(f"/api/v1/workspaces/{index['empty_workspace']}/agents"),
+        and not api.workspace(index["empty_workspace"]).items("/api/v1/agents"),
     )
     yield (
         "The organization, workspace and administrator have images",
@@ -74,7 +75,7 @@ def _providers(api: Api, org: str, ws: str) -> Iterator[Check]:
         offered = {item["type"] for item in api.items(f"/api/v1/provider-types/{kind}")}
         accounts = {item["type"] for item in api.items(f"{org}/{kind}-providers")}
         yield f"Every {kind} provider type has an account", offered <= accounts
-    models = {model["key"]: model for model in api.items(f"{org}/models")}
+    models = {model["key"]: model for model in api.items(f"{ws}/models")}
     fictional = [model for key, model in models.items() if key.startswith("fictional-")]
     offered_models = len(api.items("/api/v1/provider-types/model"))
     yield (
@@ -115,8 +116,8 @@ def _resources(api: Api, org: str, ws: str, index: dict[str, str]) -> Iterator[C
         len(revisions) == 3 and revisions[0]["id"] != writer["default_revision_id"] == index["writer_default_revision"],
     )
     yield (
-        "Secrets of workspace and personal scope",
-        {secret["scope"] for secret in api.items(f"{ws}/secrets")} == {"workspace", "user"},
+        "Workspace secrets expose metadata only",
+        {secret["key"] for secret in api.items(f"{ws}/secrets")} == {"RELEASE_TOKEN", "NOTES_TOKEN"},
     )
     templates = api.items(f"{ws}/environment-templates")
     yield (

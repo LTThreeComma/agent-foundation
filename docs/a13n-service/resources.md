@@ -4,14 +4,18 @@ Resources are what a tenant configures for its agents: providers and models, age
 
 ## Scopes
 
-Most resources belong to one workspace and live under `/api/v1/workspaces/{workspace_id}/...`.
+Business resources belong to the current workspace and use paths such as `/api/v1/agents` and `/api/v1/models`. An API key supplies its workspace; a login session sends `X-Workspace-ID`. See [workspace selection and references](http.md#workspace-selection-and-references).
 
-Providers and models live in organization collections, `/api/v1/organizations/{organization_id}/{kind}-providers` and `/api/v1/organizations/{organization_id}/models`, and each row has a `workspace_id`:
+Providers keep organization collections, `/api/v1/organizations/{organization_id}/{kind}-providers`, with an explicit `workspace_id`:
 
-- `workspace_id: null` shares the row with every workspace of the organization. Creating or changing it needs `write` at organization scope; workspace members can read and use it. In Console, manage shared rows under **Organization settings → Providers** and **Models**.
-- A workspace ID confines the row to that workspace. Creating or changing it needs `write` in the workspace. In Console, use **Workspace settings → Providers** and the workspace **Models** page.
+- `null` shares the provider with every workspace of the organization. Creating or changing it needs organization `write`; workspace members can read and use it. Manage shared providers under **Organization settings → Providers**.
+- A workspace ID confines the provider to that workspace. Creating or changing it needs workspace `write`. Use **Workspace settings → Providers**.
 
-The scope of a row never changes. A workspace resource may use its own workspace's providers and models or the organization's shared ones, never another workspace's. Listing with `?workspace_id=...` returns the shared rows plus that workspace's; without the filter you get the shared rows plus those of every workspace you can read. A row you cannot read answers `404`, as if it did not exist.
+Models always belong to one workspace. They may use a shared provider or their workspace's provider, and are managed on the workspace **Models** page. The scope of a resource never changes. A resource of another workspace answers `404` through the current workspace, even for an administrator of both.
+
+Provider lists accept `?workspace_id=...` to return shared providers plus that workspace's providers; without it they include every workspace the caller reads. Other business collections list only the current workspace.
+
+Agents, skills, models, memories, environment templates and secrets have immutable keys, unique per kind and workspace. Archive and disable retain the key. Physical deletion, where the resource's lifecycle permits it, releases the key. A replacement always has a new ID; saved references to the old ID stay bound to the deleted instance.
 
 ## Lifecycles
 
@@ -21,7 +25,7 @@ Resources follow one of two lifecycles.
 
 **Revisioned** resources (agents and skills) have a head and immutable, numbered revisions. Each change adds a revision; the head's `default_revision_id` selects the one new work uses, and runs pin the exact revision they started with. Heads are archived rather than deleted. Publishing content identical to the head's current default revision creates nothing: the request returns that revision again with `201`, and the head's version, ETag and audit trail are unchanged, whether or not the request set `make_default: false`.
 
-Nothing a run depends on is hard-deleted underneath it:
+Each kind has its own retirement operation:
 
 | Kind                                 | Stop using it                                                                          |
 | ------------------------------------ | -------------------------------------------------------------------------------------- |

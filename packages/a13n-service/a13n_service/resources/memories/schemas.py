@@ -216,15 +216,18 @@ class MemoryRecordSearch(BaseModel):
     limit: int = Field(default=10, ge=1, le=100)
 
 
-class MemoryMount(BaseModel):
+class MountFields(BaseModel):
     """A memory under the name the model addresses it by, exposing the tools its access allows. `recall` lets a
     record memory recall records into each run's first input; file memories ignore it."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, from_attributes=True)
     name: MountName
-    memory_id: ObjectId
     access: MemoryAccess
     recall: bool = True
+
+
+class MemoryMount(MountFields):
+    memory_id: ObjectId
 
 
 def _unique(mounts: tuple[MemoryMount, ...]) -> tuple[MemoryMount, ...]:

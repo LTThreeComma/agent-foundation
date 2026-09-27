@@ -100,7 +100,7 @@ it("renders a full Session page from collection previews without per-row Thread 
   expect(screen.getAllByText("—")).toHaveLength(2);
   expect(screen.getByRole("searchbox")).toBeTruthy();
   expect(screen.queryByText("Session detail")).toBeNull();
-  expect(requests).toEqual(["/api/v1/workspaces/workspace/sessions"]);
+  expect(requests).toEqual(["/api/v1/sessions"]);
   const row = screen.getByText("Question 0").closest("tr")!;
   await user.click(
     within(row).getByRole("button", { name: "Show resource reference" }),
@@ -167,7 +167,7 @@ it("updates ID search, combines filters, and opens the matched Thread", async ()
     </QueryClientProvider>,
   );
   await screen.findByText("No request text");
-  expect(urls[0].searchParams.get("agent_id")).toBe("agt_one");
+  expect(urls[0].searchParams.get("agent")).toBe("agt_one");
   await user.type(screen.getByRole("searchbox"), "  thread_one  ");
   await waitFor(() =>
     expect(urls.at(-1)?.searchParams.get("q")).toBe("thread_one"),
@@ -210,7 +210,7 @@ it("updates ID search, combines filters, and opens the matched Thread", async ()
     Date.parse(bounds.get("updated_before")!) -
       Date.parse(bounds.get("updated_after")!),
   ).toBe(7 * 86400000);
-  expect(urls.at(-1)?.searchParams.get("agent_id")).toBe("agt_one");
+  expect(urls.at(-1)?.searchParams.get("agent")).toBe("agt_one");
   await user.click(screen.getByText("No request text").closest("tr")!);
   expect(
     await screen.findByText(
@@ -320,15 +320,15 @@ it("starts a Console session that mounts the chosen template, reusing both on a 
     ),
   ).toBeTruthy();
   expect(posts.map(({ path }) => path)).toEqual([
-    "/api/v1/workspaces/workspace/sessions",
-    "/api/v1/workspaces/workspace/environments",
-    "/api/v1/workspaces/workspace/threads",
-    "/api/v1/workspaces/workspace/threads",
+    "/api/v1/sessions",
+    "/api/v1/environments",
+    "/api/v1/threads",
+    "/api/v1/threads",
   ]);
   expect(posts[0]?.body).toEqual({ labels: { "a13n.console": "debug" } });
-  expect(posts[1]?.body).toEqual({ template_id: "envt_research" });
+  expect(posts[1]?.body).toEqual({ template: { id: "envt_research" } });
   expect(posts[2]?.body).toEqual({
-    agent_id: "agt_1",
+    agent: { id: "agt_1" },
     payload: { content: [{ type: "text", text: "Run the checks" }] },
     session_id: "ses_1",
     environments: [{ name: "workspace", environment_id: "env_new" }],

@@ -227,6 +227,9 @@ def upgrade() -> None:
     """
     )
     op.execute(
+        "CREATE TRIGGER refuse_mutation BEFORE UPDATE ON memories FOR EACH ROW WHEN (OLD.key IS DISTINCT FROM NEW.key) EXECUTE FUNCTION refuse_mutation()"
+    )
+    op.execute(
         """
     CREATE TRIGGER touch_threads_on_memory_insert AFTER INSERT ON thread_memories REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION touch_threads()
     """

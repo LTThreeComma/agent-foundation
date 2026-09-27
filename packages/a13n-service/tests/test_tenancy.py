@@ -48,7 +48,9 @@ MEMBER_PASSWORD = "member-password-1234"
 
 def new_client(service: SimpleNamespace, **headers: str) -> httpx2.AsyncClient:
     return httpx2.AsyncClient(
-        transport=httpx2.ASGITransport(app=service.app), base_url="https://service.test", headers=headers
+        transport=httpx2.ASGITransport(app=service.app),
+        base_url="https://service.test",
+        headers={"X-Workspace-ID": service.tenant.workspace_id, **headers},
     )
 
 
@@ -70,7 +72,7 @@ async def join(
 ) -> httpx2.AsyncClient:
     """Invite `email` into a scope (the default workspace) and return a client logged in as the new member."""
     receipt = await service.client.post(
-        f"{scope or service.workspace}/invitations", json={"email": email, "role": role}
+        f"{scope or service.management}/invitations", json={"email": email, "role": role}
     )
     assert receipt.status_code == 201, receipt.text
     client = await stack.enter_async_context(new_client(service))
@@ -167,12 +169,18 @@ async def test_organization_and_workspace_keys_change(service) -> None:  # type:
     taken = await client.patch(service.organization, headers=if_match(rekeyed.json()), json={"key": "taken"})
     assert taken.status_code == 409 and taken.json()["error"]["code"] == "already_exists"
     await client.post(f"{service.organization}/workspaces", json={"key": "lab", "name": "Lab"})
-    workspace = (await client.get(service.workspace)).json()
-    clash = await client.patch(service.workspace, headers=if_match(workspace), json={"key": "lab"})
+    workspace = (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()
+    clash = await client.patch(
+        f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=if_match(workspace), json={"key": "lab"}
+    )
     assert clash.status_code == 409 and clash.json()["error"]["details"] == {"kind": "workspace", "key": "lab"}
-    invalid = await client.patch(service.workspace, headers=if_match(workspace), json={"key": "Not a key"})
+    invalid = await client.patch(
+        f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=if_match(workspace), json={"key": "Not a key"}
+    )
     assert invalid.status_code == 400
-    moved = await client.patch(service.workspace, headers=if_match(workspace), json={"key": "main"})
+    moved = await client.patch(
+        f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=if_match(workspace), json={"key": "main"}
+    )
     assert moved.status_code == 200 and (moved.json()["key"], moved.json()["name"]) == ("main", workspace["name"])
     # Paths by key follow the change; the workspace ID, which everything else references, stays.
     assert (await client.get("/api/v1/workspaces/main")).json()["id"] == workspace["id"]
@@ -186,23 +194,31 @@ async def test_grants_expand_principals_and_keep_an_organization_admin(service) 
     client = service.client
     async with AsyncExitStack() as stack:
         viewer = await join(service, stack, "viewer@example.com", "viewer")
-        members = (await client.get(f"{service.workspace}/grants")).json()["items"]
+        members = (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants")).json()["items"]
         assert [(m["principal"]["email"], m["role"]) for m in members] == [("viewer@example.com", "viewer")]
         viewer_id = members[0]["principal"]["id"]
-        assert (await viewer.get(service.workspace)).json()["permissions"] == ["read"]
+        assert (await viewer.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()["permissions"] == ["read"]
         await client.post(f"{service.organization}/workspaces", json={"key": "private", "name": "Private"})
         visible = (await viewer.get("/api/v1/workspaces")).json()["items"]
         assert [item["id"] for item in visible] == [service.tenant.workspace_id]
         # A viewer cannot administer: the denial is recorded after the rejected read.
-        assert (await viewer.get(f"{service.workspace}/grants")).status_code == 403
+        assert (await viewer.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants")).status_code == 403
         denied = await audit_actions(service, outcome="denied")
         assert denied == ["grant.list"]
         body = {"principal_id": viewer_id, "role": "admin"}
         promoted = await client.post(f"{service.organization}/grants", json=body)
         assert promoted.status_code == 201 and promoted.json()["principal"]["name"] == "viewer"
         assert (await client.post(f"{service.organization}/grants", json=body)).status_code == 409
-        assert (await viewer.get(service.workspace)).json()["permissions"] == ["admin", "read", "run", "write"]
-        unknown = await client.post(f"{service.workspace}/grants", json={"principal_id": viewer_id, "role": "owner"})
+        assert (await viewer.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()["permissions"] == [
+            "admin",
+            "read",
+            "run",
+            "write",
+        ]
+        unknown = await client.post(
+            f"/api/v1/workspaces/{service.tenant.workspace_id}/grants",
+            json={"principal_id": viewer_id, "role": "owner"},
+        )
         assert unknown.status_code == 400
         organization_grants = (await client.get(f"{service.organization}/grants")).json()["items"]
         mine = next(g for g in organization_grants if g["principal"]["id"] == service.tenant.principal_id)
@@ -211,15 +227,17 @@ async def test_grants_expand_principals_and_keep_an_organization_admin(service) 
         last = await client.delete(f"{service.organization}/grants/{mine['id']}")
         assert last.status_code == 409 and last.json()["error"]["details"]["reason"] == "last_organization_admin"
         # A grant is removed only through the scope it belongs to.
-        assert (await client.delete(f"{service.workspace}/grants/{mine['id']}")).status_code == 404
+        assert (
+            await client.delete(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants/{mine['id']}")
+        ).status_code == 404
 
 
 async def test_role_changes_replace_the_grant(service) -> None:  # type: ignore[no-untyped-def]
     client = service.client
     async with AsyncExitStack() as stack:
         member = await join(service, stack, "member@example.com", "viewer")
-        [held] = (await client.get(f"{service.workspace}/grants")).json()["items"]
-        path = f"{service.workspace}/grants/{held['id']}"
+        [held] = (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants")).json()["items"]
+        path = f"/api/v1/workspaces/{service.tenant.workspace_id}/grants/{held['id']}"
         assert (await member.patch(path, json={"role": "admin"})).status_code == 403
         assert (await client.patch(path, json={"role": "owner"})).status_code == 400
         changed = await client.patch(path, json={"role": "builder"})
@@ -227,10 +245,16 @@ async def test_role_changes_replace_the_grant(service) -> None:  # type: ignore[
         replacement = changed.json()
         assert replacement["id"] != held["id"]
         assert (replacement["role"], replacement["principal"]) == ("builder", held["principal"])
-        assert (await member.get(service.workspace)).json()["permissions"] == ["read", "run", "write"]
+        assert (await member.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()["permissions"] == [
+            "read",
+            "run",
+            "write",
+        ]
         # The replaced grant is gone, so a change based on it is refused rather than applied twice.
         assert (await client.patch(path, json={"role": "admin"})).status_code == 404
-        unchanged = await client.patch(f"{service.workspace}/grants/{replacement['id']}", json={"role": "builder"})
+        unchanged = await client.patch(
+            f"/api/v1/workspaces/{service.tenant.workspace_id}/grants/{replacement['id']}", json={"role": "builder"}
+        )
         assert unchanged.json()["id"] == replacement["id"]
         # A grant changes only through the scope it belongs to.
         elsewhere = f"{service.organization}/grants/{replacement['id']}"
@@ -244,19 +268,29 @@ async def test_role_changes_replace_the_grant(service) -> None:  # type: ignore[
     assert created is not None and created.details["replaces"] == held["id"]
 
     # A service account's grant is replaced within one transaction: it is never retired and keeps its keys.
-    account = (await client.post(f"{service.workspace}/service-accounts", json={"name": "ci"})).json()
-    key = await client.post(f"{service.workspace}/service-accounts/{account['id']}/keys", json={"name": "k"})
+    account = (
+        await client.post(f"/api/v1/workspaces/{service.tenant.workspace_id}/service-accounts", json={"name": "ci"})
+    ).json()
+    key = await client.post(
+        f"/api/v1/workspaces/{service.tenant.workspace_id}/service-accounts/{account['id']}/keys", json={"name": "k"}
+    )
     bearer = {"authorization": "Bearer " + key.json()["secret"]}
     [grant] = [
         g
-        for g in (await client.get(f"{service.workspace}/grants")).json()["items"]
+        for g in (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants")).json()["items"]
         if g["principal"]["id"] == account["id"]
     ]
     assert (
-        await client.patch(f"{service.workspace}/grants/{grant['id']}", json={"role": "builder"})
+        await client.patch(
+            f"/api/v1/workspaces/{service.tenant.workspace_id}/grants/{grant['id']}", json={"role": "builder"}
+        )
     ).status_code == 200
-    assert (await client.get(service.workspace, headers=bearer)).json()["permissions"] == ["read", "run", "write"]
-    assert (await client.get(f"{service.workspace}/service-accounts/{account['id']}")).json()["role"] == "builder"
+    assert (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)).json()[
+        "permissions"
+    ] == ["read", "run", "write"]
+    assert (
+        await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/service-accounts/{account['id']}")
+    ).json()["role"] == "builder"
 
     [mine] = (await client.get(f"{service.organization}/grants")).json()["items"]
     demoted = await client.patch(f"{service.organization}/grants/{mine['id']}", json={"role": "viewer"})
@@ -268,7 +302,9 @@ async def test_organization_members(service) -> None:  # type: ignore[no-untyped
     async with AsyncExitStack() as stack:
         viewer = await join(service, stack, "viewer@example.com", "viewer")
         deputy = await join(service, stack, "deputy@example.com", "admin")
-        account = (await client.post(f"{service.workspace}/service-accounts", json={"name": "ci"})).json()
+        account = (
+            await client.post(f"/api/v1/workspaces/{service.tenant.workspace_id}/service-accounts", json={"name": "ci"})
+        ).json()
         listed = (await client.get(members)).json()
         assert {(item["kind"], item["email"]) for item in listed["items"]} == {
             ("user", ADMIN),
@@ -285,9 +321,11 @@ async def test_organization_members(service) -> None:  # type: ignore[no-untyped
         assert (await deputy.get(members)).status_code == 403
         assert (await viewer.get(members)).status_code == 403
         # A user without grants has left; a retired service account stays a member of its home workspace.
-        grants = (await client.get(f"{service.workspace}/grants")).json()["items"]
+        grants = (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants")).json()["items"]
         for grant in grants:
-            assert (await client.delete(f"{service.workspace}/grants/{grant['id']}")).status_code == 204
+            assert (
+                await client.delete(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants/{grant['id']}")
+            ).status_code == 204
         remaining = (await client.get(members)).json()["items"]
         assert {(item["id"], item["status"]) for item in remaining} == {
             (service.tenant.principal_id, "active"),
@@ -317,9 +355,15 @@ async def test_custom_roles_and_grant_sources(serve, settings: Settings) -> None
     async with serve(distribution=extended) as service, AsyncExitStack() as stack:
         directory.workspace = (service.tenant.organization_id, service.tenant.workspace_id)
         member = await join(service, stack, "member@example.com", "operator")
-        assert (await member.get(service.workspace)).json()["permissions"] == ["read", "run"]
+        assert (await member.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()["permissions"] == [
+            "read",
+            "run",
+        ]
         sso = await join(service, stack, "sso@x.io", "viewer")
-        assert (await sso.get(service.workspace)).json()["permissions"] == ["read", "run"]
+        assert (await sso.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()["permissions"] == [
+            "read",
+            "run",
+        ]
     # The same database served without that role: the stored grant naming it fails closed.
     app = build_app(OSS, role="control", settings=settings)
     async with (
@@ -342,11 +386,17 @@ async def test_audit_pages_and_denials(service) -> None:  # type: ignore[no-unty
     cursor = first.json()["next_cursor"]
     second = await client.get(f"{service.organization}/audit-events", params={"limit": 1, "cursor": cursor})
     assert second.json()["items"][0]["id"] != first.json()["items"][0]["id"]
-    assert (await client.get(f"{service.workspace}/audit-events", params={"cursor": cursor})).status_code == 400
-    workspace_events = (await client.get(f"{service.workspace}/audit-events")).json()["items"]
+    assert (
+        await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/audit-events", params={"cursor": cursor})
+    ).status_code == 400
+    workspace_events = (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/audit-events")).json()[
+        "items"
+    ]
     assert [event["action"] for event in workspace_events] == ["credential.create", "organization.bootstrap"]
     assert {event["workspace_id"] for event in workspace_events} == {service.tenant.workspace_id}
-    assert (await client.get(f"{service.workspace}/audit-events", headers=bearer)).status_code == 200
+    assert (
+        await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/audit-events", headers=bearer)
+    ).status_code == 200
     # A workspace key never administers its organization, even for an organization administrator.
     assert (await client.get(f"{service.organization}/audit-events", headers=bearer)).status_code == 403
     async with short_session(service.runtime.storage) as session:
@@ -396,26 +446,29 @@ async def test_account_trail_shows_only_the_callers_events(service) -> None:  # 
     second = (await client.get(trail, params={"limit": 1, "cursor": first["next_cursor"]})).json()
     assert [event["id"] for event in first["items"] + second["items"]] == [event["id"] for event in mine[:2]]
     assert (
-        await client.get(f"{service.workspace}/audit-events", params={"cursor": first["next_cursor"]})
+        await client.get(
+            f"/api/v1/workspaces/{service.tenant.workspace_id}/audit-events", params={"cursor": first["next_cursor"]}
+        )
     ).status_code == 400
 
 
 async def test_invitations_with_manual_links(service) -> None:  # type: ignore[no-untyped-def]
     client = service.client
     created = await client.post(
-        f"{service.workspace}/invitations", json={"email": "New@Example.com", "role": "builder"}
+        f"{service.management}/invitations", json={"email": "New@Example.com", "role": "builder"}
     )
     assert created.status_code == 201, created.text
     receipt = created.json()
     assert receipt["delivery"] == "manual" and receipt["invitation"]["email"] == "new@example.com"
     duplicate = await client.post(
-        f"{service.workspace}/invitations", json={"email": "new@example.com", "role": "viewer"}
+        f"{service.management}/invitations", json={"email": "new@example.com", "role": "viewer"}
     )
     assert duplicate.status_code == 409
-    listed = (await client.get(f"{service.workspace}/invitations")).json()["items"]
+    listed = (await client.get(f"{service.management}/invitations")).json()["items"]
     assert [item["id"] for item in listed] == [receipt["invitation"]["id"]]
     resent = await client.post(
-        f"{service.workspace}/invitations/{receipt['invitation']['id']}/resend", headers=if_match(receipt["invitation"])
+        f"{service.management}/invitations/{receipt['invitation']['id']}/resend",
+        headers=if_match(receipt["invitation"]),
     )
     assert resent.status_code == 200 and resent.json()["invitation_url"] != receipt["invitation_url"]
     async with new_client(service) as invitee:
@@ -425,13 +478,17 @@ async def test_invitations_with_manual_links(service) -> None:  # type: ignore[n
         assert accepted.status_code == 200 and "a13n_session=" in accepted.headers["set-cookie"]
         me = (await invitee.get("/api/v1/users/me")).json()
         assert (me["email"], me["name"]) == ("new@example.com", "new")
-        assert (await invitee.get(service.workspace)).json()["permissions"] == ["read", "run", "write"]
+        assert (await invitee.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()["permissions"] == [
+            "read",
+            "run",
+            "write",
+        ]
         replayed = await accept(invitee, resent.json()["invitation_url"], MEMBER_PASSWORD)
         assert replayed.status_code == 409 and replayed.json()["error"]["details"]["reason"] == "accepted"
-    invitation = (await client.get(f"{service.workspace}/invitations")).json()["items"][0]
+    invitation = (await client.get(f"{service.management}/invitations")).json()["items"][0]
     assert invitation["principal_id"] == me["id"] and invitation["accepted_at"] is not None
     revoked_accepted = await client.post(
-        f"{service.workspace}/invitations/{invitation['id']}/revoke", headers=if_match(invitation)
+        f"{service.management}/invitations/{invitation['id']}/revoke", headers=if_match(invitation)
     )
     assert revoked_accepted.status_code == 409
 
@@ -445,10 +502,10 @@ async def test_invitations_with_manual_links(service) -> None:  # type: ignore[n
         assert (await invitee.get(service.organization)).json()["permissions"] == ["admin", "read", "run", "write"]
 
     expired = (
-        await client.post(f"{service.workspace}/invitations", json={"email": "late@example.com", "role": "viewer"})
+        await client.post(f"{service.management}/invitations", json={"email": "late@example.com", "role": "viewer"})
     ).json()
     revoked = (
-        await client.post(f"{service.workspace}/invitations", json={"email": "gone@example.com", "role": "viewer"})
+        await client.post(f"{service.management}/invitations", json={"email": "gone@example.com", "role": "viewer"})
     ).json()
     async with transaction(service.runtime.storage) as session:
         await session.execute(
@@ -457,7 +514,8 @@ async def test_invitations_with_manual_links(service) -> None:  # type: ignore[n
             .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
         )
     withdrawn = await client.post(
-        f"{service.workspace}/invitations/{revoked['invitation']['id']}/revoke", headers=if_match(revoked["invitation"])
+        f"{service.management}/invitations/{revoked['invitation']['id']}/revoke",
+        headers=if_match(revoked["invitation"]),
     )
     assert withdrawn.status_code == 200 and withdrawn.json()["revoked_at"] is not None
     async with new_client(service) as invitee:
@@ -474,12 +532,12 @@ async def test_only_a_login_session_sends_invitations(service) -> None:  # type:
     issued = await client.post("/api/v1/users/me/keys", json={"workspace_id": service.tenant.workspace_id, "name": "k"})
     bearer = {"authorization": "Bearer " + issued.json()["secret"]}
     body = {"email": "key@example.com", "role": "admin"}
-    created = await client.post(f"{service.workspace}/invitations", headers=bearer, json=body)
+    created = await client.post(f"{service.management}/invitations", headers=bearer, json=body)
     assert (created.status_code, created.json()["error"]["message"]) == (403, "This operation requires a login session")
-    assert (await client.get(f"{service.workspace}/invitations")).json()["items"] == []
-    invitation = (await client.post(f"{service.workspace}/invitations", json=body)).json()["invitation"]
+    assert (await client.get(f"{service.management}/invitations")).json()["items"] == []
+    invitation = (await client.post(f"{service.management}/invitations", json=body)).json()["invitation"]
     resent = await client.post(
-        f"{service.workspace}/invitations/{invitation['id']}/resend", headers={**bearer, **if_match(invitation)}
+        f"{service.management}/invitations/{invitation['id']}/resend", headers={**bearer, **if_match(invitation)}
     )
     assert resent.status_code == 403
     for refused in (
@@ -494,7 +552,7 @@ async def test_identity_mail_is_queued_encrypted(mailing) -> None:  # type: igno
     client = mailing.client
     assert (await client.get("/api/v1/auth/configuration")).json() == {"email_delivery": True, "initialized": True}
     receipt = await client.post(
-        f"{mailing.workspace}/invitations", json={"email": "mail@example.com", "role": "runner"}
+        f"{mailing.management}/invitations", json={"email": "mail@example.com", "role": "runner"}
     )
     assert receipt.json()["delivery"] == "queued" and receipt.json()["invitation_url"] is None
     [(to, url)] = await sent_links(mailing)
@@ -597,7 +655,7 @@ async def test_mail_delivery_settles_and_dead_letters(runtime, tenant) -> None: 
 
 
 async def test_service_accounts_and_workspace_keys(service) -> None:  # type: ignore[no-untyped-def]
-    client, accounts = service.client, f"{service.workspace}/service-accounts"
+    client, accounts = service.client, f"/api/v1/workspaces/{service.tenant.workspace_id}/service-accounts"
     created = await client.post(accounts, json={"name": "ci"})
     assert created.status_code == 201 and created.json()["role"] == "runner"
     account = created.json()
@@ -607,7 +665,9 @@ async def test_service_accounts_and_workspace_keys(service) -> None:  # type: ig
     bearer = {"authorization": "Bearer " + key.json()["secret"]}
     me = (await client.get("/api/v1/users/me", headers=bearer)).json()
     assert (me["kind"], me["email"]) == ("service_account", None)
-    assert (await client.get(service.workspace, headers=bearer)).json()["permissions"] == ["read", "run"]
+    assert (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)).json()[
+        "permissions"
+    ] == ["read", "run"]
     assert (await client.post(accounts, headers=bearer, json={"name": "escalate"})).status_code == 403
     other = await client.post(f"{service.organization}/workspaces", json={"key": "other", "name": "Other"})
     outside = await client.post(
@@ -622,11 +682,19 @@ async def test_service_accounts_and_workspace_keys(service) -> None:  # type: ig
 
     promoted = await client.patch(path, headers=if_match(account), json={"role": "builder", "name": "ci-bot"})
     assert promoted.status_code == 200 and (promoted.json()["role"], promoted.json()["name"]) == ("builder", "ci-bot")
-    assert (await client.get(service.workspace, headers=bearer)).json()["permissions"] == ["read", "run", "write"]
+    assert (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)).json()[
+        "permissions"
+    ] == ["read", "run", "write"]
     paused = await client.patch(path, headers=if_match(promoted.json()), json={"status": "disabled"})
-    assert paused.status_code == 200 and (await client.get(service.workspace, headers=bearer)).status_code == 401
+    assert (
+        paused.status_code == 200
+        and (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)).status_code == 401
+    )
     resumed = await client.patch(path, headers=if_match(paused.json()), json={"status": "active"})
-    assert resumed.status_code == 200 and (await client.get(service.workspace, headers=bearer)).status_code == 200
+    assert (
+        resumed.status_code == 200
+        and (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)).status_code == 200
+    )
 
     personal = await client.post(
         "/api/v1/users/me/keys", json={"workspace_id": service.tenant.workspace_id, "name": "me"}
@@ -640,27 +708,29 @@ async def test_service_accounts_and_workspace_keys(service) -> None:  # type: ig
             403,
             "This operation requires a login session",
         )
-    keys = (await client.get(f"{service.workspace}/keys")).json()["items"]
+    keys = (await client.get(f"{service.management}/keys")).json()["items"]
     assert {(item["principal"]["kind"], item["name"]) for item in keys} == {
         ("service_account", "deploy"),
         ("user", "me"),
     }
     assert [item["name"] for item in (await client.get(f"{path}/keys")).json()["items"]] == ["deploy"]
     revoked = await client.delete(
-        f"{service.workspace}/keys/{personal.json()['key']['id']}", headers=if_match(personal.json()["key"])
+        f"{service.management}/keys/{personal.json()['key']['id']}", headers=if_match(personal.json()["key"])
     )
     assert revoked.status_code == 200 and revoked.json()["revoked_at"] is not None
 
     # Removing the last grant retires the account: disabled, keys revoked, identity kept.
     [grant] = [
         g
-        for g in (await client.get(f"{service.workspace}/grants")).json()["items"]
+        for g in (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants")).json()["items"]
         if g["principal"]["id"] == account["id"]
     ]
-    assert (await client.delete(f"{service.workspace}/grants/{grant['id']}")).status_code == 204
+    assert (
+        await client.delete(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants/{grant['id']}")
+    ).status_code == 204
     retired = (await client.get(path)).json()
     assert (retired["status"], retired["role"]) == ("disabled", None)
-    assert (await client.get(service.workspace, headers=bearer)).status_code == 401
+    assert (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)).status_code == 401
     assert (await client.patch(path, headers=if_match(retired), json={"status": "active"})).status_code == 409
     restored = await client.patch(path, headers=if_match(retired), json={"role": "runner", "status": "active"})
     assert restored.status_code == 200 and restored.json()["status"] == "active"
@@ -668,7 +738,10 @@ async def test_service_accounts_and_workspace_keys(service) -> None:  # type: ig
     deleted = await client.delete(path, headers=if_match(restored.json()))
     assert deleted.status_code == 200 and (deleted.json()["status"], deleted.json()["role"]) == ("disabled", None)
     assert (
-        await client.get(service.workspace, headers={"authorization": "Bearer " + fresh.json()["secret"]})
+        await client.get(
+            f"/api/v1/workspaces/{service.tenant.workspace_id}",
+            headers={"authorization": "Bearer " + fresh.json()["secret"]},
+        )
     ).status_code == 401
     listed = (await client.get(accounts)).json()["items"]
     assert [(item["id"], item["status"]) for item in listed] == [(account["id"], "disabled")]
@@ -676,7 +749,7 @@ async def test_service_accounts_and_workspace_keys(service) -> None:  # type: ig
 
 
 async def test_service_account_description(service) -> None:  # type: ignore[no-untyped-def]
-    client, accounts = service.client, f"{service.workspace}/service-accounts"
+    client, accounts = service.client, f"/api/v1/workspaces/{service.tenant.workspace_id}/service-accounts"
     described = await client.post(accounts, json={"name": "ci", "description": "Deploys from CI"})
     assert described.status_code == 201 and described.json()["description"] == "Deploys from CI"
     assert (await client.post(accounts, json={"name": "bot"})).json()["description"] == ""
@@ -753,7 +826,7 @@ async def test_profile_password_and_login_sessions(service) -> None:  # type: ig
 
 async def test_expire_credentials_keeps_history(service) -> None:  # type: ignore[no-untyped-def]
     storage, client = service.runtime.storage, service.client
-    await client.post(f"{service.workspace}/invitations", json={"email": "stale@example.com", "role": "viewer"})
+    await client.post(f"{service.management}/invitations", json={"email": "stale@example.com", "role": "viewer"})
     async with AsyncExitStack() as stack:
         await join(service, stack, "kept@example.com", "viewer")
     past = datetime.now(UTC) - timedelta(seconds=1)
@@ -853,7 +926,7 @@ async def test_invitation_needs_the_inviters_current_authority(service) -> None:
     async with AsyncExitStack() as stack:
         deputy = await join(service, stack, "deputy@example.com", "admin", scope=service.organization)
         receipt = await deputy.post(
-            f"{service.workspace}/invitations", json={"email": "late@example.com", "role": "builder"}
+            f"{service.management}/invitations", json={"email": "late@example.com", "role": "builder"}
         )
         assert receipt.status_code == 201
         [grant] = [
@@ -930,7 +1003,9 @@ async def test_users_disable_their_own_account(service) -> None:  # type: ignore
         assert (await member.post("/api/v1/users/me/disable", headers=bearer, json=proof)).status_code == 403
         assert (await member.post("/api/v1/users/me/disable", json=proof)).status_code == 204
         assert (await member.get("/api/v1/users/me")).status_code == 401
-        assert (await member.get(service.workspace, headers=bearer)).status_code == 401
+        assert (
+            await member.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)
+        ).status_code == 401
         async with new_client(service) as again:
             relogin = await again.post(
                 "/api/v1/auth/login", json={"email": "leaving@example.com", "password": MEMBER_PASSWORD}
@@ -939,8 +1014,10 @@ async def test_users_disable_their_own_account(service) -> None:  # type: ignore
         # Grants and keys stay, so re-enabling the account restores them, but never a login session from before.
         await set_account_status(service.runtime.storage, "leaving@example.com", "active")
         assert (await member.get("/api/v1/users/me")).status_code == 401
-        assert (await member.get(service.workspace, headers=bearer)).status_code == 200
-    grants = (await client.get(f"{service.workspace}/grants")).json()["items"]
+        assert (
+            await member.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)
+        ).status_code == 200
+    grants = (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants")).json()["items"]
     assert [(g["principal"]["email"], g["role"]) for g in grants] == [("leaving@example.com", "builder")]
     assert "user.disable" in await audit_actions(service, target_kind="user")
 
@@ -984,7 +1061,9 @@ async def test_disabling_an_account_ends_its_sessions_and_links(service) -> None
         await set_account_status(storage, "member@example.com", "active")
         # Enabling restores grants and keys, never a login session or a link issued before the disable.
         assert (await member.get("/api/v1/users/me")).status_code == 401
-        assert (await member.get(service.workspace, headers=bearer)).status_code == 200
+        assert (
+            await member.get(f"/api/v1/workspaces/{service.tenant.workspace_id}", headers=bearer)
+        ).status_code == 200
         async with new_client(service) as anonymous:
             confirm = {"token": reset, "password": "a-new-password-1234"}
             assert (await anonymous.post("/api/v1/auth/password-reset/confirm", json=confirm)).status_code == 400

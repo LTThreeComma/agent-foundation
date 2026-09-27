@@ -35,17 +35,15 @@ export function MCPAuthorization({
   const credentials = useMutation({
     gcTime: 0,
     mutationFn: () =>
-      client.http
-        .PATCH(
-          "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
-          {
-            params: { path: connectionPath(basis) },
-            headers: ifMatch(rowTag(basis)),
-            body: {
-              credential: mode === "bearer" ? { token: bearer } : { headers },
-            },
+      client
+        .workspace(basis.workspace_id)
+        .PATCH("/api/v1/connections/{connection_id}", {
+          params: { path: connectionPath(basis) },
+          headers: ifMatch(rowTag(basis)),
+          body: {
+            credential: mode === "bearer" ? { token: bearer } : { headers },
           },
-        )
+        })
         .then(data),
     onSuccess: () => {
       setBearer("");

@@ -8,7 +8,9 @@ import { ApiError } from "../../service-client";
 import { CreateAgent } from "./create";
 
 const http = vi.hoisted(() => ({ POST: vi.fn(), PUT: vi.fn() }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_test" },
@@ -78,12 +80,11 @@ it("creates the agent under a key derived from its name, retrying a taken key", 
   );
   expect(http.POST).toHaveBeenCalledTimes(2);
   expect(http.POST.mock.calls[0]?.[1]).toEqual({
-    params: { path: { workspace_id: "ws_test" } },
     body: {
       key: "new-agent",
       name: "New agent",
       description: "",
-      config: { model: { model_id: "mdl_0123456789abcdef0123" } },
+      config: { model: { id: "mdl_0123456789abcdef0123" } },
     },
   });
   expect(http.POST.mock.calls[1]?.[1].body.key).toMatch(
@@ -139,9 +140,9 @@ it("uploads a selected avatar after creation and retries without creating anothe
   expect(http.POST).toHaveBeenCalledOnce();
   expect(http.PUT).toHaveBeenCalledTimes(2);
   expect(http.PUT).toHaveBeenLastCalledWith(
-    "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/avatar",
+    "/api/v1/agents/{agent_reference}/avatar",
     {
-      params: { path: { workspace_id: "ws_test", agent_id: "ap_new" } },
+      params: { path: { agent_reference: "ap_new" } },
       headers: { "If-Match": '"ap_new:1"', "Content-Type": "image/png" },
       body: file,
     },

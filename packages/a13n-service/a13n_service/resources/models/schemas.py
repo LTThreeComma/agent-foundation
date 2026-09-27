@@ -34,8 +34,6 @@ class CatalogRef(BaseModel):
 
 class ModelCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # Required: a workspace ID, or explicit null to share the model with every workspace the provider serves.
-    workspace_id: ObjectId | None
     provider_id: ObjectId
     key: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
@@ -63,7 +61,7 @@ class Model(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
     organization_id: str
-    workspace_id: str | None
+    workspace_id: str
     provider_id: str
     key: str
     name: str

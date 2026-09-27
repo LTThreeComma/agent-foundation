@@ -1,3 +1,4 @@
+import { configInput } from "../../shared/resource-inputs";
 import {
   CaretDownIcon,
   ChatIcon,
@@ -168,14 +169,14 @@ export function ImportAgentForm({
   const create = useMutation({
     mutationFn: (file: AgentFile) =>
       createWithKey(file.name, "agent", (key) =>
-        client.http
-          .POST("/api/v1/workspaces/{workspace_id}/agents", {
-            params: { path: { workspace_id: workspace.id } },
+        client
+          .workspace(workspace.id)
+          .POST("/api/v1/agents", {
             body: {
               key,
               name: file.name,
               description: file.description ?? "",
-              config: file.config,
+              config: configInput(file.config),
             },
           })
           .then(data),

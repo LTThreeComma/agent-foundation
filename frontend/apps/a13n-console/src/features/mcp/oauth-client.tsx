@@ -54,31 +54,29 @@ export function MCPOAuthClientEditor({
   const save = useMutation({
     gcTime: 0,
     mutationFn: (remove: boolean) =>
-      client.http
-        .PATCH(
-          "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
-          {
-            params: { path: connectionPath(connection) },
-            headers: ifMatch(rowTag(connection)),
-            body: {
-              config: {
-                ...config,
-                // Without a client ID the Service registers a client itself.
-                oauth: remove
-                  ? { scopes: saved?.scopes ?? [] }
-                  : {
-                      ...saved,
-                      client_id: clientId,
-                      token_endpoint_auth_method: method,
-                      grant_type: grant,
-                    },
-              },
-              ...(!remove && method !== "none" && secret
-                ? { client_secret: secret }
-                : {}),
+      client
+        .workspace(connection.workspace_id)
+        .PATCH("/api/v1/connections/{connection_id}", {
+          params: { path: connectionPath(connection) },
+          headers: ifMatch(rowTag(connection)),
+          body: {
+            config: {
+              ...config,
+              // Without a client ID the Service registers a client itself.
+              oauth: remove
+                ? { scopes: saved?.scopes ?? [] }
+                : {
+                    ...saved,
+                    client_id: clientId,
+                    token_endpoint_auth_method: method,
+                    grant_type: grant,
+                  },
             },
+            ...(!remove && method !== "none" && secret
+              ? { client_secret: secret }
+              : {}),
           },
-        )
+        })
         .then(data),
     onSuccess: (updated, remove) => {
       setSecret("");

@@ -226,7 +226,7 @@ async def _plan(runtime: Runtime, lease: Lease) -> _Plan:
         session_id, source_entry_id = run.session_id, run.source_entry_id
         mounts = tuple(EnvironmentMount.model_validate(mount) for mount in run.environment_mounts)
         memory_cursors = dict(run.memory_cursors)
-    await require_secrets(runtime, lease.workspace_id, principal.id, host.secrets)
+    await require_secrets(runtime, lease.workspace_id, host.secrets)
     own, base, display = await asyncio.gather(
         checkpoints.load_state(runtime.objects, lease.organization_id, lease.run_id, checkpoint),
         checkpoints.load_state(runtime.objects, lease.organization_id, parent_id or lease.run_id, parent_checkpoint),

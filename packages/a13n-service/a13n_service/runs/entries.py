@@ -14,11 +14,11 @@ from a13n_service.infra.db import Storage, now, short_session, transaction
 from a13n_service.infra.errors import ServiceError
 from a13n_service.infra.http import require_match
 from a13n_service.runs import inbox
+from a13n_service.runs.commands import EntryUpdateInput, resolve_edit
 from a13n_service.runs.runtime import Runtime
 from a13n_service.runs.schemas import (
     EntryPage,
     EntryStatus,
-    EntryUpdate,
     EntryView,
     InboxOrder,
     Submitted,
@@ -74,7 +74,7 @@ async def edit(
     workspace_id: str,
     thread_id: str,
     entry_id: str,
-    body: EntryUpdate,
+    body: EntryUpdateInput,
     *,
     if_match: str | None,
 ) -> Submitted:
@@ -83,7 +83,8 @@ async def edit(
         thread = await get_thread(session, scope.workspace_id, thread_id, lock=True)
         require_match(if_match, thread.id, thread.version)
         entry = await inbox.editable_entry(session, thread, entry_id, editor_id=actor.id)
-        message = inbox.edited(entry, body)
+        selected = await resolve_edit(session, scope.workspace_id, body)
+        message = inbox.edited(entry, selected)
         authority = ExecutionAuthority.model_validate(entry.authority)
         await validate_message(session, runtime, actor, scope, thread, message, authority=authority)
         await inbox.edit_entry(session, thread, entry, message, control=runtime.settings.control)

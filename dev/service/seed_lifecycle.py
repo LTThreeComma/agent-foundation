@@ -23,7 +23,12 @@ def revise_after_runs(talk: Talk, cast: Cast, skills: dict[str, Json], last_run:
     first = api.get(path)["default_revision_id"]
     config = api.get(f"{path}/revisions/{first}")["config"]
     # The configuration keeps its pinned skill revision, so the writer still reads the skill's first revision.
-    revised = {**config, "instructions": "Write release notes with explicit trade-offs. Keep answers short."}
+    revised = {
+        "model": {"id": config["model"]["model_id"]},
+        "skills": [{"id": skill["skill_id"], "revision_id": skill["revision_id"]} for skill in config["skills"]],
+        "toolsets": config["toolsets"],
+        "instructions": "Write release notes with explicit trade-offs. Keep answers short.",
+    }
     second = api.post(f"{path}/revisions", {"config": revised, "note": "Explicit trade-offs"}, current=api.get(path))
     draft = {**revised, "instructions": revised["instructions"] + " Prefer a friendly tone."}
     api.post(

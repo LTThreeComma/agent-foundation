@@ -106,44 +106,36 @@ export function EnvironmentPanel({
     queryKey: ["environment-template", environment.template_id],
     enabled: open && !!environment.template_id,
     queryFn: ({ signal }) =>
-      client.http
-        .GET(
-          "/api/v1/workspaces/{workspace_id}/environment-templates/{template_id}",
-          {
-            params: {
-              path: {
-                workspace_id: environment.workspace_id,
-                template_id: environment.template_id!,
-              },
+      client
+        .workspace(environment.workspace_id)
+        .GET("/api/v1/environment-templates/{template_reference}", {
+          params: {
+            path: {
+              template_reference: environment.template_id!,
             },
-            signal,
           },
-        )
+          signal,
+        })
         .then(data),
   });
   async function act(action: "stop" | "delete") {
     const request = {
       params: {
         path: {
-          workspace_id: environment.workspace_id,
           environment_id: environment.id,
         },
       },
       headers: ifMatch(detail.data?.etag),
     };
     if (action === "stop")
-      await client.http
-        .POST(
-          "/api/v1/workspaces/{workspace_id}/environments/{environment_id}/stop",
-          request,
-        )
+      await client
+        .workspace(environment.workspace_id)
+        .POST("/api/v1/environments/{environment_id}/stop", request)
         .then(data);
     else
-      await client.http
-        .DELETE(
-          "/api/v1/workspaces/{workspace_id}/environments/{environment_id}",
-          request,
-        )
+      await client
+        .workspace(environment.workspace_id)
+        .DELETE("/api/v1/environments/{environment_id}", request)
         .then(data);
     await Promise.all([
       cache.invalidateQueries({ queryKey: ["environment", environment.id] }),

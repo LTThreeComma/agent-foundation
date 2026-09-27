@@ -1,3 +1,4 @@
+import { optionsInput } from "../../shared/resource-inputs";
 import type { Schema } from "../../shared/api";
 import { isRecord } from "../../service-client";
 
@@ -7,7 +8,7 @@ import { isRecord } from "../../service-client";
  * starts as the old one did.
  */
 export type Resubmission = Pick<
-  Schema["Message"],
+  Schema["MessageInput"],
   "payload" | "agent_revision_id" | "options"
 >;
 
@@ -24,7 +25,7 @@ export function runResubmission(run: Schema["RunView"]): Resubmission | null {
       payload,
       agent_revision_id:
         run.revision_selection === "pinned" ? run.agent_revision_id : null,
-      options: run.options,
+      options: optionsInput(run.options),
     }
   );
 }
@@ -32,15 +33,15 @@ export function runResubmission(run: Schema["RunView"]): Resubmission | null {
 /** A pending message, ready to send again as the message it is. */
 export function entryResubmission(
   entry: Schema["EntryView"],
-): (Resubmission & Pick<Schema["Message"], "agent_id" | "delivery">) | null {
+): (Resubmission & Pick<Schema["MessageInput"], "agent" | "delivery">) | null {
   const payload = entry.kind === "message" && messagePayload(entry.payload);
   return payload && entry.agent_id
     ? {
         payload,
-        agent_id: entry.agent_id,
+        agent: { id: entry.agent_id },
         agent_revision_id: entry.agent_revision_id,
         delivery: entry.delivery,
-        options: entry.options,
+        options: optionsInput(entry.options),
       }
     : null;
 }

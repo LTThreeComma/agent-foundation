@@ -463,10 +463,14 @@ async def test_a_heartbeat_stops_cancelled_and_revoked_runs_and_renews_nothing_w
     agent = await runs_kit.create_agent(service, scripted_model)
     await runs_kit.start_thread(service, agent, "healthy")
     cancelled = (await runs_kit.start_thread(service, agent, "cancel me"))["run"]["id"]
-    account = await service.client.post(f"{service.workspace}/service-accounts", json={"name": "bot"})
+    account = await service.client.post(
+        f"/api/v1/workspaces/{service.tenant.workspace_id}/service-accounts", json={"name": "bot"}
+    )
     assert account.status_code == 201, account.text
     bot = account.json()["id"]
-    key = await service.client.post(f"{service.workspace}/service-accounts/{bot}/keys", json={"name": "key"})
+    key = await service.client.post(
+        f"/api/v1/workspaces/{service.tenant.workspace_id}/service-accounts/{bot}/keys", json={"name": "key"}
+    )
     started = await service.client.post(
         f"{service.workspace}/threads",
         json=runs_kit.message(agent, "bot"),
@@ -629,7 +633,10 @@ async def test_url_input_that_cannot_be_reached_is_fetched_by_a_later_attempt(
 ) -> None:  # type: ignore[no-untyped-def]
     await runs_kit.pause_sweeps(service)
     agent = await runs_kit.create_agent(service, scripted_model)
-    offline = {"agent_id": agent["id"], "payload": {"content": [{"type": "url", "url": "http://127.0.0.1:9/page"}]}}
+    offline = {
+        "agent": {"id": agent["id"]},
+        "payload": {"content": [{"type": "url", "url": "http://127.0.0.1:9/page"}]},
+    }
     response = await service.client.post(f"{service.workspace}/threads", json=offline, headers=runs_kit.fresh_key())
     assert response.status_code == 201, response.text
     run_id = response.json()["run"]["id"]
@@ -693,7 +700,7 @@ async def test_takeover_keeps_external_answer_without_replaying_local_approval(
         client_tools=[{"name": "lookup", "description": "External fact", "parameters_json_schema": {"type": "object"}}],
         toolsets={"configuration": {"enabled": True}},
     )
-    config = {"model": {"model_id": model_id}}
+    config = {"model": {"id": model_id}}
     calls = [
         ("create_agent", {"key": "created", "name": "Created", "config": config}, "call_create"),
         ("lookup", {}, "call_lookup"),
@@ -768,7 +775,7 @@ async def test_takeover_keeps_external_answer_without_replaying_local_approval(
     await (await runs_kit.attempt(service))
     result = await runs_kit.get_run(service, run_id)
     assert result["status"] == "completed" and result["attempts"] == 2, result
-    assert (await service.client.get(f"{service.workspace}/agents/created")).status_code == 404
+    assert (await service.client.get(f"{service.workspace}/agents/@created")).status_code == 404
     await scripted_model.request()
     resumed = await scripted_model.request()
     returns = [message for message in resumed["messages"] if message["role"] == "tool"]

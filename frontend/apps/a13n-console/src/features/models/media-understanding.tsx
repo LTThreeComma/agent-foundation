@@ -1,3 +1,4 @@
+import { mediaInput } from "../../shared/resource-inputs";
 import { SettingsSection } from "a13n-ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -33,11 +34,11 @@ export function MediaUnderstandingDefaults() {
       etag: string;
       selection: MediaSelection;
     }) =>
-      client.http
-        .PUT("/api/v1/workspaces/{workspace_id}/media-understanding-defaults", {
-          params: { path: { workspace_id: workspace.id } },
+      client
+        .workspace(workspace.id)
+        .PUT("/api/v1/media-understanding-defaults", {
           headers: ifMatch(change.etag),
-          body: change.selection,
+          body: mediaInput(change.selection),
         })
         .then(representation),
     onSuccess: (result) => cache.setQueryData(defaults.queryKey, result),

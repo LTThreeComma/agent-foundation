@@ -1,3 +1,4 @@
+import { configInput } from "../../shared/resource-inputs";
 import {
   Collapsible,
   CollapsiblePanel,
@@ -114,9 +115,9 @@ export function AgentToolsets({
   const catalog = useQuery({
     queryKey: ["toolset-catalog", workspace.id],
     queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/toolsets", {
-          params: { path: { workspace_id: workspace.id } },
+      client
+        .workspace(workspace.id)
+        .GET("/api/v1/toolsets", {
           signal,
         })
         .then(data),
@@ -170,14 +171,13 @@ export function AgentToolsets({
     retry: false,
     queryFn: async ({ signal }) => {
       if (candidate)
-        await client.http.POST(
-          "/api/v1/workspaces/{workspace_id}/agents/validate",
-          {
-            params: { path: { workspace_id: workspace.id } },
-            body: { config: candidate.config, agent_id: agentId },
-            signal,
+        await client.workspace(workspace.id).POST("/api/v1/agents/validate", {
+          body: {
+            config: configInput(candidate.config),
+            agent: agentId ? { id: agentId } : null,
           },
-        );
+          signal,
+        });
       return null;
     },
   });

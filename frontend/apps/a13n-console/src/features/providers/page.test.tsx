@@ -12,7 +12,12 @@ const state = vi.hoisted(() => ({
   manage: true,
 }));
 vi.mock("../../auth/context", () => ({
-  useClient: () => ({ http: { GET: state.GET } }),
+  useClient: () => ({
+    http: { GET: state.GET },
+    workspace() {
+      return this.http;
+    },
+  }),
 }));
 vi.mock("../../layout/workspace", () => ({
   useAccess: () => ({

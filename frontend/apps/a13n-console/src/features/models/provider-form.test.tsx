@@ -7,7 +7,12 @@ import { ProviderForm } from "./provider-form";
 
 const state = vi.hoisted(() => ({ PATCH: vi.fn(), close: vi.fn() }));
 vi.mock("../../auth/context", () => ({
-  useClient: () => ({ http: { PATCH: state.PATCH } }),
+  useClient: () => ({
+    http: { PATCH: state.PATCH },
+    workspace() {
+      return this.http;
+    },
+  }),
 }));
 vi.mock("../../layout/workspace", () => ({
   useAccess: () => ({ organization: { id: "org_test" } }),

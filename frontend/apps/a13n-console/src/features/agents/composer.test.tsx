@@ -9,7 +9,9 @@ import { useAgentComposer } from "./composer";
 
 const http = vi.hoisted(() => ({ GET: vi.fn(), POST: vi.fn() }));
 const access = vi.hoisted(() => ({ verbs: ["read", "run", "write"] }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_test", key: "test" },
@@ -88,10 +90,7 @@ it("prepares the composer for writers and opens a conversation with it", async (
       "?agent=ap_composer",
     ),
   );
-  expect(http.POST).toHaveBeenCalledWith(
-    "/api/v1/workspaces/{workspace_id}/agent-composer",
-    { params: { path: { workspace_id: "ws_test" } } },
-  );
+  expect(http.POST).toHaveBeenCalledWith("/api/v1/agent-composer", {});
   expect(http.GET).not.toHaveBeenCalled();
 });
 
@@ -132,8 +131,8 @@ it("lets runners converse with an existing composer without preparing it", async
   expect(screen.getByLabelText("Current path").textContent).toBe(
     "?agent=ap_composer",
   );
-  expect(http.GET.mock.calls[0]?.[1].params.path.agent_id).toBe(
-    "agent-composer",
+  expect(http.GET.mock.calls[0]?.[1].params.path.agent_reference).toBe(
+    "@agent-composer",
   );
   expect(http.POST).not.toHaveBeenCalled();
 });

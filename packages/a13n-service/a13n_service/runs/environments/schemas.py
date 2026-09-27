@@ -94,13 +94,16 @@ class EnvironmentPage(BaseModel):
     next_cursor: str | None
 
 
-class ManagedEnvironmentCreate(BaseModel):
+class ManagedEnvironmentFields(BaseModel):
     """A workspace-managed sandbox reserved from a template, for threads to mount; maintenance creates it."""
 
     model_config = ConfigDict(extra="forbid")
-    template_id: ObjectId
     # Defaults to the template's name.
     name: EnvironmentName | None = None
+
+
+class ManagedEnvironmentCreate(ManagedEnvironmentFields):
+    template_id: ObjectId
 
 
 class ExternalTargetCreate(BaseModel):

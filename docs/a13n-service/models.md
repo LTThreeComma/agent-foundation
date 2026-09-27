@@ -1,6 +1,6 @@
 # Models
 
-An agent calls a **model**: a named upstream model of a **model provider** account, with the model API to call it through, its capabilities and optional pricing. Providers and models are either shared by the organization or confined to one workspace; see [scopes](resources.md#scopes).
+An agent calls a **model**: a named upstream model of a **model provider** account, with the model API to call it through, its capabilities and optional pricing. Models belong to one workspace; providers are either shared by the organization or confined to a workspace; see [scopes](resources.md#scopes).
 
 ## Model providers
 
@@ -32,11 +32,10 @@ Through the API, `GET /api/v1/model-catalog` returns the catalog's `items` and i
 curl "$A13N_URL/api/v1/model-catalog" -H "Authorization: Bearer $A13N_API_KEY"
 ```
 
-Create the model in `/api/v1/organizations/{organization_id}/models` with its `config`:
+Create the model in `/api/v1/models` with its `config`:
 
 ```json
 {
-  "workspace_id": "ws_...",
   "provider_id": "mprov_...",
   "key": "local-llama",
   "name": "Llama (local)",
@@ -50,7 +49,7 @@ Create the model in `/api/v1/organizations/{organization_id}/models` with its `c
 }
 ```
 
-- `key` is unique per provider; agents select models by ID.
+- `key` is immutable and unique in the workspace. Agent inputs select a model using `{id}` or `{key}`; the Service stores the resolved ID.
 - `config.model_name` is the upstream model name, and `config.model_api` must be one of the provider type's model APIs.
 - `config.characteristics` declares the context window, context-management thresholds and `capabilities`: `image_understanding`, `video_understanding`, `audio_understanding`, and `document_understanding` for PDF documents. Optional `max_tokens`, `temperature` and `top_p` are defaults that an agent's `model.settings` can override.
 - `pricing` prices the model's own calls in usage records; catalog items carry one to copy. The provider and model it names only record where the prices came from, so a catalog price copied for another endpoint's model ID still applies.
@@ -70,9 +69,9 @@ An agent whose model cannot read images, video or audio can delegate that to ano
 In Console use **Workspace settings → Media understanding**. Through the API, workspace administrators replace all three defaults at once with the workspace's `If-Match`:
 
 ```sh
-curl -X PUT "$A13N_URL/api/v1/workspaces/$WORKSPACE/media-understanding-defaults" \
+curl -X PUT "$A13N_URL/api/v1/media-understanding-defaults" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" -H "If-Match: $WORKSPACE_ETAG" \
-  -d '{"image": "mdl_...", "audio": null}'
+  -d '{"image": {"id": "mdl_..."}, "audio": null}'
 ```
 
 An omitted or `null` kind has no default. Each model must be usable in the workspace and declare the matching capability (`image_understanding`, `video_understanding` or `audio_understanding`).

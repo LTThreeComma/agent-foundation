@@ -45,8 +45,8 @@ async def write_file(service: SimpleNamespace, memory: dict[str, Any], path: str
     assert created.status_code == 201, created.text
 
 
-def mount(memory: dict[str, Any], access: str = "write") -> dict[str, str]:
-    return {"name": "team", "memory_id": memory["id"], "access": access}
+def mount(memory: dict[str, Any], access: str = "write") -> dict[str, Any]:
+    return {"name": "team", "memory": {"id": memory["id"]}, "access": access}
 
 
 def text(request: dict[str, Any]) -> str:

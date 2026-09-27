@@ -63,9 +63,9 @@ def seed_memories(api: Api, org: str, ws: str, model: Json, model_url: str) -> M
     )
     facts = _facts(api, org, ws, model_url)
     mounts = [
-        {"name": "prefs", "memory_id": preferences["id"], "access": "write"},
-        {"name": "handbook", "memory_id": handbook["id"], "access": "read"},
-        {"name": "facts", "memory_id": facts["id"], "access": "write", "recall": True},
+        {"name": "prefs", "memory": {"id": preferences["id"]}, "access": "write"},
+        {"name": "handbook", "memory": {"id": handbook["id"]}, "access": "read"},
+        {"name": "facts", "memory": {"id": facts["id"]}, "access": "write", "recall": True},
     ]
     agent = api.post(
         f"{ws}/agents",
@@ -75,7 +75,7 @@ def seed_memories(api: Api, org: str, ws: str, model: Json, model_url: str) -> M
             "description": "Remembers the team's preferences and facts, and reads its handbook.",
             "labels": {"team": "docs"},
             "config": {
-                "model": {"model_id": model["id"]},
+                "model": {"id": model["id"]},
                 "instructions": "You are the team assistant of a fictional product team. Keep answers short.",
                 "memory_mounts": mounts,
             },

@@ -9,7 +9,7 @@ Request bodies are strict: unknown fields are refused. Language SDKs and the com
 Applications authenticate with an [API key](identity.md#api-keys) as a bearer token:
 
 ```sh
-curl "$A13N_URL/api/v1/workspaces/$WORKSPACE/agents" -H "Authorization: Bearer $A13N_API_KEY"
+curl "$A13N_URL/api/v1/agents" -H "Authorization: Bearer $A13N_API_KEY"
 ```
 
 When an `Authorization` header is present, cookies are ignored. An API key acts only in its own workspace, and never changes the account of the person who created it.
@@ -22,6 +22,14 @@ Browsers use the login session cookie set by `POST /api/v1/auth/login`. For cook
 Account operations (changing your profile, password or email, disabling your account, listing login sessions and your own audit trail), `GET /api/v1/auth/session` and `POST /api/v1/auth/logout` require a login session, as do creating an API key, sending or resending an invitation, and starting a browser authorization (an OAuth authorization code or a connector account setup). An API key gets `403 forbidden` from all of them, one status everywhere: it never mints something that can outlive it, and never hands a third party a link to complete on your behalf. A request without valid credentials receives `401 unauthenticated`; a disabled principal's credentials are treated as invalid.
 
 Every authenticated response, including the route's own answer and any error after authentication, carries `Cache-Control: no-store` and, when the session was renewed, its refreshed cookie.
+
+## Workspace selection and references
+
+Business routes such as `/api/v1/agents`, `/api/v1/models` and `/api/v1/threads` operate in one workspace. Login sessions must send `X-Workspace-ID` with its canonical ID. API keys use their confined workspace automatically; sending a different workspace header is `403 forbidden`. Management routes for organizations, workspaces and providers keep their scoped paths.
+
+Agents, skills, models, memories, environment templates and secrets accept a canonical ID or explicit `@key` in paths and reference query parameters, for example `/api/v1/agents/@support`. Bare keys are refused. Body selections use exactly one of `{"id": "…"}` or `{"key": "support"}`. An ID-shaped key is still a key when explicitly selected. References are confined to the current workspace; a reference to another workspace returns `404`.
+
+The Service resolves keys when it accepts a new input, then stores and executes against IDs. Read representations return canonical IDs. Keys cannot change; only physical deletion releases a key, and a replacement gets a new ID. Archive and disable keep the key reserved by the existing resource.
 
 ## Errors
 
@@ -65,7 +73,7 @@ Messages are for people; branch on `code` and `details.reason`. Error details ne
 Single-resource responses carry a strong `ETag`, such as `"ap_…:4"`, and views carry the same `version`. Operations that change an existing resource require the ETag you last read in `If-Match`:
 
 ```sh
-curl -X PATCH "$A13N_URL/api/v1/workspaces/$WORKSPACE/agents/$AGENT" \
+curl -X PATCH "$A13N_URL/api/v1/agents/$AGENT" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
   -H 'If-Match: "ap_...:4"' -d '{"description": "Answers billing questions"}'
 ```
@@ -82,7 +90,7 @@ These operations require an `Idempotency-Key` header of 1–512 visible ASCII ch
 - `POST …/runs/{run_id}/fork` and `POST …/runs/{run_id}/resume`
 - `POST …/uploads`
 
-Generate a unique key per logical request and reuse it when retrying after a lost response. Repeating a request with the same key and the same body returns the original result with `200` instead of `201`; the same key with a different body or target is `409 conflict` with reason `idempotency_key_reused`. Keys are scoped to the caller and workspace and do not expire.
+Generate a unique key per logical request and reuse it when retrying after a lost response. Repeating a request with the same key and the same body returns the original result with `200` instead of `201`; the same key with a different body or target is `409 conflict` with reason `idempotency_key_reused`. Idempotency keys are scoped to the caller and workspace and do not expire. Replay compares the submitted reference form before looking resources up: retrying a key-based body still returns the original result after deletion and key reuse. Changing that body to ID form counts as a different request.
 
 ## Paging
 
@@ -95,7 +103,7 @@ Collections return `{"items": [...], "next_cursor": "..."}`. Pass `limit` (1–1
 
 ## Identifiers and time
 
-IDs are opaque strings with a kind prefix, such as `ws_`, `ap_` (agent), `sess_`, `thread_`, `run_`. Paths accept workspace, agent and skill keys in place of IDs. Timestamps are RFC 3339 with an offset.
+IDs are opaque strings with a kind prefix, such as `ws_`, `ap_` (agent), `sess_`, `thread_`, `run_`. Management workspace paths accept workspace IDs or keys; business resource references use the explicit forms above. Timestamps are RFC 3339 with an offset.
 
 ## Streams
 

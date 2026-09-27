@@ -46,28 +46,28 @@ Create an API key under **Workspace settings → My API keys** and export it wit
 export A13N_URL=http://127.0.0.1:8080 A13N_API_KEY=a13n_... WORKSPACE=default
 ```
 
-Create an agent from a model ID (`mdl_…`, shown on the model's page or by `GET /api/v1/organizations/{organization_id}/models`):
+Create an agent from a model ID (`mdl_…`, shown on the model's page or by `GET /api/v1/models`):
 
 ```sh
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/agents" \
+curl -X POST "$A13N_URL/api/v1/agents" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
   -d '{"key": "helper", "name": "Helper",
-       "config": {"model": {"model_id": "mdl_..."}, "instructions": "Answer briefly."}}'
+       "config": {"model": {"id": "mdl_..."}, "instructions": "Answer briefly."}}'
 ```
 
 Start a conversation with its first message, naming the agent by the `id` the creation returned. The `Idempotency-Key` makes a retry after a lost response safe:
 
 ```sh
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/threads" \
+curl -X POST "$A13N_URL/api/v1/threads" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
   -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"agent_id": "ap_...", "payload": {"content": [{"type": "text", "text": "What is a13n?"}]}}'
+  -d '{"agent": {"id": "ap_..."}, "payload": {"content": [{"type": "text", "text": "What is a13n?"}]}}'
 ```
 
 The response holds the new `thread`, the message's inbox `entry` and the `run` it started. Read the run until its `status` is `completed`, `waiting`, `failed` or `cancelled`; a completed run's answer is in `output`:
 
 ```sh
-curl "$A13N_URL/api/v1/workspaces/$WORKSPACE/runs/run_..." -H "Authorization: Bearer $A13N_API_KEY"
+curl "$A13N_URL/api/v1/runs/run_..." -H "Authorization: Bearer $A13N_API_KEY"
 ```
 
 Instead of polling, follow the [thread stream](agents-and-runs.md#follow-a-thread-stream) or subscribe to [webhooks](files-and-webhooks.md#webhooks). Continue the conversation with `POST …/threads/{thread_id}/inbox`; see [Agents, threads and runs](agents-and-runs.md).

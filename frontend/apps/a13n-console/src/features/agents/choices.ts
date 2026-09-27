@@ -10,7 +10,6 @@ export function useAgentChoices() {
   return useQuery({
     queryKey: ["agent-choices", workspace.id],
     queryFn: async ({ signal }) => {
-      const path = { workspace_id: workspace.id };
       const [models, skills, connections] = await Promise.all([
         modelApi(client, organization.id, {
           kind: "workspace",
@@ -19,17 +18,19 @@ export function useAgentChoices() {
           .models(signal, undefined, undefined, undefined, true)
           .then((page) => page.items),
         allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace_id}/skills", {
-              params: { path, query: { cursor, limit: 100 } },
+          client
+            .workspace(workspace.id)
+            .GET("/api/v1/skills", {
+              params: { query: { cursor, limit: 100 } },
               signal,
             })
             .then(data),
         ),
         allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace_id}/connections", {
-              params: { path, query: { cursor, limit: 100 } },
+          client
+            .workspace(workspace.id)
+            .GET("/api/v1/connections", {
+              params: { query: { cursor, limit: 100 } },
               signal,
             })
             .then(data),

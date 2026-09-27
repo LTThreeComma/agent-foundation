@@ -25,7 +25,7 @@ def expect(response: httpx2.Response, status: int) -> Any:
 
 
 def message(agent: dict, text: str, **fields: Any) -> dict[str, Any]:
-    return {"agent_id": agent["id"], "payload": {"content": [{"type": "text", "text": text}]}, **fields}
+    return {"agent": {"id": agent["id"]}, "payload": {"content": [{"type": "text", "text": text}]}, **fields}
 
 
 class Workspace:
@@ -33,7 +33,8 @@ class Workspace:
 
     def __init__(self, client: httpx2.AsyncClient, tenant: dict[str, str]):
         self.client, self.tenant = client, tenant
-        self.path = f"/api/v1/workspaces/{tenant['workspace_id']}"
+        self.path = "/api/v1"
+        self.management = f"/api/v1/workspaces/{tenant['workspace_id']}"
         self.organization = f"/api/v1/organizations/{tenant['organization_id']}"
 
     async def create_model(self, base_url: str) -> str:
@@ -48,9 +49,8 @@ class Workspace:
             },
         )
         model = await self.client.post(
-            f"{self.organization}/models",
+            f"{self.path}/models",
             json={
-                "workspace_id": self.tenant["workspace_id"],
                 "provider_id": expect(provider, 201)["id"],
                 "key": "scripted",
                 "name": "Scripted",
@@ -62,7 +62,7 @@ class Workspace:
     async def create_agent(self, key: str, model_id: str, **config: Any) -> dict:
         response = await self.client.post(
             f"{self.path}/agents",
-            json={"key": key, "name": key.title(), "config": {"model": {"model_id": model_id}, **config}},
+            json={"key": key, "name": key.title(), "config": {"model": {"id": model_id}, **config}},
         )
         return expect(response, 201)
 

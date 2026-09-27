@@ -55,10 +55,10 @@ export function Agents() {
   const list = useQuery({
     queryKey: ["agents", workspace.id, query, archived, page.cursor],
     queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/agents", {
+      client
+        .workspace(workspace.id)
+        .GET("/api/v1/agents", {
           params: {
-            path: { workspace_id: workspace.id },
             query: {
               limit: PAGE_SIZE,
               cursor: page.cursor,
@@ -152,20 +152,17 @@ function useRevisions(items: readonly Agent[]) {
       enabled: !!agent.default_revision_id,
       staleTime: Infinity,
       queryFn: ({ signal }: { signal: AbortSignal }) =>
-        client.http
-          .GET(
-            "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions/{revision_id}",
-            {
-              params: {
-                path: {
-                  workspace_id: workspace.id,
-                  agent_id: agent.id,
-                  revision_id: agent.default_revision_id!,
-                },
+        client
+          .workspace(workspace.id)
+          .GET("/api/v1/agents/{agent_reference}/revisions/{revision_id}", {
+            params: {
+              path: {
+                agent_reference: agent.id,
+                revision_id: agent.default_revision_id!,
               },
-              signal,
             },
-          )
+            signal,
+          })
           .then(data),
     })),
   });
@@ -304,14 +301,15 @@ function ArchiveAgent({ agent }: { agent: Agent }) {
         </MenuItem>
       }
       action={() =>
-        client.http
+        client
+          .workspace(workspace.id)
           .POST(
             archived
-              ? "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/unarchive"
-              : "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/archive",
+              ? "/api/v1/agents/{agent_reference}/unarchive"
+              : "/api/v1/agents/{agent_reference}/archive",
             {
               params: {
-                path: { workspace_id: workspace.id, agent_id: agent.id },
+                path: { agent_reference: agent.id },
               },
               headers: ifMatch(rowTag(agent)),
             },

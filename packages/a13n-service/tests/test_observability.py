@@ -114,7 +114,7 @@ def messages(events: list[Event], message: str) -> list[Event]:
 async def test_requests_are_logged_and_measured_by_route_template_never_by_url(
     service: SimpleNamespace, reader: InMemoryMetricReader, logged: list[Event]
 ) -> None:
-    route = "/api/v1/workspaces/{workspace_id}/agents"
+    route = "/api/v1/agents"
     listed = {"http.route": route, "http.response.status_code": 200}
     before = measured(reader, "http.server.request.duration", listed)
 

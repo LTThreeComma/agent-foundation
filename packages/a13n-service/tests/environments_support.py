@@ -212,8 +212,8 @@ async def with_fake_providers(service: SimpleNamespace) -> SimpleNamespace:
     )
     config = {"model_name": "unused", "model_api": "openai.chat_completions"}
     model = await client.post(
-        f"{service.organization}/models",
-        json={**shared, "provider_id": model_provider.json()["id"], "key": "unused", "config": config},
+        f"{service.workspace}/models",
+        json={"name": "Unused", "provider_id": model_provider.json()["id"], "key": "unused", "config": config},
     )
     agent = await client.post(
         f"{service.workspace}/agents",
@@ -221,8 +221,8 @@ async def with_fake_providers(service: SimpleNamespace) -> SimpleNamespace:
             "key": "builder",
             "name": "Builder",
             "config": {
-                "model": {"model_id": model.json()["id"]},
-                "default_environment_template_id": template.json()["id"],
+                "model": {"id": model.json()["id"]},
+                "default_environment_template": {"id": template.json()["id"]},
             },
         },
     )
@@ -241,14 +241,14 @@ async def start(env: SimpleNamespace, text: str = "build it", **fields: object) 
 async def new_thread(env: SimpleNamespace, text: str, **fields: object) -> httpx2.Response:
     return await env.client.post(
         f"{env.workspace}/threads",
-        json={"agent_id": env.agent["id"], "payload": {"content": [{"type": "text", "text": text}]}, **fields},
+        json={"agent": {"id": env.agent["id"]}, "payload": {"content": [{"type": "text", "text": text}]}, **fields},
         headers={"idempotency-key": uuid4().hex},
     )
 
 
 async def reserve(env: SimpleNamespace, template_id: str, **fields: object) -> dict:
     """A managed sandbox reserved from a template, in `creating` until maintenance creates it."""
-    response = await env.client.post(f"{env.workspace}/environments", json={"template_id": template_id, **fields})
+    response = await env.client.post(f"{env.workspace}/environments", json={"template": {"id": template_id}, **fields})
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -287,7 +287,7 @@ async def backdate(env: SimpleNamespace, environment_id: str, **ago: timedelta) 
 async def follow_up(env: SimpleNamespace, thread_id: str, text: str) -> httpx2.Response:
     return await env.client.post(
         f"{env.workspace}/threads/{thread_id}/inbox",
-        json={"agent_id": env.agent["id"], "payload": {"content": [{"type": "text", "text": text}]}},
+        json={"agent": {"id": env.agent["id"]}, "payload": {"content": [{"type": "text", "text": text}]}},
         headers={"idempotency-key": uuid4().hex},
     )
 

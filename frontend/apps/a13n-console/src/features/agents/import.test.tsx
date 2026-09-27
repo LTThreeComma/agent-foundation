@@ -4,11 +4,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { afterEach, expect, it, vi } from "vitest";
 import { ImportAgentForm } from "./import";
+import { configInput } from "../../shared/resource-inputs";
 import { initialConfig } from "./configuration";
 import { agentFile, serializeAgentFile } from "./transfer";
 
 const http = vi.hoisted(() => ({ GET: vi.fn(), POST: vi.fn() }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_target" },
@@ -34,25 +37,29 @@ const config = {
     settings: { temperature: 0.4 },
   },
   plugins: [{ instance_name: "memory", plugin_key: "memory", config: {} }],
-  secret_requirements: [{ key: "token", scope: "workspace" as const }],
+  secret_requirements: [
+    { key: "token", secret_id: "sec_0123456789abcdef0123" },
+  ],
 };
 const source = serializeAgentFile(
   agentFile({ name: "Research", description: "Keep me" }, config),
 );
 
 function setup() {
-  http.GET.mockResolvedValue({
-    data: {
-      items: [
-        {
-          id: "mdl_0123456789abcdef0123",
-          key: "research",
-          name: "Research model",
-          enabled: true,
+  http.GET.mockImplementation(async (url: string) => ({
+    data: url.endsWith("/secrets")
+      ? { items: [{ id: "sec_0123456789abcdef0123", key: "token" }] }
+      : {
+          items: [
+            {
+              id: "mdl_0123456789abcdef0123",
+              key: "research",
+              name: "Research model",
+              enabled: true,
+            },
+          ],
         },
-      ],
-    },
-  });
+  }));
   const onSuccess = vi.fn();
   const cache = new QueryClient({
     defaultOptions: {
@@ -94,7 +101,7 @@ it("previews before creation and retries the same request without losing advance
     key: "research",
     name: "Research",
     description: "Keep me",
-    config,
+    config: configInput(config),
   });
   await user.click(screen.getByRole("button", { name: "Create agent" }));
   await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
@@ -144,26 +151,28 @@ it("blocks missing dependencies and requires an explicit replacement", async () 
 it("blocks an unavailable root Environment template until mapped in the destination", async () => {
   const { user } = setup();
   http.GET.mockImplementation(async (url: string) => ({
-    data: url.endsWith("/environment-templates")
-      ? {
-          items: [
-            {
-              id: "envtpl_fedcba9876543210fedc",
-              name: "Local sandbox",
-              enabled: true,
-            },
-          ],
-        }
-      : {
-          items: [
-            {
-              id: "mdl_0123456789abcdef0123",
-              key: "research",
-              name: "Research model",
-              enabled: true,
-            },
-          ],
-        },
+    data: url.endsWith("/secrets")
+      ? { items: [{ id: "sec_0123456789abcdef0123", key: "token" }] }
+      : url.endsWith("/environment-templates")
+        ? {
+            items: [
+              {
+                id: "envtpl_fedcba9876543210fedc",
+                name: "Local sandbox",
+                enabled: true,
+              },
+            ],
+          }
+        : {
+            items: [
+              {
+                id: "mdl_0123456789abcdef0123",
+                key: "research",
+                name: "Research model",
+                enabled: true,
+              },
+            ],
+          },
   }));
   const sourceWithTemplate = serializeAgentFile(
     agentFile(

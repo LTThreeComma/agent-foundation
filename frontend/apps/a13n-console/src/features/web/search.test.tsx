@@ -15,7 +15,9 @@ const http = vi.hoisted(() => ({
   POST: vi.fn(),
   PATCH: vi.fn(),
 }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("../../layout/workspace", () => ({
   useAccess: () => ({
     organization: { id: "org_test" },

@@ -9,7 +9,7 @@ In Console, open **Agents**, expand the **Create agent** menu and choose **Creat
 Through the API, prepare it, then [start a session](agents-and-runs.md#start-a-conversation) with the returned agent:
 
 ```sh
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/agent-composer" \
+curl -X POST "$A13N_URL/api/v1/agent-composer" \
   -H "Authorization: Bearer $A13N_API_KEY"
 ```
 

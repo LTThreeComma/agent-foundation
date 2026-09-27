@@ -43,7 +43,7 @@ afterEach(() => {
 });
 
 const AT = "2026-09-20T10:00:00Z";
-const base = "/api/v1/workspaces/ws_1/memories/mem_1";
+const base = "/api/v1/memories/mem_1";
 
 type Refusal = { status: number; code: string; details: object };
 

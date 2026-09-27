@@ -62,17 +62,15 @@ export function useConnectionDirectory(search: string) {
     options: { cursor?: string; refresh?: boolean } = {},
     signal?: AbortSignal,
   ) =>
-    client.http
-      .GET(
-        "/api/v1/workspaces/{workspace_id}/connector-providers/{provider_id}/apps",
-        {
-          params: {
-            path: { workspace_id: workspace.id, provider_id: provider.id },
-            query: { query: search, limit: 50, ...options },
-          },
-          signal,
+    client
+      .workspace(workspace.id)
+      .GET("/api/v1/connector-providers/{provider_id}/apps", {
+        params: {
+          path: { provider_id: provider.id },
+          query: { query: search, limit: 50, ...options },
         },
-      )
+        signal,
+      })
       .then(data);
   const queries = useQueries({
     queries: active.map((provider) => ({

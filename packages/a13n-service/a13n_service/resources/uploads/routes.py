@@ -9,15 +9,15 @@ from a13n_service.infra.http import IdempotencyKey
 from a13n_service.resources.requests import CurrentRuntime
 from a13n_service.resources.uploads import service
 from a13n_service.resources.uploads.schemas import Upload, UploadCreate
-from a13n_service.tenancy.requests import Actor, limit_uploads
+from a13n_service.tenancy.requests import Actor, Workspace, limit_uploads
 
-router = APIRouter(prefix="/api/v1/workspaces/{workspace_id}/uploads", tags=["assets"])
+router = APIRouter(prefix="/api/v1/uploads", tags=["assets"])
 
 
 @router.post("", response_model=Upload)
 async def create_upload(
     request: Request,
-    workspace_id: str,
+    workspace: Workspace,
     actor: Actor,
     runtime: CurrentRuntime,
     body: Annotated[UploadCreate, File()],
@@ -35,7 +35,7 @@ async def create_upload(
         runtime.storage,
         runtime.objects,
         actor,
-        workspace_id,
+        workspace.workspace_id,
         request_key=idempotency_key,
         filename=file.filename or "",
         content_type=file.content_type or "",

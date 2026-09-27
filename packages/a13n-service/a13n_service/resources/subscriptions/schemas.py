@@ -33,23 +33,25 @@ Kinds = Annotated[list[LifecycleKind], Field(min_length=1, max_length=len(LIFECY
 SigningSecret = Annotated[SecretStr, Field(min_length=16, max_length=256)]
 
 
-class SubscriptionFilter(BaseModel):
+class FilterFields(BaseModel):
     """Absent fields match every run."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    agent_id: ObjectId | None = None
     session_id: ObjectId | None = None
     thread_id: ObjectId | None = None
 
 
-class SubscriptionCreate(BaseModel):
+class SubscriptionFilter(FilterFields):
+    agent_id: ObjectId | None = None
+
+
+class SubscriptionCreateFields(BaseModel):
     """Without `signing_secret` the service generates one; either way it is returned only by this request."""
 
     model_config = ConfigDict(extra="forbid")
     name: Name
     url: Url
     kinds: Kinds
-    filter: SubscriptionFilter = Field(default_factory=SubscriptionFilter)
     enabled: bool = True
     signing_secret: SigningSecret | None = None
 
@@ -59,14 +61,13 @@ class SubscriptionCreate(BaseModel):
         return list(dict.fromkeys(value))
 
 
-class SubscriptionUpdate(BaseModel):
+class SubscriptionUpdateFields(BaseModel):
     """`signing_secret` replaces the secret for deliveries queued after this change."""
 
     model_config = ConfigDict(extra="forbid")
     name: Name | None = None
     url: Url | None = None
     kinds: Kinds | None = None
-    filter: SubscriptionFilter | None = None
     enabled: bool | None = None
     signing_secret: SigningSecret | None = None
 
@@ -74,6 +75,14 @@ class SubscriptionUpdate(BaseModel):
     @classmethod
     def unique_kinds(cls, value: list[LifecycleKind] | None) -> list[LifecycleKind] | None:
         return None if value is None else list(dict.fromkeys(value))
+
+
+class SubscriptionCreate(SubscriptionCreateFields):
+    filter: SubscriptionFilter = Field(default_factory=SubscriptionFilter)
+
+
+class SubscriptionUpdate(SubscriptionUpdateFields):
+    filter: SubscriptionFilter | None = None
 
 
 class Subscription(BaseModel):

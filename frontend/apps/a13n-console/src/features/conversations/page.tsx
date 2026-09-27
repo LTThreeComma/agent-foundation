@@ -70,8 +70,7 @@ export function NewConversation() {
   }>({});
   async function consoleSession() {
     prepared.current.session ??= data(
-      await client.http.POST("/api/v1/workspaces/{workspace_id}/sessions", {
-        params: { path: { workspace_id: workspace.id } },
+      await client.workspace(workspace.id).POST("/api/v1/sessions", {
         body: { labels: CONSOLE_SESSION_LABELS },
       }),
     );
@@ -81,10 +80,12 @@ export function NewConversation() {
   async function primaryMount(
     choice: EnvironmentChoice,
   ): Promise<Schema["MountCreate"]> {
-    if (!("template_id" in choice)) return { name: PRIMARY_MOUNT, ...choice };
+    if (!("template" in choice)) return { name: PRIMARY_MOUNT, ...choice };
     const reserved = prepared.current.environment;
     const environment =
-      reserved?.template_id === choice.template_id
+      reserved &&
+      "id" in choice.template &&
+      reserved.template_id === choice.template.id
         ? reserved
         : await createManagedEnvironment(client, workspace.id, choice);
     prepared.current.environment = environment;
@@ -94,10 +95,10 @@ export function NewConversation() {
     queryKey: ["agent-picker", workspace.id],
     queryFn: ({ signal }) =>
       allPages((cursor) =>
-        client.http
-          .GET("/api/v1/workspaces/{workspace_id}/agents", {
+        client
+          .workspace(workspace.id)
+          .GET("/api/v1/agents", {
             params: {
-              path: { workspace_id: workspace.id },
               query: { cursor, limit: 100, archived: false },
             },
             signal,
@@ -151,10 +152,14 @@ export function NewConversation() {
           agentName={selected?.name}
           options={<RunOptions options={options} showAgent={false} />}
           submit={async (payload) => {
-            const { environment, ...choice } = options.build();
+            const {
+              environment,
+              agent_id: selectedAgentId,
+              ...choice
+            } = options.build();
             const body = {
               ...choice,
-              agent_id: agentId,
+              agent: { id: agentId },
               payload,
               session_id: (await consoleSession()).id,
               environments: environment
@@ -162,16 +167,12 @@ export function NewConversation() {
                 : [],
             };
             const { thread, run } = data(
-              await client.http.POST(
-                "/api/v1/workspaces/{workspace_id}/threads",
-                {
-                  params: {
-                    path: { workspace_id: workspace.id },
-                    header: commandHeaders(idempotency.forBody(body)),
-                  },
-                  body,
+              await client.workspace(workspace.id).POST("/api/v1/threads", {
+                params: {
+                  header: commandHeaders(idempotency.forBody(body)),
                 },
-              ),
+                body,
+              }),
             );
             void invalidateConversation(cache, workspace.id, {
               sessionId: thread.session_id,

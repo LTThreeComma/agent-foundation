@@ -14,7 +14,9 @@ import { initialConfig } from "./configuration";
 import { AgentDetail } from "./detail";
 
 const http = vi.hoisted(() => ({ GET: vi.fn(), POST: vi.fn() }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_test" },
@@ -168,7 +170,7 @@ it("reloads the selected configuration and version after Set as default", async 
     "First",
   );
   expect(http.POST.mock.calls[0]?.[0]).toBe(
-    "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions/{revision_id}/set-default",
+    "/api/v1/agents/{agent_reference}/revisions/{revision_id}/set-default",
   );
   expect(http.POST.mock.calls[0]?.[1].headers["If-Match"]).toBe('"apr_v2"');
 });

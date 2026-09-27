@@ -83,7 +83,7 @@ async def test_deleting_a_target_keeps_its_device_and_drops_its_token(service) -
         json={"key": "box", "name": "Box", "provider_id": provider.json()["id"]},
     )
     managed = await service.client.post(
-        f"{service.workspace}/environments", json={"template_id": template.json()["id"]}
+        f"{service.workspace}/environments", json={"template": {"id": template.json()["id"]}}
     )
     assert managed.status_code == 201, managed.text
     for body, field in (({"endpoint": "https://laptop.test", "token": TOKEN}, "endpoint"), ({"token": TOKEN}, "token")):

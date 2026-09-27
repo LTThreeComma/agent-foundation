@@ -46,10 +46,11 @@ export function MCPOAuthSetup({
     mutationFn: async (basis: Schema["Connection"]) => {
       await authorizeConnection(client, basis);
       return data(
-        await client.http.GET(
-          "/api/v1/workspaces/{workspace_id}/connections/{connection_id}",
-          { params: { path: connectionPath(basis) } },
-        ),
+        await client
+          .workspace(basis.workspace_id)
+          .GET("/api/v1/connections/{connection_id}", {
+            params: { path: connectionPath(basis) },
+          }),
       );
     },
     onSuccess: (updated) => {

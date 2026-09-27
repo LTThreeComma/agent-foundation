@@ -90,13 +90,13 @@ function setup(workspace: string, search = "") {
   const older = makeRevision("skr_older", 1, "example/", olderFiles);
   const zip = zipSync(currentFiles);
   const requests: Request[] = [];
-  const skills = `/api/v1/workspaces/${workspace}/skills`;
+  const skills = `/api/v1/skills`;
   const fetcher: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
     requests.push(request);
-    const route = `${request.method} ${new URL(request.url).pathname}`;
+    const route = `${request.method} ${decodeURIComponent(new URL(request.url).pathname)}`;
     switch (route) {
-      case `GET ${skills}/example`:
+      case `GET ${skills}/@example`:
       case `GET ${skills}/sk_example`:
         return Response.json(skill, { headers: { ETag: '"skill-v1"' } });
       case `GET ${skills}/sk_example/revisions`:
@@ -126,7 +126,7 @@ function setup(workspace: string, search = "") {
       case `POST ${skills}/sk_example/revisions/skr_older/set-default`:
         skill.default_revision_id = "skr_older";
         return Response.json(skill, { headers: { ETag: '"skill-v2"' } });
-      case `GET /api/v1/workspaces/${workspace}/agents`:
+      case `GET /api/v1/agents`:
         return Response.json({
           items: [
             {
@@ -206,20 +206,24 @@ it.each(["ws_first", "ws_second"])(
         "href",
       ),
     ).toBe("/workspace/design/agents/example-agent");
-    const skills = `/api/v1/workspaces/${workspace}/skills`;
+    const skills = `/api/v1/skills`;
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
-      `${skills}/example`,
+      `${skills}/%40example`,
       `${skills}/sk_example/revisions/skr_example`,
       `${skills}/sk_example/revisions`,
       `${skills}/sk_example/revisions/skr_example/content`,
-      `/api/v1/workspaces/${workspace}/agents`,
+      `/api/v1/agents`,
     ]);
     // Only unarchived agents with a revision pinning the skill are listed.
     expect(
       Object.fromEntries(new URL(requests.at(-1)!.url).searchParams),
-    ).toEqual({ skill_id: "sk_example", archived: "false" });
+    ).toEqual({ skill: "sk_example", archived: "false" });
     expect(
-      requests.every((request) => request.credentials === "same-origin"),
+      requests.every(
+        (request) =>
+          request.credentials === "same-origin" &&
+          request.headers.get("X-Workspace-ID") === workspace,
+      ),
     ).toBe(true);
   },
 );
@@ -251,11 +255,12 @@ it("renames and archives a skill with its CSRF proof and existing ETag", async (
   const mutations = requests.filter((request) => request.method !== "GET");
   expect(
     mutations.map(
-      (request) => `${request.method} ${new URL(request.url).pathname}`,
+      (request) =>
+        `${request.method} ${decodeURIComponent(new URL(request.url).pathname)}`,
     ),
   ).toEqual([
-    "PATCH /api/v1/workspaces/ws_settings/skills/sk_example",
-    "POST /api/v1/workspaces/ws_settings/skills/sk_example/archive",
+    "PATCH /api/v1/skills/sk_example",
+    "POST /api/v1/skills/sk_example/archive",
   ]);
   for (const request of mutations) {
     expect(request.headers.get("If-Match")).toBe('"skill-v1"');
@@ -319,7 +324,7 @@ it("sets an older version as the default with the workspace and existing ETag", 
   ).toBeTruthy();
   const request = requests.find((request) => request.method === "POST")!;
   expect(new URL(request.url).pathname).toBe(
-    "/api/v1/workspaces/ws_default/skills/sk_example/revisions/skr_older/set-default",
+    "/api/v1/skills/sk_example/revisions/skr_older/set-default",
   );
   expect(request.headers.get("If-Match")).toBe('"skill-v1"');
   expect(request.headers.get("X-CSRF-Token")).toBe("test-csrf");

@@ -1,1 +1,1 @@
-"""Write-only workspace and principal-private secret values."""
+"""Write-only workspace secret values."""

@@ -72,7 +72,7 @@ def seed_agents(api: Api, ws: str, local: Local, skills: dict[str, Json], connec
         key: str, name: str, description: str, labels: dict[str, str], model: Json = local.model, **config: object
     ) -> Json:
         instructions = f"You are the {name.lower()} of a fictional product team. Keep answers short."
-        body = {"model": {"model_id": model["id"]}, "instructions": instructions, **config}
+        body = {"model": {"id": model["id"]}, "instructions": instructions, **config}
         return api.post(
             f"{ws}/agents", {"key": key, "name": name, "description": description, "labels": labels, "config": body}
         )
@@ -86,7 +86,7 @@ def seed_agents(api: Api, ws: str, local: Local, skills: dict[str, Json], connec
             "Release writer",
             "Drafts release notes in the shared review workspace.",
             {"team": "docs", "stage": "production"},
-            skills=[{"skill_id": skills["release-notes"]["id"]}],
+            skills=[{"id": skills["release-notes"]["id"]}],
             toolsets={"assets": {"enabled": True}},
         ),
         reviewer=agent(
@@ -132,16 +132,16 @@ def seed_agents(api: Api, ws: str, local: Local, skills: dict[str, Json], connec
             "Delegates reviews to the documentation assistant.",
             {"team": "docs"},
             subagent_mode="async",
-            subagents={"reviewer": {"agent_id": assistant["id"], "description": "Reviews one release note."}},
+            subagents={"reviewer": {"agent": {"id": assistant["id"]}, "description": "Reviews one release note."}},
         ),
         analyst=agent(
             "workspace-analyst",
             "Workspace analyst",
             "Works in an environment of its own, reserved from the local template.",
             {"team": "platform"},
-            default_environment_template_id=local.template["id"],
-            skills=[{"skill_id": skills["accessibility-review"]["id"]}],
-            secret_requirements=[{"key": "RELEASE_TOKEN"}],
+            default_environment_template={"id": local.template["id"]},
+            skills=[{"id": skills["accessibility-review"]["id"]}],
+            secret_requirements=[{"secret": {"key": "RELEASE_TOKEN"}}],
         ),
     )
     api.put(f"{ws}/agents/{cast.writer['id']}/avatar", cast.writer, png())

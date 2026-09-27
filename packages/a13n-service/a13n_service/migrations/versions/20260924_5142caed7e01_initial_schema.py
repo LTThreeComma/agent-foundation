@@ -454,7 +454,6 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
         sa.Column("workspace_id", sa.String(), nullable=False),
-        sa.Column("principal_id", sa.String(length=72), nullable=True),
         sa.Column("key", sa.String(), nullable=False),
         sa.Column("ciphertext", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("created_by_id", sa.String(length=72), nullable=False),
@@ -471,15 +470,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["organization_id"], ["organizations.id"], name=op.f("fk_secrets_organization_id_organizations")
         ),
-        sa.ForeignKeyConstraint(["principal_id"], ["principals.id"], name=op.f("fk_secrets_principal_id_principals")),
         sa.ForeignKeyConstraint(["updated_by_id"], ["principals.id"], name=op.f("fk_secrets_updated_by_id_principals")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_secrets")),
-    )
-    op.create_index(
-        "uq_secrets_owner_key",
-        "secrets",
-        ["workspace_id", sa.literal_column("COALESCE(principal_id, '')"), "key"],
-        unique=True,
+        sa.UniqueConstraint("workspace_id", "key", name=op.f("uq_secrets_workspace_id_key")),
     )
     op.create_table(
         "sessions",
@@ -814,7 +807,7 @@ def upgrade() -> None:
         "models",
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
-        sa.Column("workspace_id", sa.String(), nullable=True),
+        sa.Column("workspace_id", sa.String(), nullable=False),
         sa.Column("provider_id", sa.String(), nullable=False),
         sa.Column("key", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
@@ -845,7 +838,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["updated_by_id"], ["principals.id"], name=op.f("fk_models_updated_by_id_principals")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_models")),
         sa.UniqueConstraint("organization_id", "id", name=op.f("uq_models_organization_id_id")),
-        sa.UniqueConstraint("provider_id", "key", name=op.f("uq_models_provider_id_key")),
+        sa.UniqueConstraint("workspace_id", "key", name=op.f("uq_models_workspace_id_key")),
     )
     op.create_table(
         "skill_revisions",
@@ -1659,6 +1652,9 @@ def upgrade() -> None:
     """
     )
     op.execute(
+        "CREATE TRIGGER refuse_mutation BEFORE UPDATE ON agents FOR EACH ROW WHEN (OLD.key IS DISTINCT FROM NEW.key) EXECUTE FUNCTION refuse_mutation()"
+    )
+    op.execute(
         """
     CREATE TRIGGER stamp_resource BEFORE UPDATE ON api_keys FOR EACH ROW WHEN ((to_jsonb(OLD) - '{last_used_at}'::text[]) IS DISTINCT FROM (to_jsonb(NEW) - '{last_used_at}'::text[])) EXECUTE FUNCTION stamp_resource()
     """
@@ -1734,6 +1730,9 @@ def upgrade() -> None:
     """
     )
     op.execute(
+        "CREATE TRIGGER refuse_mutation BEFORE UPDATE ON secrets FOR EACH ROW WHEN (OLD.key IS DISTINCT FROM NEW.key) EXECUTE FUNCTION refuse_mutation()"
+    )
+    op.execute(
         """
     CREATE TRIGGER stamp_resource BEFORE UPDATE ON sessions FOR EACH ROW WHEN ((to_jsonb(OLD) - '{last_run_id,updated_at}'::text[]) IS DISTINCT FROM (to_jsonb(NEW) - '{last_run_id,updated_at}'::text[])) EXECUTE FUNCTION stamp_resource()
     """
@@ -1747,6 +1746,9 @@ def upgrade() -> None:
         """
     CREATE TRIGGER guard_identity BEFORE UPDATE ON skills FOR EACH ROW EXECUTE FUNCTION guard_identity()
     """
+    )
+    op.execute(
+        "CREATE TRIGGER refuse_mutation BEFORE UPDATE ON skills FOR EACH ROW WHEN (OLD.key IS DISTINCT FROM NEW.key) EXECUTE FUNCTION refuse_mutation()"
     )
     op.execute(
         """
@@ -1815,6 +1817,9 @@ def upgrade() -> None:
     """
     )
     op.execute(
+        "CREATE TRIGGER refuse_mutation BEFORE UPDATE ON environment_templates FOR EACH ROW WHEN (OLD.key IS DISTINCT FROM NEW.key) EXECUTE FUNCTION refuse_mutation()"
+    )
+    op.execute(
         """
     CREATE FUNCTION environment_templates_provider_id_in_scope() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
@@ -1844,6 +1849,9 @@ def upgrade() -> None:
         """
     CREATE TRIGGER guard_identity BEFORE UPDATE ON models FOR EACH ROW EXECUTE FUNCTION guard_identity()
     """
+    )
+    op.execute(
+        "CREATE TRIGGER refuse_mutation BEFORE UPDATE ON models FOR EACH ROW WHEN (OLD.key IS DISTINCT FROM NEW.key) EXECUTE FUNCTION refuse_mutation()"
     )
     op.execute(
         """
@@ -2188,7 +2196,6 @@ def downgrade() -> None:
     op.drop_table("skills")
     op.drop_index("ix_sessions_workspace_updated", table_name="sessions")
     op.drop_table("sessions")
-    op.drop_index("uq_secrets_owner_key", table_name="secrets")
     op.drop_table("secrets")
     op.drop_table("passwords")
     op.drop_table("model_providers")

@@ -27,10 +27,10 @@ In Console, open **Skills → Import skill** and choose a ZIP file or a GitHub r
 
 ```sh
 # Stage the archive (see Uploads), then create the skill from it
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/uploads" \
+curl -X POST "$A13N_URL/api/v1/uploads" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Idempotency-Key: release-notes-1" -F file=@release-notes.zip
 
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/skills" \
+curl -X POST "$A13N_URL/api/v1/skills" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
   -d '{"source": {"kind": "upload", "upload_id": "upl_..."}}'
 ```
@@ -52,29 +52,26 @@ curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/skills" \
 - `PATCH …/skills/{skill_id}` changes `name`, `description` and `labels`. Lists filter by `label`, `q`, `archived` and `source` (`upload` or `github`, of the default revision).
 - `POST …/archive` stops new agent revisions from pinning the skill and refuses changes; agents that already pin it keep working. `POST …/unarchive` reverses it.
 
-An agent revision selects skills in `skills` as `{"skill_id": ..., "revision_id": ...}`; without `revision_id`, saving pins the skill's current default revision.
+An agent revision selects skills in `skills` as `{"id": ..., "revision_id": ...} or {"key": "release-notes", "revision_id": ...}`; without `revision_id`, saving pins the skill's current default revision.
 
 ## Secrets
 
 A secret is a value a tool needs at execution, such as a token for a plugin tool. Values are write-only: they are encrypted with the deployment's key ring and never returned.
 
 ```sh
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/secrets" \
+curl -X POST "$A13N_URL/api/v1/secrets" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
-  -d '{"key": "JIRA_TOKEN", "value": "...", "scope": "workspace"}'
+  -d '{"key": "JIRA_TOKEN", "value": "..."}'
 ```
 
-| Scope       | Owner         | Who can see and change it                                                                                                             |
-| ----------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `workspace` | The workspace | Members read its metadata; `write` creates, replaces and deletes it.                                                                  |
-| `user`      | The creator   | Only the creator sees and changes it (`run` is enough). A workspace administrator can delete it by ID, but cannot list or replace it. |
+All secrets belong to the workspace. `read` reveals metadata only; `write` creates, replaces and deletes values. There is one secret per key in the workspace, with no personal values or scope selector.
 
-One workspace secret and one private secret per person may exist for each key. `PUT …/secrets/{secret_id}` with `{value}` and `If-Match` replaces the value; key and scope never change. `DELETE` removes it.
+`PUT …/secrets/{secret_id}` with `{value}` and `If-Match` replaces the value. The key is immutable. `DELETE` removes the instance and releases its key, but the next instance always has a different ID.
 
-An agent revision declares the secrets its tools need in `secret_requirements`, such as `[{"key": "JIRA_TOKEN", "scope": "workspace"}]`. A `user` requirement resolves to the run principal's own private secret, so each person's runs use their own value.
+An agent input declares `secret_requirements`, for example `[{"secret": {"key": "JIRA_TOKEN"}}]` or `[{"secret": {"id": "sec_..."}}]`. The Service resolves that selection once and stores its ID and credential audience key.
 
-- Before a run starts, every declared secret must exist; a missing one fails the run and names only its key.
-- A tool receives a secret only if its agent declares every secret the tool asks for, and only for the duration of that call. Inline subagents use their own declarations, not their parent's.
-- Runs keep no copy of secret values: a deleted or replaced secret affects later executions.
+- Before a run starts, every declared ID must exist. A missing one fails the run naming its ID, without decrypting values.
+- A tool receives a value only when its agent declares the requested audience and the call is authorized. Inline subagents use their own declarations.
+- Values are read and decrypted per call. Rotation applies to the next call. Deleting a secret makes its old references fail even if a new secret reuses the key.
 
 Secrets are not injected into environments or connection requests; connections and providers keep their own write-only credentials.

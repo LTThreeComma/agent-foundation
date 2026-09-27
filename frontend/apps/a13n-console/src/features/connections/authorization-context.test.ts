@@ -27,7 +27,12 @@ it("starts authorization under the seen version and returns to the Console callb
     } satisfies Schema["AuthorizationResult"],
     response: new Response(),
   });
-  const client = { http: { POST: post } } as unknown as Client;
+  const client = {
+    http: { POST: post },
+    workspace() {
+      return { POST: post };
+    },
+  } as unknown as Client;
   const connection = {
     id: "conn_test",
     organization_id: "org_test",
@@ -54,10 +59,10 @@ it("starts authorization under the seen version and returns to the Console callb
   await startBrowserAuthorization(client, connection, "/workspace/design");
 
   expect(post).toHaveBeenCalledWith(
-    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorize",
+    "/api/v1/connections/{connection_id}/authorize",
     {
       params: {
-        path: { workspace_id: "ws_test", connection_id: "conn_test" },
+        path: { connection_id: "conn_test" },
       },
       headers: { "If-Match": '"conn_test:3"' },
       body: { return_url: `${window.location.origin}/connections/callback` },

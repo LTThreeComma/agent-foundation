@@ -42,10 +42,11 @@ export function AgentVersions({
   const query = useQuery({
     queryKey: ["agent-revisions", workspace.id, agent.id, page.cursor],
     queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions", {
+      client
+        .workspace(workspace.id)
+        .GET("/api/v1/agents/{agent_reference}/revisions", {
           params: {
-            path: { workspace_id: workspace.id, agent_id: agent.id },
+            path: { agent_reference: agent.id },
             query: { cursor: page.cursor, limit: 20 },
           },
           signal,
@@ -119,14 +120,14 @@ export function AgentVersions({
                           "Version information is unavailable. Reload this page.",
                         ),
                       );
-                    await client.http
+                    await client
+                      .workspace(workspace.id)
                       .POST(
-                        "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions/{revision_id}/set-default",
+                        "/api/v1/agents/{agent_reference}/revisions/{revision_id}/set-default",
                         {
                           params: {
                             path: {
-                              workspace_id: workspace.id,
-                              agent_id: agent.id,
+                              agent_reference: agent.id,
                               revision_id: item.id,
                             },
                           },

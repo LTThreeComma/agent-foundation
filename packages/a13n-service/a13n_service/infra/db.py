@@ -91,6 +91,13 @@ def immutable(table: str) -> str:
     return trigger(table, "refuse_mutation", on="BEFORE UPDATE OR DELETE")
 
 
+def immutable_columns(table: str, *columns: str) -> str:
+    """Reject updates to named identity columns using the shared mutation guard."""
+    return trigger(
+        table, "refuse_mutation", when=" OR ".join(f"OLD.{column} IS DISTINCT FROM NEW.{column}" for column in columns)
+    )
+
+
 def identity_guarded(table: str) -> str:
     """Tenant resources never change identity, scope or authorship once created."""
     return trigger(table, "guard_identity")

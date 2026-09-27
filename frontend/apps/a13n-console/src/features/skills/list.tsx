@@ -51,10 +51,10 @@ export function SkillsPage() {
       page.cursor,
     ],
     queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/skills", {
+      client
+        .workspace(workspace.id)
+        .GET("/api/v1/skills", {
           params: {
-            path: { workspace_id: workspace.id },
             query: {
               cursor: page.cursor,
               // The chip adds archived items; omitting the filter lists both.

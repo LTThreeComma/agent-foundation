@@ -59,10 +59,11 @@ export function MemoryConfiguration({ resource }: { resource: Resource }) {
   }
   const save = useMutation({
     mutationFn: () =>
-      client.http
-        .PATCH("/api/v1/workspaces/{workspace_id}/memories/{memory_id}", {
+      client
+        .workspace(workspace.id)
+        .PATCH("/api/v1/memories/{memory_reference}", {
           params: {
-            path: { workspace_id: workspace.id, memory_id: memory.id },
+            path: { memory_reference: memory.id },
           },
           headers: ifMatch(base.etag),
           body: memoryUpdate(memory, draft),
@@ -198,18 +199,16 @@ export function MemoryConfiguration({ resource }: { resource: Resource }) {
                     )
               }
               action={() =>
-                client.http.DELETE(
-                  "/api/v1/workspaces/{workspace_id}/memories/{memory_id}",
-                  {
+                client
+                  .workspace(workspace.id)
+                  .DELETE("/api/v1/memories/{memory_reference}", {
                     params: {
                       path: {
-                        workspace_id: workspace.id,
-                        memory_id: memory.id,
+                        memory_reference: memory.id,
                       },
                     },
                     headers: ifMatch(base.etag),
-                  },
-                )
+                  })
               }
               onSuccess={() => {
                 navigate(`${basePath}/memories`);

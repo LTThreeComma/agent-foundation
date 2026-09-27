@@ -11,7 +11,8 @@ import {
 } from "../../shared/forms";
 import { useCredentialSection } from "../../shared/use-credential-section";
 import { credentialDescription, credentialLabel } from "../providers";
-import { modelApi, type ModelScope } from "./api";
+import { modelProviderApi } from "./api";
+import type { ProviderScope } from "../providers/api";
 import {
   initialHeaders,
   newHeaders,
@@ -35,19 +36,19 @@ export function useProviderDraft({
   close,
   onCreated,
 }: {
-  scope: ModelScope;
+  scope: ProviderScope;
   resource?: { value: Schema["Provider"]; etag?: string };
   definitions: Schema["ProviderType"][];
   initialType?: string;
   close: () => void;
-  onCreated?: (provider: Schema["Provider"], modelApi?: string) => void;
+  onCreated?: (provider: Schema["Provider"], modelProviderApi?: string) => void;
 }) {
   const [original] = useState(resource),
     { t } = useTranslation(),
     client = useClient(),
     { organization } = useAccess(),
     cache = useQueryClient(),
-    api = modelApi(client, organization.id, scope);
+    api = modelProviderApi(client, organization.id, scope);
   const [type, setType] = useState(
       original?.value.type ??
         initialType ??

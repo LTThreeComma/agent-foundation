@@ -1,12 +1,12 @@
-"""Secret values, encrypted and bound to their own row; `principal_id` makes one private to its owner."""
+"""Workspace secrets, encrypted and bound to their immutable identity."""
 
 from typing import ClassVar
 
-from sqlalchemy import ForeignKey, ForeignKeyConstraint, Index, String, text
+from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from a13n_service.infra.db import Base, Stamped, identity_guarded, rules
+from a13n_service.infra.db import Base, Stamped, identity_guarded, immutable_columns, rules
 
 
 class SecretRow(Stamped, Base):
@@ -14,14 +14,12 @@ class SecretRow(Stamped, Base):
     KIND: ClassVar[str] = "secret"
     __table_args__ = (
         ForeignKeyConstraint(["organization_id", "workspace_id"], ["workspaces.organization_id", "workspaces.id"]),
-        # A key names at most one workspace secret and one private secret per principal.
-        Index("uq_secrets_owner_key", "workspace_id", text("COALESCE(principal_id, '')"), "key", unique=True),
-        rules(identity_guarded("secrets")),
+        UniqueConstraint("workspace_id", "key"),
+        rules(identity_guarded("secrets"), immutable_columns("secrets", "key")),
     )
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))
     workspace_id: Mapped[str]
-    principal_id: Mapped[str | None] = mapped_column(ForeignKey("principals.id"))
     key: Mapped[str]
     # An encryption envelope whose authenticated data is this row's identity.
     ciphertext: Mapped[dict] = mapped_column(JSONB)

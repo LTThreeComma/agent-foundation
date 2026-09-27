@@ -17,7 +17,7 @@ import {
   providerKeyLink,
   providerTestResult,
 } from "../providers";
-import { type ModelScope } from "./api";
+import type { ProviderScope } from "../providers/api";
 import {
   ProviderConnection,
   ordinaryConfigurationSchema,
@@ -33,7 +33,7 @@ export function ProviderForm({
   reload,
 }: {
   reload: () => Promise<void>;
-  scope: ModelScope;
+  scope: ProviderScope;
   resource: { value: Schema["Provider"]; etag?: string };
   definitions: Schema["ProviderType"][];
   close: () => void;

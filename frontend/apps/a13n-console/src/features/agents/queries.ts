@@ -5,19 +5,20 @@ import type { Client } from "../../service-client";
 import { allPages, data, type Schema } from "../../shared/api";
 import { modelApi } from "../models/api";
 
-/** One Agent by ID, for a single read or for several at once. */
+/** One Agent by canonical ID or explicit @key, for a single read or for several at once. */
 export function agentQuery(
   client: Client,
   workspaceId: string,
-  agentId?: string,
+  reference?: string,
 ) {
   return queryOptions({
-    queryKey: ["agent-by-id", workspaceId, agentId],
-    enabled: !!agentId,
+    queryKey: ["agent-reference", workspaceId, reference],
+    enabled: !!reference,
     queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/agents/{agent_id}", {
-          params: { path: { workspace_id: workspaceId, agent_id: agentId! } },
+      client
+        .workspace(workspaceId)
+        .GET("/api/v1/agents/{agent_reference}", {
+          params: { path: { agent_reference: reference! } },
           signal,
         })
         .then(data),

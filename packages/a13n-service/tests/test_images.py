@@ -27,7 +27,7 @@ def changing(item: dict, content_type: str = "image/png") -> dict[str, str]:
 async def join(service: SimpleNamespace, stack: AsyncExitStack, email: str, role: str) -> httpx2.AsyncClient:
     """A client logged in as a new member of the default workspace, joined through a real invitation."""
     receipt = (
-        await service.client.post(f"{service.workspace}/invitations", json={"email": email, "role": role})
+        await service.client.post(f"{service.management}/invitations", json={"email": email, "role": role})
     ).json()
     client = await stack.enter_async_context(
         httpx2.AsyncClient(transport=httpx2.ASGITransport(app=service.app), base_url="https://service.test")
@@ -81,13 +81,17 @@ async def test_profile_images(service, settings: Settings) -> None:  # type: ign
         theirs = await member.put(AVATAR, content=JPEG, headers=changing(me, "image/jpeg"))
         assert theirs.status_code == 200
         # Views that name a principal carry its image.
-        [grant] = (await client.get(f"{service.workspace}/grants")).json()["items"]
+        [grant] = (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants")).json()["items"]
         assert grant["principal"]["image_url"] == theirs.json()["image_url"]
         assert (await client.get(theirs.json()["image_url"])).headers["content-type"] == "image/jpeg"
         # Once the user shares no organization with the caller, there is no such user to show.
-        assert (await client.delete(f"{service.workspace}/grants/{grant['id']}")).status_code == 204
+        assert (
+            await client.delete(f"/api/v1/workspaces/{service.tenant.workspace_id}/grants/{grant['id']}")
+        ).status_code == 204
         assert (await client.get(theirs.json()["image_url"])).status_code == 404
-    account = (await client.post(f"{service.workspace}/service-accounts", json={"name": "ci"})).json()
+    account = (
+        await client.post(f"/api/v1/workspaces/{service.tenant.workspace_id}/service-accounts", json={"name": "ci"})
+    ).json()
     assert (await client.get(f"/api/v1/users/{account['id']}/avatar")).status_code == 404
 
     removed = await client.delete(AVATAR, headers=changing(stored.json()))
@@ -98,14 +102,16 @@ async def test_profile_images(service, settings: Settings) -> None:  # type: ign
 async def test_organization_and_workspace_icons(service, settings: Settings) -> None:  # type: ignore[no-untyped-def]
     client, objects = service.client, settings.objects.root
     organization = (await client.get(service.organization)).json()
-    workspace = (await client.get(service.workspace)).json()
+    workspace = (await client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()
     async with AsyncExitStack() as stack:
         viewer = await join(service, stack, "viewer@example.com", "viewer")
         # Only administrators change icons, and a refused upload stores nothing.
         refused = await viewer.put(f"{service.organization}/icon", content=JPEG, headers=changing(organization))
         assert refused.status_code == 403
         assert (
-            await viewer.put(f"{service.workspace}/icon", content=JPEG, headers=changing(workspace))
+            await viewer.put(
+                f"/api/v1/workspaces/{service.tenant.workspace_id}/icon", content=JPEG, headers=changing(workspace)
+            )
         ).status_code == 403
         assert not (objects / "orgs").exists()
 
@@ -119,7 +125,9 @@ async def test_organization_and_workspace_icons(service, settings: Settings) -> 
         served = await viewer.get(icon.json()["image_url"])
         assert (served.headers["content-type"], served.content) == ("image/jpeg", JPEG)
 
-        workspace_icon = await client.put(f"{service.workspace}/icon", content=WEBP, headers=changing(workspace))
+        workspace_icon = await client.put(
+            f"/api/v1/workspaces/{service.tenant.workspace_id}/icon", content=WEBP, headers=changing(workspace)
+        )
         assert workspace_icon.status_code == 200
         digest = hashlib.sha256(WEBP).hexdigest()
         assert (objects / f"orgs/{organization['id']}/images/{workspace['id']}/{digest}").read_bytes() == WEBP
@@ -127,17 +135,23 @@ async def test_organization_and_workspace_icons(service, settings: Settings) -> 
         assert listed["image_url"] == workspace_icon.json()["image_url"]
         assert (await viewer.get(listed["image_url"])).headers["content-type"] == "image/webp"
 
-        removed = await client.delete(f"{service.workspace}/icon", headers=changing(workspace_icon.json()))
+        removed = await client.delete(
+            f"/api/v1/workspaces/{service.tenant.workspace_id}/icon", headers=changing(workspace_icon.json())
+        )
         assert removed.status_code == 200 and removed.json()["image_url"] is None
-        assert (await viewer.get(f"{service.workspace}/icon")).status_code == 404
+        assert (await viewer.get(f"/api/v1/workspaces/{service.tenant.workspace_id}/icon")).status_code == 404
     events = (await client.get(f"{service.organization}/audit-events")).json()["items"]
     changes = [(event["action"], event["details"]) for event in events if event["outcome"] == "ok"][:3]
     assert changes == [("workspace.update", {"fields": ["image"]})] * 2 + [
         ("organization.update", {"fields": ["image"]})
     ]
     # An archived workspace's icon no longer changes, and the refusal comes before any bytes are stored.
-    archived = await client.post(f"{service.workspace}/archive", headers=changing(removed.json()))
-    refused = await client.put(f"{service.workspace}/icon", content=PNG, headers=changing(archived.json()))
+    archived = await client.post(
+        f"/api/v1/workspaces/{service.tenant.workspace_id}/archive", headers=changing(removed.json())
+    )
+    refused = await client.put(
+        f"/api/v1/workspaces/{service.tenant.workspace_id}/icon", content=PNG, headers=changing(archived.json())
+    )
     assert refused.status_code == 422 and refused.json()["error"]["code"] == "disabled"
     digest = hashlib.sha256(PNG).hexdigest()
     assert not (objects / f"orgs/{organization['id']}/images/{workspace['id']}/{digest}").exists()

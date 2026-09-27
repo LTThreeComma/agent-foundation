@@ -1,16 +1,21 @@
 """The assembled runtime, who is calling, and the images they send, as FastAPI dependencies; they return values
 and never yield SQL sessions."""
 
+from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends, Header, Request
+from sqlalchemy import select
 
-from a13n_service.infra.errors import ServiceError
+from a13n_service.infra.db import short_session
+from a13n_service.infra.errors import ServiceError, invalid, not_found
 from a13n_service.infra.http import answer_headers
+from a13n_service.infra.ids import ObjectId
 from a13n_service.infra.redis import rate_limit
 from a13n_service.tenancy.access import Authenticated, unauthenticated
-from a13n_service.tenancy.authorize import Principal
+from a13n_service.tenancy.authorize import Principal, authorize
 from a13n_service.tenancy.runtime import Runtime
+from a13n_service.tenancy.tables import WorkspaceRow
 
 
 async def current_runtime(request: Request) -> Runtime:
@@ -38,6 +43,39 @@ async def current_principal(credential: Annotated[Authenticated, Depends(current
 
 Credential = Annotated[Authenticated, Depends(current_credential)]
 Actor = Annotated[Principal, Depends(current_principal)]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceContext:
+    """The authorized workspace selected for this business request; no database session escapes."""
+
+    organization_id: str
+    workspace_id: str
+
+
+async def current_workspace(
+    actor: Actor,
+    runtime: CurrentRuntime,
+    selected: Annotated[ObjectId | None, Header(alias="X-Workspace-ID")] = None,
+) -> WorkspaceContext:
+    if actor.confinement is not None:
+        workspace_id = actor.confinement.workspace_id
+        if selected is not None and selected != workspace_id:
+            raise ServiceError("forbidden", "X-Workspace-ID differs from the credential workspace")
+    else:
+        if selected is None:
+            raise invalid("X-Workspace-ID", "required for a login-session business request")
+        workspace_id = selected
+    async with short_session(runtime.storage) as session:
+        row = await session.scalar(select(WorkspaceRow).where(WorkspaceRow.id == workspace_id))
+        if row is None:
+            raise not_found("workspace", workspace_id)
+        context = WorkspaceContext(row.organization_id, row.id)
+        authorize(actor, context, "read")
+    return context
+
+
+Workspace = Annotated[WorkspaceContext, Depends(current_workspace)]
 
 
 async def limit_guessing(request: Request, flow: str, *identities: str) -> None:

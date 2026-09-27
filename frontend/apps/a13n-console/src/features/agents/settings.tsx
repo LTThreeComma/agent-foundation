@@ -18,7 +18,6 @@ import { data, ifMatch, type Schema } from "../../shared/api";
 import { changeAgentImage } from "./images";
 import { AgentAvatar } from "./avatar";
 import { ImagePicker, MAX_IMAGE_BYTES } from "../../shared/forms";
-import { ResourceKeyField } from "../../shared/identity";
 import { ErrorNotice } from "../../shared/feedback";
 import { Confirm } from "../../shared/dialogs";
 import { FormActions } from "../../shared/forms";
@@ -40,11 +39,9 @@ export function AgentDetails({
   const { value: agent, etag } = snapshot,
     client = useClient(),
     { t } = useTranslation(),
-    { workspace, can, basePath } = useWorkspace(),
-    cache = useQueryClient(),
-    navigate = useNavigate();
+    { workspace, can } = useWorkspace(),
+    cache = useQueryClient();
   const [name, setName] = useState(agent.name),
-    [key, setKey] = useState(agent.key),
     [description, setDescription] = useState(agent.description);
   const save = useMutation({
     mutationFn: async () => {
@@ -52,26 +49,23 @@ export function AgentDetails({
         throw new Error(
           t("Version information is unavailable. Reload this page."),
         );
-      return client.http
-        .PATCH("/api/v1/workspaces/{workspace_id}/agents/{agent_id}", {
+      return client
+        .workspace(workspace.id)
+        .PATCH("/api/v1/agents/{agent_reference}", {
           params: {
-            path: { workspace_id: workspace.id, agent_id: agent.id },
+            path: { agent_reference: agent.id },
           },
           headers: ifMatch(etag),
-          body: { name, key, description },
+          body: { name, description },
         })
         .then(data);
     },
-    onSuccess: async (result) => {
+    onSuccess: async () => {
       await cache.invalidateQueries({ queryKey: ["agents", workspace.id] });
       await cache.invalidateQueries({
-        queryKey: ["agent-by-id", workspace.id],
+        queryKey: ["agent-reference", workspace.id],
       });
-      // Links with the old key stop resolving, so the page follows the new one.
-      if (result.key !== agent.key) {
-        cache.removeQueries({ queryKey: ["agent", workspace.id, agent.key] });
-        navigate(`${basePath}/agents/${result.key}`, { replace: true });
-      } else reload();
+      reload();
       close();
     },
   });
@@ -92,7 +86,7 @@ export function AgentDetails({
       await onImageSaved();
       await cache.invalidateQueries({ queryKey: ["agents", workspace.id] });
       await cache.invalidateQueries({
-        queryKey: ["agent-by-id", workspace.id],
+        queryKey: ["agent-reference", workspace.id],
       });
     },
   });
@@ -147,20 +141,14 @@ export function AgentDetails({
                 onChange={(event) => setDescription(event.target.value)}
               />
             </FormField>
-            <ResourceKeyField
-              value={key}
-              onChange={setKey}
-              disabled={save.isPending}
-            />
+            <FormField label={t("Key")}>
+              <Input value={agent.key} readOnly />
+            </FormField>
           </div>
           <FormActions
             pending={save.isPending}
             onCancel={close}
-            disabled={
-              name === agent.name &&
-              key === agent.key &&
-              description === agent.description
-            }
+            disabled={name === agent.name && description === agent.description}
           />
         </fieldset>
         <ErrorNotice error={save.error ?? image.error} retry={reload} />
@@ -186,17 +174,18 @@ export function AgentActions({
     { workspace, can, basePath } = useWorkspace(),
     cache = useQueryClient(),
     navigate = useNavigate();
-  const path = { workspace_id: workspace.id, agent_id: agent.id };
+  const path = { agent_reference: agent.id };
   const archive = async () => {
     if (!etag)
       throw new Error(
         t("Version information is unavailable. Reload this page."),
       );
-    await client.http
+    await client
+      .workspace(workspace.id)
       .POST(
         agent.archived_at
-          ? "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/unarchive"
-          : "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/archive",
+          ? "/api/v1/agents/{agent_reference}/unarchive"
+          : "/api/v1/agents/{agent_reference}/archive",
         { params: { path }, headers: ifMatch(etag) },
       )
       .then(data);
@@ -255,11 +244,12 @@ export function AgentActions({
                 `${agent.key}-copy`,
                 "agent",
                 (key) =>
-                  client.http
-                    .POST(
-                      "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/duplicate",
-                      { params: { path }, body: { key, name } },
-                    )
+                  client
+                    .workspace(workspace.id)
+                    .POST("/api/v1/agents/{agent_reference}/duplicate", {
+                      params: { path },
+                      body: { key, name },
+                    })
                     .then(data),
               );
               void cache.invalidateQueries();

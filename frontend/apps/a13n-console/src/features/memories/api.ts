@@ -55,16 +55,15 @@ export interface MemoryFilters {
 
 export function memoryQueries(client: Client, workspaceId: string) {
   const keys = memoryKeys(workspaceId);
-  const path = { workspace_id: workspaceId };
   return {
     page: ({ kind, type }: MemoryFilters, cursor?: string) =>
       queryOptions({
         queryKey: [...keys.list(), kind, type, cursor],
         queryFn: ({ signal }) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace_id}/memories", {
+          client
+            .workspace(workspaceId)
+            .GET("/api/v1/memories", {
               params: {
-                path,
                 query: { kind, type, cursor },
               },
               signal,
@@ -77,9 +76,10 @@ export function memoryQueries(client: Client, workspaceId: string) {
         queryKey: keys.choices(),
         queryFn: ({ signal }) =>
           allPages((cursor) =>
-            client.http
-              .GET("/api/v1/workspaces/{workspace_id}/memories", {
-                params: { path, query: { cursor, limit: 100 } },
+            client
+              .workspace(workspaceId)
+              .GET("/api/v1/memories", {
+                params: { query: { cursor, limit: 100 } },
                 signal,
               })
               .then(data),
@@ -89,9 +89,10 @@ export function memoryQueries(client: Client, workspaceId: string) {
       queryOptions({
         queryKey: keys.memory(memoryId),
         queryFn: ({ signal }) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace_id}/memories/{memory_id}", {
-              params: { path: { ...path, memory_id: memoryId } },
+          client
+            .workspace(workspaceId)
+            .GET("/api/v1/memories/{memory_reference}", {
+              params: { path: { memory_reference: memoryId } },
               signal,
             })
             .then(representation),
@@ -102,17 +103,15 @@ export function memoryQueries(client: Client, workspaceId: string) {
         queryKey: keys.files(memoryId),
         queryFn: ({ signal }) =>
           allPages((cursor) =>
-            client.http
-              .GET(
-                "/api/v1/workspaces/{workspace_id}/memories/{memory_id}/files",
-                {
-                  params: {
-                    path: { ...path, memory_id: memoryId },
-                    query: { cursor, limit: 100 },
-                  },
-                  signal,
+            client
+              .workspace(workspaceId)
+              .GET("/api/v1/memories/{memory_reference}/files", {
+                params: {
+                  path: { memory_reference: memoryId },
+                  query: { cursor, limit: 100 },
                 },
-              )
+                signal,
+              })
               .then(data),
           ),
       }),
@@ -120,51 +119,45 @@ export function memoryQueries(client: Client, workspaceId: string) {
       queryOptions({
         queryKey: keys.file(memoryId, filePath),
         queryFn: ({ signal }) =>
-          client.http
-            .GET(
-              "/api/v1/workspaces/{workspace_id}/memories/{memory_id}/files/{path}",
-              {
-                params: {
-                  path: { ...path, memory_id: memoryId, path: filePath },
-                },
-                signal,
+          client
+            .workspace(workspaceId)
+            .GET("/api/v1/memories/{memory_reference}/files/{path}", {
+              params: {
+                path: { memory_reference: memoryId, path: filePath },
               },
-            )
+              signal,
+            })
             .then(representation),
       }),
     revisions: (memoryId: string, filters: RevisionFilters, cursor?: string) =>
       queryOptions({
         queryKey: [...keys.revisions(memoryId), filters, cursor],
         queryFn: ({ signal }) =>
-          client.http
-            .GET(
-              "/api/v1/workspaces/{workspace_id}/memories/{memory_id}/revisions",
-              {
-                params: {
-                  path: { ...path, memory_id: memoryId },
-                  query: {
-                    path: filters.path,
-                    run_id: filters.run,
-                    cursor,
-                  },
+          client
+            .workspace(workspaceId)
+            .GET("/api/v1/memories/{memory_reference}/revisions", {
+              params: {
+                path: { memory_reference: memoryId },
+                query: {
+                  path: filters.path,
+                  run_id: filters.run,
+                  cursor,
                 },
-                signal,
               },
-            )
+              signal,
+            })
             .then(data),
       }),
     revision: (memoryId: string, seq: number) =>
       queryOptions({
         queryKey: keys.revision(memoryId, seq),
         queryFn: ({ signal }) =>
-          client.http
-            .GET(
-              "/api/v1/workspaces/{workspace_id}/memories/{memory_id}/revisions/{seq}",
-              {
-                params: { path: { ...path, memory_id: memoryId, seq } },
-                signal,
-              },
-            )
+          client
+            .workspace(workspaceId)
+            .GET("/api/v1/memories/{memory_reference}/revisions/{seq}", {
+              params: { path: { memory_reference: memoryId, seq } },
+              signal,
+            })
             .then(data),
       }),
     /**
@@ -175,17 +168,22 @@ export function memoryQueries(client: Client, workspaceId: string) {
       queryOptions({
         queryKey: [...keys.records(memoryId), search, cursor],
         queryFn: ({ signal }) => {
-          const params = { path: { ...path, memory_id: memoryId } };
+          const params = { path: { memory_reference: memoryId } };
           return (
             search
-              ? client.http.POST(
-                  "/api/v1/workspaces/{workspace_id}/memories/{memory_id}/records/search",
-                  { params, body: { query: search }, signal },
-                )
-              : client.http.GET(
-                  "/api/v1/workspaces/{workspace_id}/memories/{memory_id}/records",
-                  { params: { ...params, query: { cursor } }, signal },
-                )
+              ? client
+                  .workspace(workspaceId)
+                  .POST("/api/v1/memories/{memory_reference}/records/search", {
+                    params,
+                    body: { query: search },
+                    signal,
+                  })
+              : client
+                  .workspace(workspaceId)
+                  .GET("/api/v1/memories/{memory_reference}/records", {
+                    params: { ...params, query: { cursor } },
+                    signal,
+                  })
           ).then(data);
         },
       }),

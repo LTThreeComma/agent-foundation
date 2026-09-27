@@ -102,12 +102,15 @@ export async function* threadStream(
   let cursor = options.after;
   for (let attempt = 0; ; attempt++) {
     signal.throwIfAborted();
-    const headers = new Headers({ Accept: "text/event-stream" });
+    const headers = new Headers({
+      Accept: "text/event-stream",
+      "X-Workspace-ID": workspaceId,
+    });
     if (cursor) headers.set("Last-Event-ID", cursor);
     try {
       const response = await transport.fetch(
         new Request(
-          `${transport.baseUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/stream`,
+          `${transport.baseUrl}/api/v1/threads/${encodeURIComponent(threadId)}/stream`,
           { headers, signal },
         ),
       );

@@ -70,7 +70,7 @@ class Talk:
 
 def _message(agent: Json, text: str, assets: Sequence[Json] = ()) -> Json:
     parts = [{"type": "text", "text": text}, *({"type": "asset", "asset_id": asset["id"]} for asset in assets)]
-    return {"agent_id": agent["id"], "payload": {"content": parts}}
+    return {"agent": {"id": agent["id"]}, "payload": {"content": parts}}
 
 
 def scenarios(talk: Talk, cast: Cast, environment: Json, assets: dict[str, Json]) -> tuple[Scenario, ...]:
@@ -172,7 +172,9 @@ def scenarios(talk: Talk, cast: Cast, environment: Json, assets: dict[str, Json]
     def member() -> dict[str, str]:
         with Api(api.base_url) as runner:
             runner.login(MEMBERS["runner"][0], ADMIN_PASSWORD)
-            run = Talk(runner, ws).start(cast.assistant, "Where do I find last week's release notes?")
+            run = Talk(runner.workspace(cast.assistant["workspace_id"]), ws).start(
+                cast.assistant, "Where do I find last week's release notes?"
+            )
         return {"member_conversation": run["id"]}
 
     return (conversation, workspace, attachments, steered, interrupted, waits, outcomes, member)

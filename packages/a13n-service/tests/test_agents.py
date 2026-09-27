@@ -339,9 +339,8 @@ async def create_model(service, **config: object) -> str:  # type: ignore[no-unt
     )
     assert provider.status_code == 201, provider.text
     model = await service.client.post(
-        f"{service.organization}/models",
+        f"{service.workspace}/models",
         json={
-            "workspace_id": None,
             "provider_id": provider.json()["id"],
             "key": f"model-{uuid4().hex[:12]}",
             "name": "Model",
@@ -355,7 +354,7 @@ async def create_model(service, **config: object) -> str:  # type: ignore[no-unt
 async def create_agent(service, key: str, model_id: str, **config: object) -> dict:  # type: ignore[no-untyped-def]
     response = await service.client.post(
         f"{service.workspace}/agents",
-        json={"key": key, "name": key.title(), "config": {"model": {"model_id": model_id}, **config}},
+        json={"key": key, "name": key.title(), "config": {"model": {"id": model_id}, **config}},
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -394,23 +393,23 @@ async def test_references_are_checked_at_their_field_path(service) -> None:  # t
     model_id = await create_model(service)
     child = await create_agent(service, "child", model_id)
     missing = {kind: new_object_id(kind) for kind in ("mdl", "sk", "ap", "con", "wp", "et")}
-    dedicated = {"mode": "dedicated", "template_id": missing["et"]}
+    dedicated = {"mode": "dedicated", "template": {"id": missing["et"]}}
     brave = await service.client.post(
         f"{service.organization}/web-providers",
         json={"workspace_id": None, "type": "brave", "name": "Brave", "credential": {"api_key": "brave"}},
     )
     search_only = {"toolsets": {"web": {"tools": {"scrape": {"config": {"provider_id": brave.json()["id"]}}}}}}
     cases: list[tuple[dict[str, object], str]] = [
-        ({"model": {"model_id": missing["mdl"]}}, "model.model_id"),
-        ({"reviewer": {"model": missing["mdl"]}}, "reviewer.model"),
-        ({"model": {"model_id": model_id, "settings": {"temperature": "warm"}}}, "model.settings.temperature"),
+        ({"model": {"id": missing["mdl"]}}, "model.model_id"),
+        ({"reviewer": {"model": {"id": missing["mdl"]}}}, "reviewer.model"),
+        ({"model": {"id": model_id, "settings": {"temperature": "warm"}}}, "model.settings.temperature"),
         # The model's provider resource owns the transport; settings cannot carry another request body or timeout.
-        ({"model": {"model_id": model_id, "settings": {"extra_body": {"model": "other"}}}}, "model.settings"),
-        ({"model": {"model_id": model_id, "settings": {"timeout": 30}}}, "model.settings"),
-        ({"reviewer": {"model": model_id, "model_settings": {"unknown": 1}}}, "reviewer.model_settings"),
-        ({"media_understanding": {"image": model_id}}, "media_understanding.image"),
-        ({"skills": [{"skill_id": missing["sk"]}]}, "skills.0"),
-        ({"subagents": {"helper": {"agent_id": missing["ap"]}}}, "subagents.helper"),
+        ({"model": {"id": model_id, "settings": {"extra_body": {"model": "other"}}}}, "model.settings"),
+        ({"model": {"id": model_id, "settings": {"timeout": 30}}}, "model.settings"),
+        ({"reviewer": {"model": {"id": model_id}, "model_settings": {"unknown": 1}}}, "reviewer.model_settings"),
+        ({"media_understanding": {"image": {"id": model_id}}}, "media_understanding.image"),
+        ({"skills": [{"id": missing["sk"]}]}, "skills.0"),
+        ({"subagents": {"helper": {"agent": {"id": missing["ap"]}}}}, "subagents.helper"),
         ({"connection_tools": [{"connection_id": missing["con"]}]}, "connection_tools.0"),
         ({"toolsets": {"web": {"tools": {"search": {}}}}}, "toolsets.web.tools.search.config.provider_id"),
         (
@@ -423,9 +422,9 @@ async def test_references_are_checked_at_their_field_path(service) -> None:  # t
             "client_tools.0.name",
         ),
         ({"plugins": [{"instance_name": "audit", "plugin_key": "test.audit"}]}, "plugins.0"),
-        ({"default_environment_template_id": missing["et"]}, "default_environment_template_id"),
+        ({"default_environment_template": {"id": missing["et"]}}, "default_environment_template_id"),
         (
-            {"subagents": {"helper": {"agent_id": child["id"], "environment": dedicated}}},
+            {"subagents": {"helper": {"agent": {"id": child["id"]}, "environment": dedicated}}},
             "subagents.helper.environment.template_id",
         ),
         ({"output_spec": {"schema": {"$ref": "missing"}}}, "output_spec"),
@@ -433,15 +432,26 @@ async def test_references_are_checked_at_their_field_path(service) -> None:  # t
     for changes, field in cases:
         response = await service.client.post(
             f"{service.workspace}/agents",
-            json={"key": "invalid", "name": "Invalid", "config": {"model": {"model_id": model_id}, **changes}},
+            json={"key": "invalid", "name": "Invalid", "config": {"model": {"id": model_id}, **changes}},
         )
-        assert response.status_code == 400, (field, response.text)
-        assert response.json()["error"]["details"]["field"] == field, response.text
+        missing_reference = field in {
+            "model.model_id",
+            "reviewer.model",
+            "skills.0",
+            "subagents.helper",
+            "default_environment_template_id",
+            "subagents.helper.environment.template_id",
+        }
+        assert response.status_code == (404 if missing_reference else 400), (field, response.text)
+        if missing_reference:
+            assert response.json()["error"]["code"] == "not_found"
+        else:
+            assert response.json()["error"]["details"]["field"] == field, response.text
 
     # A provider whose type does not serve the operation is refused here, never at run time.
     response = await service.client.post(
         f"{service.workspace}/agents",
-        json={"key": "invalid", "name": "Invalid", "config": {"model": {"model_id": model_id}, **search_only}},
+        json={"key": "invalid", "name": "Invalid", "config": {"model": {"id": model_id}, **search_only}},
     )
     assert response.status_code == 400, response.text
     assert response.json()["error"]["details"] == {
@@ -456,7 +466,7 @@ async def test_settings_of_a_model_api_no_longer_offered_are_unavailable(service
     monkeypatch.delitem(service.runtime.registry.model_settings, "openai.chat_completions")
     response = await service.client.post(
         f"{service.workspace}/agents",
-        json={"key": "dropped", "name": "Dropped", "config": {"model": {"model_id": model_id}}},
+        json={"key": "dropped", "name": "Dropped", "config": {"model": {"id": model_id}}},
     )
     assert response.status_code == 503, response.text
     assert response.json()["error"]["details"] == {"dependency": "model_api:openai.chat_completions"}
@@ -471,7 +481,7 @@ async def test_a_locked_head_is_read_fresh(service) -> None:  # type: ignore[no-
         stale = await resolve_head(session, AgentRow, workspace_id, agent["id"])
         async with transaction(storage) as other:
             await other.execute(update(AgentRow).where(AgentRow.id == agent["id"]).values(name="Renamed"))
-        locked = await resolve_head(session, AgentRow, workspace_id, agent["key"], lock=True)
+        locked = await resolve_head(session, AgentRow, workspace_id, agent["id"], lock=True)
         assert locked is stale and (locked.name, locked.version) == ("Renamed", agent["version"] + 1)
 
 
@@ -480,7 +490,7 @@ async def test_revisions_pin_skills_and_subagents(service) -> None:  # type: ign
     skill = await create_skill(service)
     child = await create_agent(service, "child", model_id)
     parent = await create_agent(
-        service, "parent", model_id, skills=[{"skill_id": skill["id"]}], subagents={"helper": {"agent_id": child["id"]}}
+        service, "parent", model_id, skills=[{"id": skill["id"]}], subagents={"helper": {"agent": {"id": child["id"]}}}
     )
 
     pinned = await revision_config(service, parent)
@@ -489,7 +499,7 @@ async def test_revisions_pin_skills_and_subagents(service) -> None:  # type: ign
 
     # An inline path back to the agent itself is refused; an async child starts a child run of its own.
     revisions = f"{service.workspace}/agents/{child['id']}/revisions"
-    back = {"model": {"model_id": model_id}, "subagents": {"back": {"agent_id": parent["id"]}}}
+    back = {"model": {"id": model_id}, "subagents": {"back": {"agent": {"id": parent["id"]}}}}
     cycle = await service.client.post(revisions, json={"config": back}, headers={"if-match": etag(child)})
     assert cycle.status_code == 400, cycle.text
     assert cycle.json()["error"]["details"] == {
@@ -503,7 +513,9 @@ async def test_revisions_pin_skills_and_subagents(service) -> None:  # type: ign
 
     # A child run carries only its edge's request limit; token and tool-call limits bound inline delegation.
     current = {"if-match": (await service.client.get(f"{service.workspace}/agents/{child['id']}")).headers["etag"]}
-    limited = {"back": {"agent_id": parent["id"], "usage_limits": {"request_limit": 3, "total_tokens_limit": 1000}}}
+    limited = {
+        "back": {"agent": {"id": parent["id"]}, "usage_limits": {"request_limit": 3, "total_tokens_limit": 1000}}
+    }
     async_config = {**back, "subagent_mode": "async", "subagents": limited}
     refused = await service.client.post(revisions, json={"config": async_config}, headers=current)
     assert refused.status_code == 400, refused.text
@@ -511,12 +523,12 @@ async def test_revisions_pin_skills_and_subagents(service) -> None:  # type: ign
         "field": "subagents.back.usage_limits",
         "reason": "an async child run takes only request_limit",
     }
-    requests_only = {"back": {"agent_id": parent["id"], "usage_limits": {"request_limit": 3}}}
+    requests_only = {"back": {"agent": {"id": parent["id"]}, "usage_limits": {"request_limit": 3}}}
     bounded = await service.client.post(
         revisions, json={"config": {**async_config, "subagents": requests_only}}, headers=current
     )
     assert bounded.status_code == 201, bounded.text
-    inline = {"model": {"model_id": model_id}, "subagents": {"helper": limited["back"] | {"agent_id": child["id"]}}}
+    inline = {"model": {"id": model_id}, "subagents": {"helper": limited["back"] | {"agent": {"id": child["id"]}}}}
     assert (
         await service.client.post(f"{service.workspace}/agents/validate", json={"config": inline})
     ).status_code == 204
@@ -531,25 +543,28 @@ def viewer(service) -> Principal:  # type: ignore[no-untyped-def]
 async def test_configurations_validate_as_revision_creation_would_without_storing(service) -> None:  # type: ignore[no-untyped-def]
     model_id = await create_model(service)
     child = await create_agent(service, "child", model_id)
-    parent = await create_agent(service, "parent", model_id, subagents={"helper": {"agent_id": child["id"]}})
+    parent = await create_agent(service, "parent", model_id, subagents={"helper": {"agent": {"id": child["id"]}}})
     validate = f"{service.workspace}/agents/validate"
-    valid = {"model": {"model_id": model_id}, "subagents": {"helper": {"agent_id": child["id"]}}}
+    valid = {"model": {"id": model_id}, "subagents": {"helper": {"agent": {"id": child["id"]}}}}
     checked = await service.client.post(validate, json={"config": valid})
     assert checked.status_code == 204, checked.text
 
     for changes, field in (
-        ({"model": {"model_id": new_object_id("mdl")}}, "model.model_id"),
-        ({"skills": [{"skill_id": new_object_id("sk")}]}, "skills.0"),
+        ({"model": {"id": new_object_id("mdl")}}, "model.model_id"),
+        ({"skills": [{"id": new_object_id("sk")}]}, "skills.0"),
         ({"toolsets": {"shell": {"tools": {"exec": {"permission": "review"}}}}}, "reviewer"),
     ):
-        refused = await service.client.post(validate, json={"config": {"model": {"model_id": model_id}, **changes}})
-        assert refused.status_code == 400, refused.text
-        assert refused.json()["error"]["details"]["field"] == field
+        refused = await service.client.post(validate, json={"config": {"model": {"id": model_id}, **changes}})
+        if field == "reviewer":
+            assert refused.status_code == 400, refused.text
+            assert refused.json()["error"]["details"]["field"] == field
+        else:
+            assert refused.status_code == 404, refused.text
 
     # Naming the agent applies the rule that its inline subagents may not lead back to it, as its revisions do.
-    back = {"model": {"model_id": model_id}, "subagents": {"back": {"agent_id": parent["id"]}}}
+    back = {"model": {"id": model_id}, "subagents": {"back": {"agent": {"id": parent["id"]}}}}
     assert (await service.client.post(validate, json={"config": back})).status_code == 204
-    cycle = await service.client.post(validate, json={"config": back, "agent_id": child["id"]})
+    cycle = await service.client.post(validate, json={"config": back, "agent": {"id": child["id"]}})
     revision = await service.client.post(
         f"{service.workspace}/agents/{child['id']}/revisions", json={"config": back}, headers={"if-match": etag(child)}
     )
@@ -562,7 +577,7 @@ async def test_configurations_validate_as_revision_creation_would_without_storin
             "reason": "the subagents lead back to this agent",
         }
     )
-    unknown = await service.client.post(validate, json={"config": back, "agent_id": new_object_id("ap")})
+    unknown = await service.client.post(validate, json={"config": back, "agent": {"id": new_object_id("ap")}})
     assert unknown.status_code == 404, unknown.text
 
     # Nothing was stored, and only authors may validate.
@@ -577,54 +592,43 @@ async def test_configurations_validate_as_revision_creation_would_without_storin
             runtime.storage,
             viewer(service),
             service.tenant.workspace_id,
-            AgentValidate.model_validate({"config": valid}),
+            AgentValidate(config=AgentConfig(model={"model_id": model_id})),
             registry=runtime.registry,
             plugins=runtime.plugins,
         )
     assert denied.value.code == "forbidden"
 
 
-async def test_agent_keys_change_and_lists_filter(service) -> None:  # type: ignore[no-untyped-def]
+async def test_agent_keys_are_immutable_and_lists_filter(service) -> None:  # type: ignore[no-untyped-def]
     model_id = await create_model(service)
     writer = await create_agent(service, "writer", model_id)
     reader = await create_agent(service, "reader", model_id)
     agents = f"{service.workspace}/agents"
 
-    renamed = await service.client.patch(f"{agents}/writer", json={"key": "author"}, headers={"if-match": etag(writer)})
-    assert renamed.status_code == 200 and renamed.json()["key"] == "author", renamed.text
-    assert (await service.client.get(f"{agents}/author")).json()["id"] == writer["id"]
-    assert (await service.client.get(f"{agents}/writer")).status_code == 404
-    taken = await service.client.patch(
-        f"{agents}/author", json={"key": "reader"}, headers={"if-match": renamed.headers["etag"]}
+    refused = await service.client.patch(
+        f"{agents}/@writer", json={"key": "author"}, headers={"if-match": etag(writer)}
     )
-    assert taken.status_code == 409 and taken.json()["error"]["code"] == "already_exists", taken.text
-    async with short_session(service.runtime.storage) as session:
-        events = (
-            await session.scalars(
-                select(AuditEventRow.details).where(
-                    AuditEventRow.action == "agent.update", AuditEventRow.target_id == writer["id"]
-                )
-            )
-        ).all()
-    assert events == [{"fields": ["key"]}]
+    assert refused.status_code == 400, refused.text
+    assert (await service.client.get(f"{agents}/@writer")).json()["id"] == writer["id"]
+    assert (await service.client.get(f"{agents}/@author")).status_code == 404
     # A built-in agent keeps its key.
     composer = await service.client.post(f"{service.workspace}/agent-composer")
     assert composer.status_code == 200, composer.text
     builtin = await service.client.patch(
         f"{agents}/{composer.json()['id']}", json={"key": "helper"}, headers={"if-match": composer.headers["etag"]}
     )
-    assert builtin.status_code == 409 and builtin.json()["error"]["details"]["reason"] == "builtin"
+    assert builtin.status_code == 400
 
     async def keys(**params: str) -> set[str]:
         response = await service.client.get(agents, params=params)
         assert response.status_code == 200, response.text
         return {agent["key"] for agent in response.json()["items"]}
 
-    await service.client.post(f"{agents}/reader/archive", headers={"if-match": etag(reader)})
-    assert await keys(q="AUTH") == {"author"}
+    await service.client.post(f"{agents}/@reader/archive", headers={"if-match": etag(reader)})
+    assert await keys(q="WRIT") == {"writer"}
     assert await keys(q="composer") == {"agent-composer"}
     assert await keys(archived="true") == {"reader"}
-    assert await keys(archived="false") == {"author", "agent-composer"}
+    assert await keys(archived="false") == {"writer", "agent-composer"}
     assert await keys(q="read", archived="false") == set()
     assert (await service.client.get(agents, params={"q": ""})).status_code == 400
 
@@ -751,7 +755,7 @@ async def test_heads_duplicate_archive_and_offer_toolsets(service) -> None:  # t
     assert refused.status_code == 409, refused.text
     revision = await service.client.post(
         f"{base}/revisions",
-        json={"config": {"model": {"model_id": model_id}}},
+        json={"config": {"model": {"id": model_id}}},
         headers={"if-match": etag(archived.json())},
     )
     assert revision.status_code == 409, revision.text
@@ -817,8 +821,8 @@ async def test_overrides_are_validated_and_pinned_as_the_run_freezes_them(servic
         service,
         "pinning",
         model_id,
-        skills=[{"skill_id": skill["id"]}],
-        subagents={"helper": {"agent_id": child["id"]}},
+        skills=[{"id": skill["id"]}],
+        subagents={"helper": {"agent": {"id": child["id"]}}},
     )
     for path, head in ((f"skills/{skill['id']}", skill), (f"agents/{child['id']}", child)):
         archived = await service.client.post(f"{service.workspace}/{path}/archive", headers={"if-match": etag(head)})
@@ -840,7 +844,7 @@ async def test_publishing_the_default_configuration_again_changes_nothing(servic
     model_id = await create_model(service)
     agent = await create_agent(service, "steady", model_id, instructions="Be brief.")
     item = f"{service.workspace}/agents/{agent['id']}"
-    same = {"model": {"model_id": model_id}, "instructions": "Be brief."}
+    same = {"model": {"id": model_id}, "instructions": "Be brief."}
     for make_default in (True, False):
         again = await service.client.post(
             f"{item}/revisions", json={"config": same, "make_default": make_default}, headers={"if-match": etag(agent)}
@@ -880,13 +884,15 @@ async def test_workspace_media_defaults_fill_what_an_agent_leaves_unselected(ser
     assert current.status_code == 200 and current.json()["image"] is None, current.text
     etag = current.headers["etag"]
 
-    assert (await service.client.put(defaults, json={"image": reader})).status_code == 428
-    refused = await service.client.put(defaults, json={"image": plain}, headers={"if-match": etag})
+    assert (await service.client.put(defaults, json={"image": {"id": reader}})).status_code == 428
+    refused = await service.client.put(defaults, json={"image": {"id": plain}}, headers={"if-match": etag})
     assert refused.status_code == 400 and refused.json()["error"]["details"]["field"] == "image", refused.text
-    replaced = await service.client.put(defaults, json={"image": reader}, headers={"if-match": etag})
+    replaced = await service.client.put(defaults, json={"image": {"id": reader}}, headers={"if-match": etag})
     assert replaced.status_code == 200 and replaced.json()["image"] == reader, replaced.text
     # Replacing the defaults with themselves changes nothing and records nothing.
-    again = await service.client.put(defaults, json={"image": reader}, headers={"if-match": replaced.headers["etag"]})
+    again = await service.client.put(
+        defaults, json={"image": {"id": reader}}, headers={"if-match": replaced.headers["etag"]}
+    )
     assert again.json()["version"] == replaced.json()["version"]
     async with short_session(service.runtime.storage) as session:
         events = (
@@ -908,9 +914,9 @@ async def test_workspace_media_defaults_fill_what_an_agent_leaves_unselected(ser
         return {kind: model.id for kind, model in resolved.media.items()}
 
     assert await media() == {"image": reader}
-    model = (await service.client.get(f"{service.organization}/models/{reader}")).json()
+    model = (await service.client.get(f"{service.workspace}/models/{reader}")).json()
     disabled = await service.client.patch(
-        f"{service.organization}/models/{reader}",
+        f"{service.workspace}/models/{reader}",
         json={"enabled": False},
         headers={"if-match": f'"{model["id"]}:{model["version"]}"'},
     )

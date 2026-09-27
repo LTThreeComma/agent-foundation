@@ -24,8 +24,12 @@ def etag(resource: dict) -> str:
     return f'"{resource["id"]}:{resource["version"]}"'
 
 
-async def post(service, path: str, body: dict, status: int = 201) -> dict:  # type: ignore[no-untyped-def]
-    response = await service.client.post(service.organization + path, json=body)
+async def post(service, path: str, body: dict, status: int = 201, *, workspace_id: str | None = None) -> dict:  # type: ignore[no-untyped-def]
+    response = await service.client.post(
+        (service.workspace if path.startswith("/models") else service.organization) + path,
+        json=body,
+        headers={} if workspace_id is None else {"X-Workspace-ID": workspace_id},
+    )
     assert response.status_code == status, response.text
     return response.json()
 
@@ -35,9 +39,8 @@ async def provider(service, workspace_id: str | None = None, **changes: object) 
     return await post(service, "/model-providers", {**body, **changes})
 
 
-def manual(provider_id: str, key: str, workspace_id: str | None, **config: object) -> dict:
+def manual(provider_id: str, key: str, **config: object) -> dict:
     return {
-        "workspace_id": workspace_id,
         "provider_id": provider_id,
         "key": key,
         "name": key,
@@ -74,9 +77,7 @@ def admin(service) -> Principal:  # type: ignore[no-untyped-def]
 async def test_models_are_created_with_their_configuration_and_the_catalog_model_they_started_from(service) -> None:  # type: ignore[no-untyped-def]
     shared = await provider(service)
     body = {
-        **manual(
-            shared["id"], "gpt-5-5", None, model_name="gpt-5.5", characteristics={"context_window_tokens": 1050000}
-        ),
+        **manual(shared["id"], "gpt-5-5", model_name="gpt-5.5", characteristics={"context_window_tokens": 1050000}),
         "pricing": price("gpt-5.5"),
         "catalog_ref": {"provider": "openai", "model": "gpt-5.5"},
     }
@@ -88,6 +89,10 @@ async def test_models_are_created_with_their_configuration_and_the_catalog_model
 
     duplicate = await post(service, "/models", body, status=409)
     assert duplicate["error"]["code"] == "already_exists"
+    alternate = await provider(service, name="Alternative")
+    await post(service, "/models", {**body, "provider_id": alternate["id"]}, status=409)
+    elsewhere = await post(service, "/models", body, workspace_id=await add_workspace(service))
+    assert elsewhere["id"] != created["id"] and elsewhere["key"] == created["key"]
     # The reference is provenance, checked for shape only: the catalog may list the model no more, or never have.
     unlisted = {**body, "key": "gateway", "catalog_ref": {"provider": "openrouter", "model": "vendor/unlisted"}}
     gateway = await post(service, "/models", unlisted)
@@ -98,25 +103,24 @@ async def test_models_are_created_with_their_configuration_and_the_catalog_model
     await post(service, "/models", {**body, "key": "catalog-key", "catalog_key": "openai:gpt-5.5"}, status=400)
     await post(service, "/models", {key: value for key, value in body.items() if key != "config"}, status=400)
 
-    workspace_model = await post(service, "/models", manual(shared["id"], "custom", service.tenant.workspace_id))
+    workspace_model = await post(service, "/models", manual(shared["id"], "custom"))
     assert workspace_model["workspace_id"] == service.tenant.workspace_id
     assert workspace_model["pricing"] is None and workspace_model["catalog_ref"] is None
     unsupported = await post(
-        service, "/models", manual(shared["id"], "messages", None, model_api="anthropic.messages"), status=400
+        service, "/models", manual(shared["id"], "messages", model_api="anthropic.messages"), status=400
     )
     assert unsupported["error"]["details"]["field"] == "config.model_api"
 
-    listed = (await service.client.get(f"{service.organization}/models")).json()
+    listed = (await service.client.get(f"{service.workspace}/models")).json()
     assert {item["id"] for item in listed["items"]} == {created["id"], gateway["id"], workspace_model["id"]}
 
 
 async def test_a_model_scope_must_be_covered_by_its_provider(service) -> None:  # type: ignore[no-untyped-def]
     first, second = service.tenant.workspace_id, await add_workspace(service)
     confined = await provider(service, first)
-    for workspace_id in (None, second):
-        refused = await post(service, "/models", manual(confined["id"], "model", workspace_id), status=400)
-        assert refused["error"]["details"]["field"] == "workspace_id"
-    await post(service, "/models", manual(confined["id"], "model", first))
+    refused = await post(service, "/models", manual(confined["id"], "model"), status=400, workspace_id=second)
+    assert refused["error"]["details"]["field"] == "provider_id"
+    await post(service, "/models", manual(confined["id"], "model"))
 
     disabled = await provider(service, None, name="Disabled")
     patched = await service.client.patch(
@@ -125,7 +129,7 @@ async def test_a_model_scope_must_be_covered_by_its_provider(service) -> None:  
         headers={"if-match": etag(disabled)},
     )
     assert patched.status_code == 200, patched.text
-    refused = await post(service, "/models", manual(disabled["id"], "model", None), status=422)
+    refused = await post(service, "/models", manual(disabled["id"], "model"), status=422)
     assert refused["error"]["details"] == {"kind": "model_provider", "id": disabled["id"]}
 
     # A model spends its provider's credential, so a workspace builder configures models only under providers
@@ -139,19 +143,18 @@ async def test_a_model_scope_must_be_covered_by_its_provider(service) -> None:  
         service.tenant.principal_id, "user", (Grant(organization_id, first, BUILT_IN_ROLES["builder"]),)
     )
     shared = await provider(service, None, name="Shared")
-    for workspace_id in (None, first):
-        with pytest.raises(ServiceError, match="cannot perform"):
-            body = ModelCreate.model_validate(manual(shared["id"], "model", workspace_id))
-            await create_model(storage, builder, organization_id, body, registry=registry)
-    body = ModelCreate.model_validate(manual(confined["id"], "own", first))
-    assert (await create_model(storage, builder, organization_id, body, registry=registry)).workspace_id == first
+    with pytest.raises(ServiceError, match="cannot perform"):
+        body = ModelCreate.model_validate(manual(shared["id"], "model"))
+        await create_model(storage, builder, first, body, registry=registry)
+    body = ModelCreate.model_validate(manual(confined["id"], "own"))
+    assert (await create_model(storage, builder, first, body, registry=registry)).workspace_id == first
 
     # Under a shared provider, the workspace's model may be renamed there, but only reconfigured by the provider's writers.
-    used = await post(service, "/models", manual(shared["id"], "used", first))
+    used = await post(service, "/models", manual(shared["id"], "used"))
     renamed = await update_model(
         storage,
         builder,
-        organization_id,
+        first,
         used["id"],
         ModelUpdate(name="Renamed"),
         if_match=etag(used),
@@ -162,7 +165,7 @@ async def test_a_model_scope_must_be_covered_by_its_provider(service) -> None:  
         await update_model(
             storage,
             builder,
-            organization_id,
+            first,
             used["id"],
             ModelUpdate(config=config),
             if_match=f'"{renamed.id}:{renamed.version}"',
@@ -174,8 +177,8 @@ async def test_models_resolve_for_execution_only_while_enabled_and_in_scope(serv
     organization_id, workspace_id = service.tenant.organization_id, service.tenant.workspace_id
     scope = WorkspaceScope(organization_id, workspace_id)
     shared = await provider(service)
-    model = await post(service, "/models", manual(shared["id"], "gpt", None, max_tokens=1024))
-    item = f"{service.organization}/models/{model['id']}"
+    model = await post(service, "/models", manual(shared["id"], "gpt", max_tokens=1024))
+    item = f"{service.workspace}/models/{model['id']}"
 
     assert (await service.client.patch(item, json={"enabled": False})).status_code == 428
     disabled = await service.client.patch(
@@ -202,7 +205,7 @@ async def test_models_resolve_for_execution_only_while_enabled_and_in_scope(serv
         principal_id=actor.id, organization_id=organization_id, workspace_id=workspace_id, verbs=frozenset({"read"})
     )
     elsewhere = WorkspaceScope(organization_id, await add_workspace(service))
-    confined = await post(service, "/models", manual(shared["id"], "confined", elsewhere.workspace_id))
+    confined = await post(service, "/models", manual(shared["id"], "confined"), workspace_id=elsewhere.workspace_id)
     async with short_session(storage) as session:
         with pytest.raises(ServiceError, match="delegation"):
             await resolve_model(session, actor, scope, model["id"], authority=reader)
@@ -223,12 +226,12 @@ async def test_models_resolve_for_execution_only_while_enabled_and_in_scope(serv
 async def test_model_updates_validate_the_api_and_replace_pricing_and_catalog_ref(service) -> None:  # type: ignore[no-untyped-def]
     shared = await provider(service)
     body = {
-        **manual(shared["id"], "gpt", None, model_name="gpt-5.5", model_api="openai.responses"),
+        **manual(shared["id"], "gpt", model_name="gpt-5.5", model_api="openai.responses"),
         "pricing": price("gpt-5.5"),
         "catalog_ref": {"provider": "openai", "model": "gpt-5.5"},
     }
     model = await post(service, "/models", body)
-    item = f"{service.organization}/models/{model['id']}"
+    item = f"{service.workspace}/models/{model['id']}"
     config = {**model["config"], "model_api": "anthropic.messages"}
     refused = await service.client.patch(item, json={"config": config}, headers={"if-match": etag(model)})
     assert refused.status_code == 400 and refused.json()["error"]["details"]["field"] == "config.model_api"
@@ -254,7 +257,7 @@ async def test_model_updates_validate_the_api_and_replace_pricing_and_catalog_re
 
 async def test_models_carry_a_description_and_may_start_disabled(service) -> None:  # type: ignore[no-untyped-def]
     shared = await provider(service)
-    body = {**manual(shared["id"], "draft", None), "description": "Staged rollout", "enabled": False}
+    body = {**manual(shared["id"], "draft"), "description": "Staged rollout", "enabled": False}
     model = await post(service, "/models", body)
     assert (model["description"], model["enabled"]) == ("Staged rollout", False)
     # Created disabled, it is never usable by runs before it is reviewed and enabled.
@@ -264,14 +267,14 @@ async def test_models_carry_a_description_and_may_start_disabled(service) -> Non
             await resolve_model(session, admin(service), scope, model["id"])
     assert refused.value.code == "disabled"
 
-    item = f"{service.organization}/models/{model['id']}"
+    item = f"{service.workspace}/models/{model['id']}"
     described = await service.client.patch(item, json={"description": "Ready"}, headers={"if-match": etag(model)})
     assert described.status_code == 200 and described.json()["description"] == "Ready"
     too_long = await service.client.patch(
         item, json={"description": "x" * 2049}, headers={"if-match": described.headers["etag"]}
     )
     assert too_long.status_code == 400
-    assert (await post(service, "/models", manual(shared["id"], "plain", None)))["description"] == ""
+    assert (await post(service, "/models", manual(shared["id"], "plain")))["description"] == ""
 
 
 async def test_calls_are_attributed_to_the_model_they_select_whatever_upstream_model_answers(
@@ -287,7 +290,7 @@ async def test_calls_are_attributed_to_the_model_they_select_whatever_upstream_m
         models[key] = await post(
             executing,
             "/models",
-            {**manual(account["id"], key, None, model_name="gpt-5"), "pricing": price("gpt-5", input_mtok=input_mtok)},
+            {**manual(account["id"], key, model_name="gpt-5"), "pricing": price("gpt-5", input_mtok=input_mtok)},
         )
     child = await runs_kit.add_agent(executing, "child", models["child"]["id"], instructions="Role: child")
     parent = await runs_kit.add_agent(
@@ -296,7 +299,7 @@ async def test_calls_are_attributed_to_the_model_they_select_whatever_upstream_m
         models["parent"]["id"],
         instructions="Role: parent",
         subagent_mode="inline",
-        subagents={"helper": {"agent_id": child["id"], "description": "Computes answers"}},
+        subagents={"helper": {"agent": {"id": child["id"]}, "description": "Computes answers"}},
     )
     scripted_model.call("delegate", {"subagent": "helper", "prompt": "compute"}, call_id="call_d", to="parent")
     scripted_model.say("42", to="child")
@@ -329,7 +332,7 @@ async def test_a_tool_review_is_a_call_of_the_reviewer_model(executing, scripted
         models[key] = await post(
             executing,
             "/models",
-            {**manual(account["id"], key, None, model_name="gpt-5"), "pricing": price("gpt-5", input_mtok=input_mtok)},
+            {**manual(account["id"], key, model_name="gpt-5"), "pricing": price("gpt-5", input_mtok=input_mtok)},
         )
     agent = await runs_kit.add_agent(
         executing,
@@ -337,7 +340,7 @@ async def test_a_tool_review_is_a_call_of_the_reviewer_model(executing, scripted
         models["agent"]["id"],
         instructions="Role: agent",
         toolsets={"configuration": {"tools": {"find": {"permission": "review"}}}},
-        reviewer={"model": models["reviewer"]["id"]},
+        reviewer={"model": {"id": models["reviewer"]["id"]}},
     )
     scripted_model.call("find_resources", {"kind": "model"}, call_id="call_find", to="Role: agent")
     scripted_model.call("submit_tool_review", {"risk": "low"}, call_id="call_review", to="submit_tool_review")
@@ -370,7 +373,7 @@ async def test_a_compaction_is_a_call_of_the_agent_model(executing, scripted_mod
     model = await post(
         executing,
         "/models",
-        {**manual(account["id"], "compacting", None, model_name="gpt-5"), "pricing": price("gpt-5")},
+        {**manual(account["id"], "compacting", model_name="gpt-5"), "pricing": price("gpt-5")},
     )
     # The 17 tokens of the first answer pass half of a 20-token window, so the next request compacts first.
     characteristics = {"context_window_tokens": 20, "compact_threshold": 0.5}
@@ -378,7 +381,7 @@ async def test_a_compaction_is_a_call_of_the_agent_model(executing, scripted_mod
         executing,
         "compacting",
         model["id"],
-        model={"model_id": model["id"], "characteristics": characteristics},
+        model={"id": model["id"], "characteristics": characteristics},
         toolsets={"configuration": {"tools": {"find": {}}}},
     )
     scripted_model.call("find_resources", {"kind": "model"}, call_id="call_find")
@@ -406,7 +409,7 @@ async def test_a_model_price_applies_to_its_own_calls_whatever_the_entry_names(
         endpoint = {"config": {"base_url": scripted_model.url}, "credential": {"api_key": "sk-scripted"}}
         created = await provider(executing, None, type=type_, name=key, **endpoint)
         model = await post(
-            executing, "/models", {**manual(created["id"], key, None, model_name="scripted"), "pricing": source}
+            executing, "/models", {**manual(created["id"], key, model_name="scripted"), "pricing": source}
         )
         assert (model["pricing"]["provider"], model["pricing"]["model"]) == (source["provider"], source["model"])
         agent = await runs_kit.add_agent(executing, key, model["id"])
@@ -426,7 +429,7 @@ async def test_open_model_builds_the_native_model_with_the_revealed_secrets(serv
         service, None, config={"base_url": "http://127.0.0.1:9/v1"}, extra_headers={"x-gateway-key": "gw-secret"}
     )
     model = await post(
-        service, "/models", manual(shared["id"], "gpt", None, model_name="gpt-5.5", model_api="openai.responses")
+        service, "/models", manual(shared["id"], "gpt", model_name="gpt-5.5", model_api="openai.responses")
     )
     scope = WorkspaceScope(service.tenant.organization_id, service.tenant.workspace_id)
     async with short_session(runtime.storage) as session:
@@ -447,23 +450,25 @@ async def test_open_model_builds_the_native_model_with_the_revealed_secrets(serv
 
 async def test_agents_reference_models_through_model_resolution(service) -> None:  # type: ignore[no-untyped-def]
     shared = await provider(service)
-    model = await post(service, "/models", manual(shared["id"], "gpt", None))
+    model = await post(service, "/models", manual(shared["id"], "gpt"))
     agents = f"{service.workspace}/agents"
     created = await service.client.post(
-        agents, json={"key": "helper", "name": "Helper", "config": {"model": {"model_id": model["id"]}}}
+        agents, json={"key": "helper", "name": "Helper", "config": {"model": {"id": model["id"]}}}
     )
     assert created.status_code == 201, created.text
 
-    elsewhere = await post(service, "/models", manual(shared["id"], "elsewhere", await add_workspace(service)))
-    hidden = await service.client.post(
-        agents, json={"key": "hidden", "name": "Hidden", "config": {"model": {"model_id": elsewhere["id"]}}}
+    elsewhere = await post(
+        service, "/models", manual(shared["id"], "elsewhere"), workspace_id=await add_workspace(service)
     )
-    assert hidden.status_code == 400 and hidden.json()["error"]["details"]["kind"] == "model"
+    hidden = await service.client.post(
+        agents, json={"key": "hidden", "name": "Hidden", "config": {"model": {"id": elsewhere["id"]}}}
+    )
+    assert hidden.status_code == 404 and hidden.json()["error"]["details"]["kind"] == "model"
 
     await service.client.patch(
-        f"{service.organization}/models/{model['id']}", json={"enabled": False}, headers={"if-match": etag(model)}
+        f"{service.workspace}/models/{model['id']}", json={"enabled": False}, headers={"if-match": etag(model)}
     )
     refused = await service.client.post(
-        agents, json={"key": "late", "name": "Late", "config": {"model": {"model_id": model["id"]}}}
+        agents, json={"key": "late", "name": "Late", "config": {"model": {"id": model["id"]}}}
     )
     assert refused.status_code == 400 and refused.json()["error"]["details"]["kind"] == "model"

@@ -17,7 +17,9 @@ import { TracesPage } from "./page";
 import { UNKNOWN } from "../../shared/unknown";
 
 const http = vi.hoisted(() => ({ GET: vi.fn() }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_test" },
@@ -273,7 +275,7 @@ it.each([
     screen.getByRole("searchbox", { name: "Search by ID" }),
   ).toHaveProperty("value", id);
   expect(http.GET).toHaveBeenCalledWith(
-    "/api/v1/workspaces/{workspace_id}/traces",
+    "/api/v1/traces",
     expect.objectContaining({
       params: expect.objectContaining({
         query: expect.objectContaining({
@@ -419,7 +421,7 @@ it.each([null, "javascript:alert(1)", "https://user:password@trace.example"])(
     await screen.findByRole("link", { name: "View run" });
     await waitFor(() =>
       expect(http.GET).toHaveBeenCalledWith(
-        "/api/v1/workspaces/{workspace_id}/trace-backend",
+        "/api/v1/trace-backend",
         expect.anything(),
       ),
     );
@@ -575,7 +577,7 @@ it("shows seconds, normalized levels and paginated aggregate cost in the list", 
   expect(screen.queryByText("Severity")).toBeNull();
   expect(screen.queryByText(/USD|Unavailable/)).toBeNull();
   expect(http.GET).toHaveBeenCalledWith(
-    "/api/v1/workspaces/{workspace_id}/traces",
+    "/api/v1/traces",
     expect.objectContaining({
       params: expect.objectContaining({
         query: expect.objectContaining({ limit: 25 }),

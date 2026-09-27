@@ -6,7 +6,7 @@ import { useClient } from "../../auth/context";
 import { useWorkspace } from "../../layout/workspace";
 import { ApiError } from "../../service-client";
 import { data, type Schema } from "../../shared/api";
-import { modelApi } from "../models/api";
+import { modelProviderApi } from "../models/api";
 import { providersPath } from "../providers/navigation";
 import { agentQuery } from "./queries";
 
@@ -41,7 +41,7 @@ export function useAgentComposer() {
     { workspace, organization, basePath, can } = useWorkspace();
   const write = can("write");
   const existing = useQuery({
-    ...agentQuery(client, workspace.id, COMPOSER_KEY),
+    ...agentQuery(client, workspace.id, `@${COMPOSER_KEY}`),
     enabled: !write && can("run"),
   });
   const converse = (agentId: string, target?: ComposerTarget) => {
@@ -64,10 +64,9 @@ export function useAgentComposer() {
   };
   const prepare = useMutation({
     mutationFn: (_target?: ComposerTarget) =>
-      client.http
-        .POST("/api/v1/workspaces/{workspace_id}/agent-composer", {
-          params: { path: { workspace_id: workspace.id } },
-        })
+      client
+        .workspace(workspace.id)
+        .POST("/api/v1/agent-composer", {})
         .then(data),
     onSuccess: (agent, target) => {
       void cache.invalidateQueries({ queryKey: ["agents", workspace.id] });
@@ -75,7 +74,7 @@ export function useAgentComposer() {
     },
     onError: async (error) => {
       if (!modelRequired(error)) return;
-      const configured = await modelApi(client, organization.id, {
+      const configured = await modelProviderApi(client, organization.id, {
         kind: "workspace",
         id: workspace.id,
       })

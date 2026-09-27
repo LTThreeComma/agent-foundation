@@ -7,7 +7,7 @@ from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, String, Uniqu
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from a13n_service.infra.db import Base, Stamped, identity_guarded, rules
+from a13n_service.infra.db import Base, Stamped, identity_guarded, immutable_columns, rules
 from a13n_service.resources.revisions import RevisionColumns
 
 
@@ -26,7 +26,7 @@ class SkillRow(Stamped, Base):
             deferrable=True,
             initially="DEFERRED",
         ),
-        rules(identity_guarded("skills")),
+        rules(identity_guarded("skills"), immutable_columns("skills", "key")),
     )
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))

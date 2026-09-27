@@ -7,7 +7,7 @@ Route paths and request/response shapes belong to [10: API](10-api.md); this cha
 ## Nouns
 
 - An **organization** is the administration boundary. Organizations are created only by [bootstrap](#bootstrap); no API creates or deletes one. A deployment normally has one, and every table allows many.
-- A **workspace** belongs to one organization and is the resource and work boundary. Sessions, threads and runs belong to exactly one workspace; provider resources and models can be shared by every workspace of their organization ([04](04-resources.md)).
+- A **workspace** belongs to one organization and is the resource and work boundary. Sessions, threads and runs belong to exactly one workspace; provider resources can be shared by every workspace of their organization ([04](04-resources.md)).
 - A **principal** is a user or a service account. Users are people identified by an email address and are not owned by any organization. Service accounts are program identities with an immutable home workspace.
 - A **credential** proves that a request comes from a principal. There are three kinds: a password (one per user, verified, never looked up), an API key (long-lived, named, confined to one workspace) and a token (a login session or a one-use password-reset or email-change link: short-lived and looked up by hash).
 - A **grant** gives a principal a role at an organization or at one of its workspaces. A **role** is a named set of verbs.
@@ -172,7 +172,7 @@ What each verb covers, by example (the owning chapters name the verb of each ope
 | write | creating, updating and retiring resources: agents and revisions, skills, templates, providers and models, connections and their authorization, secrets, assets, memories and the purge of a memory file's history |
 | admin | grants, invitations, service accounts and their keys, the workspace's API keys, workspace settings, webhook subscriptions, audit reads; at organization scope also workspaces and the organization                |
 
-`admin` covers people, keys and delivery configuration. A builder can configure external models and tools; the roles do not promise data-loss prevention against a builder or against an authorized run, and deployment network policy constrains outbound destinations independently of roles ([08](08-providers.md)). Private secrets and private environments add an owner check to the workspace verb ([04](04-resources.md#secrets), [06](06-environments.md)).
+`admin` covers people, keys and delivery configuration. A builder can configure external models and tools; the roles do not promise data-loss prevention against a builder or against an authorized run, and deployment network policy constrains outbound destinations independently of roles ([08](08-providers.md)). Private environments add an owner check to the workspace verb ([06](06-environments.md)); all secrets belong to the workspace ([04](04-resources.md#secrets)).
 
 **Path resolution conceals other tenants.** An organization path resolves only for a principal holding a grant in it. A workspace path resolves by ID to a workspace of one of the principal's organizations, or by key among the workspaces the principal can read (a confined principal: only its own); a key that matches readable workspaces in several organizations is `conflict` with reason `ambiguous_key`. Anything else is `not_found`, so a path never reveals another organization or its workspaces. Inside its own organization a principal can learn by ID that a workspace exists and be refused with `forbidden`. Globally unique IDs are never access control: lists, content reads, events, traces and replay lookups authorize their scope before resolving a supplied ID.
 
@@ -228,7 +228,7 @@ Credential expiry, logout and API-key revocation stop further requests, not acce
 
 Every row that has both `organization_id` and `workspace_id` references its workspace by the pair `(organization_id, workspace_id)` → `workspaces (organization_id, id)`; a metadata test enforces this for the whole composed schema. A row therefore cannot name a workspace of another organization, even when an application query omits a predicate. References between workspace-owned rows include the workspace in their foreign keys, and references inside one owner also include that owner (a revision includes its head, a run its thread).
 
-References to organization-shared rows (providers and models) use the pair `(organization_id, <referenced>_id)`, so the database guarantees the same organization. That the referenced row is shared or belongs to the referencing row's own workspace is checked by the owning service when the reference is written ([04](04-resources.md)). Scope never changes in place: triggers keep identity, scope and authorship of resource rows immutable. NULL is never a wildcard in generic queries.
+References to organization-shared provider rows use the pair `(organization_id, <referenced>_id)`, so the database guarantees the same organization. That the referenced row is shared or belongs to the referencing row's own workspace is checked by the owning service when the reference is written ([04](04-resources.md)). Scope never changes in place: triggers keep identity, scope and authorship of resource rows immutable. NULL is never a wildcard in generic queries.
 
 ## Flows
 

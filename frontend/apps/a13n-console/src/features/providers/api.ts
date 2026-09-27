@@ -5,7 +5,7 @@ import { data, ifMatch, representation, type Schema } from "../../shared/api";
 export type ProviderScope = { kind: "workspace" | "organization"; id: string };
 
 /** The provider kinds whose collections this client reads and writes. */
-export type ProviderKind = "environment" | "memory";
+export type ProviderKind = "environment" | "memory" | "model";
 
 /**
  * Providers live in the organization collection: a workspace lists its own and

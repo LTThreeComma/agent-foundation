@@ -186,12 +186,14 @@ async def _serve(
             response = await client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
             assert response.status_code == 200, response.text
             client.headers["x-csrf-token"] = response.json()["csrf_token"]
+            client.headers["X-Workspace-ID"] = tenant.workspace_id
             yield SimpleNamespace(
                 app=app,
                 runtime=runtime,
                 client=client,
                 tenant=tenant,
-                workspace=f"/api/v1/workspaces/{tenant.workspace_id}",
+                workspace="/api/v1",
+                management=f"/api/v1/workspaces/{tenant.workspace_id}",
                 organization=f"/api/v1/organizations/{tenant.organization_id}",
             )
 
@@ -352,11 +354,10 @@ async def create_model(service: SimpleNamespace, model: ScriptedModel) -> str:
     )
     assert provider.status_code == 201, provider.text
     created = await service.client.post(
-        f"{service.organization}/models",
+        f"{service.workspace}/models",
         json={
-            "workspace_id": None,
             "provider_id": provider.json()["id"],
-            "key": "scripted",
+            "key": f"scripted-{uuid4().hex[:12]}",
             "name": "Scripted",
             "config": {"model_name": "scripted", "model_api": "openai.chat_completions"},
         },
@@ -368,7 +369,7 @@ async def create_model(service: SimpleNamespace, model: ScriptedModel) -> str:
 async def add_agent(service: SimpleNamespace, key: str, model_id: str, **config: Any) -> dict[str, Any]:
     agent = await service.client.post(
         f"{service.workspace}/agents",
-        json={"key": key, "name": key.title(), "config": {"model": {"model_id": model_id}, **config}},
+        json={"key": key, "name": key.title(), "config": {"model": {"id": model_id}, **config}},
     )
     assert agent.status_code == 201, agent.text
     return agent.json()
@@ -393,13 +394,13 @@ async def delegating(service: SimpleNamespace, model: ScriptedModel, mode: str, 
         model_id,
         instructions="Role: coordinator",
         subagent_mode=mode,
-        subagents={"helper": {"agent_id": worker["id"], "description": "Computes answers", **edge}},
+        subagents={"helper": {"agent": {"id": worker["id"]}, "description": "Computes answers", **edge}},
         **config,
     )
 
 
 def message(agent: dict[str, Any], text: str, **fields: Any) -> dict[str, Any]:
-    return {"agent_id": agent["id"], "payload": {"content": [{"type": "text", "text": text}]}, **fields}
+    return {"agent": {"id": agent["id"]}, "payload": {"content": [{"type": "text", "text": text}]}, **fields}
 
 
 def fresh_key() -> dict[str, str]:

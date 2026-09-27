@@ -10,7 +10,12 @@ const state = vi.hoisted(() => ({
   POST: vi.fn(),
 }));
 vi.mock("../../auth/context", () => ({
-  useClient: () => ({ http: state }),
+  useClient: () => ({
+    http: state,
+    workspace() {
+      return this.http;
+    },
+  }),
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -104,10 +109,10 @@ it("keeps settings drafts across tabs and saves against the original version", a
   ).toBe("Unsaved draft");
   await user.click(screen.getByRole("switch", { name: "Archived" }));
   await user.click(screen.getByRole("button", { name: "Save changes" }));
-  const path = { workspace_id: "ws_test", template_id: template.id };
+  const path = { template_reference: template.id };
   await waitFor(() =>
     expect(state.PATCH).toHaveBeenCalledWith(
-      "/api/v1/workspaces/{workspace_id}/environment-templates/{template_id}",
+      "/api/v1/environment-templates/{template_reference}",
       {
         params: { path },
         headers: { "If-Match": '"version-1"' },

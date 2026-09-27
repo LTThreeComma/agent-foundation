@@ -67,11 +67,14 @@ class AgentModelCharacteristics(_Frozen):
     compact_threshold: float = Field(default=0.90, gt=0.0, le=1.0)
 
 
-class AgentModel(_Frozen):
-    model_id: ObjectId
-    # Native settings layered over the model's own defaults.
+class ModelFields(_Frozen):
     settings: ModelSettings = Field(default_factory=dict)
     characteristics: AgentModelCharacteristics = Field(default_factory=AgentModelCharacteristics)
+
+
+class AgentModel(ModelFields):
+    model_id: ObjectId
+    # Native settings layered over the model's own defaults.
 
 
 class SkillSelection(_Frozen):
@@ -98,13 +101,16 @@ class ChildEnvironmentPolicy(_Frozen):
         return self
 
 
-class SubagentSelection(_Frozen):
-    agent_id: ObjectId
-    revision_id: ObjectId | None = None
-    # Shown to the delegating model; the child agent's description, else its name, when omitted.
+class SubagentFields(_Frozen):
     description: Description | None = None
     context: DelegationContextPolicy = Field(default_factory=DelegationContextPolicy)
     usage_limits: UsageLimits | None = None
+
+
+class SubagentSelection(SubagentFields):
+    agent_id: ObjectId
+    revision_id: ObjectId | None = None
+    # Shown to the delegating model; the child agent's description, else its name, when omitted.
     environment: ChildEnvironmentPolicy = Field(default_factory=ChildEnvironmentPolicy)
 
 
@@ -159,23 +165,26 @@ class PluginSelection(_Frozen):
     config: JsonObject = Field(default_factory=dict)
 
 
-class AgentConfig(_Frozen):
-    model: AgentModel
+class ConfigFields(_Frozen):
     instructions: Instructions = ""
     toolsets: Toolsets = Field(default_factory=default_toolsets)
-    skills: tuple[SkillSelection, ...] = Field(default=(), max_length=512)
     connection_tools: tuple[ConnectionSelection, ...] = Field(default=(), max_length=128)
     client_tools: tuple[ClientToolDefinition, ...] = Field(default=(), max_length=128)
-    # Offers `ask_user_question`; a question makes the run wait for the next message.
     user_questions: bool = False
-    # Inline children run inside the parent's run; async children run as child runs of their own.
     subagent_mode: Literal["inline", "async"] = "inline"
-    subagents: dict[BoundedKey, SubagentSelection] = Field(default_factory=dict, max_length=128)
-    reviewer: AgentReviewer | None = None
-    media_understanding: MediaUnderstandingSelection = Field(default_factory=MediaUnderstandingSelection)
     plugins: tuple[PluginSelection, ...] = Field(default=(), max_length=128)
     output_spec: OutputSpec | None = None
     retries: RetryConfig | None = None
+
+
+class AgentConfig(ConfigFields):
+    model: AgentModel
+    skills: tuple[SkillSelection, ...] = Field(default=(), max_length=512)
+    # Offers `ask_user_question`; a question makes the run wait for the next message.
+    # Inline children run inside the parent's run; async children run as child runs of their own.
+    subagents: dict[BoundedKey, SubagentSelection] = Field(default_factory=dict, max_length=128)
+    reviewer: AgentReviewer | None = None
+    media_understanding: MediaUnderstandingSelection = Field(default_factory=MediaUnderstandingSelection)
     secret_requirements: tuple[SecretRequirement, ...] = Field(default=(), max_length=128)
     # Referenced, not pinned: read when an environment is created from it, never during execution.
     default_environment_template_id: ObjectId | None = None
@@ -218,25 +227,28 @@ class RetryOverride(_Frozen):
     output: int | None = Field(default=None, ge=0, le=100)
 
 
-class AgentOverride(_Frozen):
+class OverrideFields(_Frozen):
+    toolsets: ToolsetOverrides | None = None
+    instructions: Instructions | None = None
+    plugins: tuple[PluginSelection, ...] | None = Field(default=None, max_length=128)
+    connection_tools: tuple[ConnectionSelection, ...] | None = Field(default=None, max_length=128)
+    client_tools: tuple[ClientToolDefinition, ...] | None = Field(default=None, max_length=128)
+    output_spec: OutputSpec | None = None
+    retries: RetryOverride | None = None
+
+
+class AgentOverride(OverrideFields):
     """What one run changes of its revision's configuration; an omitted or null field keeps the revision's.
 
     `toolsets` replaces whole toolsets; `model`, `retries` and each subagent edge replace the fields they set,
     and a null edge removes it; every other field replaces the revision's value.
     """
 
-    toolsets: ToolsetOverrides | None = None
     reviewer: AgentReviewer | None = None
     media_understanding: MediaUnderstandingSelection | None = None
     model: ModelOverride | None = None
-    instructions: Instructions | None = None
-    plugins: tuple[PluginSelection, ...] | None = Field(default=None, max_length=128)
     skills: tuple[SkillSelection, ...] | None = Field(default=None, max_length=512)
-    connection_tools: tuple[ConnectionSelection, ...] | None = Field(default=None, max_length=128)
     subagents: dict[BoundedKey, SubagentOverride | None] | None = Field(default=None, max_length=128)
-    client_tools: tuple[ClientToolDefinition, ...] | None = Field(default=None, max_length=128)
-    output_spec: OutputSpec | None = None
-    retries: RetryOverride | None = None
 
 
 _REPLACED = (
@@ -299,20 +311,18 @@ def _set(value: BaseModel) -> dict[str, object]:
     return {name: item for name, item in value if item is not None}
 
 
-class AgentCreate(BaseModel):
+class AgentCreate[Config = AgentConfig](BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: AgentKey
     name: AgentName
     description: AgentDescription = ""
     labels: Labels = Field(default_factory=dict)
-    config: AgentConfig
+    config: Config
 
 
 class AgentUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: AgentName | None = None
-    # Links naming the old key stop resolving; everything else refers to the agent by ID.
-    key: AgentKey | None = None
     description: AgentDescription | None = None
     labels: Labels | None = None
 
@@ -328,9 +338,9 @@ class AgentDuplicate(BaseModel):
     revision_id: ObjectId | None = None
 
 
-class AgentRevisionCreate(BaseModel):
+class AgentRevisionCreate[Config = AgentConfig](BaseModel):
     model_config = ConfigDict(extra="forbid")
-    config: AgentConfig
+    config: Config
     note: str | None = Field(default=None, max_length=2048)
     make_default: bool = True
 

@@ -47,7 +47,7 @@ async def test_a_steer_that_cannot_be_read_fails_alone(service, scripted_model, 
     running = await runs_kit.attempt(service)
     await scripted_model.request()
     unreadable = {
-        "agent_id": agent["id"],
+        "agent": {"id": agent["id"]},
         "payload": {"content": [{"type": "url", "url": f"{scripted_model.url}/gone"}]},
     }
     rejected = (await runs_kit.submit(service, thread_id, unreadable)).json()["entry"]
@@ -67,7 +67,10 @@ async def test_a_steer_a_recovered_attempt_cannot_read_fails_alone(service, scri
     scripted_model.say("Done")
     submitted = await runs_kit.start_thread(service, agent, "hello")
     thread_id, run_id = submitted["thread"]["id"], submitted["run"]["id"]
-    gone = {"agent_id": agent["id"], "payload": {"content": [{"type": "url", "url": f"{scripted_model.url}/gone"}]}}
+    gone = {
+        "agent": {"id": agent["id"]},
+        "payload": {"content": [{"type": "url", "url": f"{scripted_model.url}/gone"}]},
+    }
     steer = (await runs_kit.submit(service, thread_id, gone)).json()["entry"]
     # An earlier attempt assigned the steer at a boundary and ended before a checkpoint incorporated it.
     async with transaction(service.runtime.storage) as session:

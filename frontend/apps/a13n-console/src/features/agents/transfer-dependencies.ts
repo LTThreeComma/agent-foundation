@@ -11,6 +11,7 @@ type DependencyKind =
   | "skill"
   | "connection"
   | "memory"
+  | "secret"
   | "agent"
   | "environment_template"
   | "web";
@@ -128,6 +129,20 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
         ),
       }),
     });
+  for (const [index, requirement] of (
+    config.secret_requirements ?? []
+  ).entries())
+    refs.push({
+      path: `secret_requirements.${index}.secret_id`,
+      kind: "secret",
+      value: requirement.secret_id,
+      replace: (value) => ({
+        ...config,
+        secret_requirements: config.secret_requirements?.map((item, i) =>
+          i === index ? { ...item, secret_id: value } : item,
+        ),
+      }),
+    });
   for (const [name, child] of Object.entries(config.subagents ?? {})) {
     refs.push({
       path: `subagents.${name}.agent_id`,
@@ -202,7 +217,6 @@ export async function inspectAgentDependencies(
   signal: AbortSignal,
 ): Promise<DependencyCheck[]> {
   const refs = agentDependencies(config);
-  const path = { workspace_id: workspaceId };
   const scope = { kind: "workspace" as const, id: workspaceId };
   async function choices(kind: DependencyKind): Promise<DependencyOption[]> {
     switch (kind) {
@@ -219,9 +233,10 @@ export async function inspectAgentDependencies(
       }
       case "skill": {
         const items = await allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace_id}/skills", {
-              params: { path, query: { cursor, limit: 100 } },
+          client
+            .workspace(workspaceId)
+            .GET("/api/v1/skills", {
+              params: { query: { cursor, limit: 100 } },
               signal,
             })
             .then(data),
@@ -236,9 +251,10 @@ export async function inspectAgentDependencies(
       }
       case "connection": {
         const items = await allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace_id}/connections", {
-              params: { path, query: { cursor, limit: 100 } },
+          client
+            .workspace(workspaceId)
+            .GET("/api/v1/connections", {
+              params: { query: { cursor, limit: 100 } },
               signal,
             })
             .then(data),
@@ -253,9 +269,10 @@ export async function inspectAgentDependencies(
       }
       case "memory": {
         const items = await allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace_id}/memories", {
-              params: { path, query: { cursor, limit: 100 } },
+          client
+            .workspace(workspaceId)
+            .GET("/api/v1/memories", {
+              params: { query: { cursor, limit: 100 } },
               signal,
             })
             .then(data),
@@ -266,11 +283,28 @@ export async function inspectAgentDependencies(
           id: item.id,
         }));
       }
+      case "secret": {
+        const items = await allPages((cursor) =>
+          client
+            .workspace(workspaceId)
+            .GET("/api/v1/secrets", {
+              params: { query: { cursor, limit: 100 } },
+              signal,
+            })
+            .then(data),
+        );
+        return items.map((item) => ({
+          value: item.id,
+          label: item.key,
+          id: item.id,
+        }));
+      }
       case "agent": {
         const items = await allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace_id}/agents", {
-              params: { path, query: { cursor, limit: 100 } },
+          client
+            .workspace(workspaceId)
+            .GET("/api/v1/agents", {
+              params: { query: { cursor, limit: 100 } },
               signal,
             })
             .then(data),
@@ -323,31 +357,27 @@ export async function inspectAgentDependencies(
         const revisions =
           ref.kind === "skill"
             ? await allPages((cursor) =>
-                client.http
-                  .GET(
-                    "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/revisions",
-                    {
-                      params: {
-                        path: { workspace_id: workspaceId, skill_id: id },
-                        query: { cursor, limit: 100 },
-                      },
-                      signal,
+                client
+                  .workspace(workspaceId)
+                  .GET("/api/v1/skills/{skill_reference}/revisions", {
+                    params: {
+                      path: { skill_reference: id },
+                      query: { cursor, limit: 100 },
                     },
-                  )
+                    signal,
+                  })
                   .then(data),
               )
             : await allPages((cursor) =>
-                client.http
-                  .GET(
-                    "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/revisions",
-                    {
-                      params: {
-                        path: { workspace_id: workspaceId, agent_id: id },
-                        query: { cursor, limit: 100 },
-                      },
-                      signal,
+                client
+                  .workspace(workspaceId)
+                  .GET("/api/v1/agents/{agent_reference}/revisions", {
+                    params: {
+                      path: { agent_reference: id },
+                      query: { cursor, limit: 100 },
                     },
-                  )
+                    signal,
+                  })
                   .then(data),
               );
         const pinned = revisions.find(

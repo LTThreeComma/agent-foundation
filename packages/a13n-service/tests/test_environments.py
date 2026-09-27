@@ -159,7 +159,7 @@ async def test_a_reserved_sandbox_is_created_by_maintenance_and_mounted_by_a_new
     # A disabled template refuses new sandboxes.
     disabled = await client.patch(template, json={"enabled": False}, headers={"if-match": updated.headers["etag"]})
     assert disabled.status_code == 200, disabled.text
-    refused = await client.post(environments, json={"template_id": env.template["id"]})
+    refused = await client.post(environments, json={"template": {"id": env.template["id"]}})
     assert refused.status_code == 422 and refused.json()["error"]["code"] == "disabled", refused.text
 
 
@@ -280,7 +280,7 @@ async def test_managed_sandboxes_are_bounded_per_workspace(env) -> None:  # type
     reserved = await reserve(env, env.template["id"])
     await start(env)
 
-    refused = await env.client.post(f"{env.workspace}/environments", json={"template_id": env.template["id"]})
+    refused = await env.client.post(f"{env.workspace}/environments", json={"template": {"id": env.template["id"]}})
     assert refused.status_code == 409 and reason(refused.json()) == "environment_limit", refused.text
     # A new thread's primary sandbox counts too: its first entry fails in place.
     failed = await start(env, "one more")
@@ -313,7 +313,7 @@ async def test_acceptances_that_reserve_and_mount_in_one_workspace_do_not_deadlo
             await release.wait()
 
     monkeypatch.setattr(lifecycle, "advisory_lock", holding)
-    body = {"agent_id": env.agent["id"], "payload": {"content": [{"type": "text", "text": "again"}]}}
+    body = {"agent": {"id": env.agent["id"]}, "payload": {"content": [{"type": "text", "text": "again"}]}}
     message = asyncio.create_task(
         env.client.post(
             f"{env.workspace}/threads/{first['thread']['id']}/inbox", json=body, headers={"idempotency-key": "y"}
@@ -406,18 +406,18 @@ async def test_each_async_edge_applies_its_own_environment_policy(env, scripted_
     """Edges pinning one revision still differ in what their children mount."""
     model_id = await runs_kit.create_model(env, scripted_model)
     worker = await runs_kit.add_agent(env, "worker", model_id, instructions="Role: worker")
-    pinned = {"agent_id": worker["id"], "revision_id": worker["default_revision_id"]}
+    pinned = {"agent": {"id": worker["id"]}, "revision_id": worker["default_revision_id"]}
     coordinator = await runs_kit.add_agent(
         env,
         "coordinator",
         model_id,
         instructions="Role: coordinator",
-        default_environment_template_id=env.template["id"],
+        default_environment_template={"id": env.template["id"]},
         subagent_mode="async",
         subagents={
             "researcher": {**pinned, "environment": {"mode": "none"}},
             "builder": {**pinned, "environment": {"mode": "shared"}},
-            "tester": {**pinned, "environment": {"mode": "dedicated", "template_id": env.template["id"]}},
+            "tester": {**pinned, "environment": {"mode": "dedicated", "template": {"id": env.template["id"]}}},
         },
     )
     for name in ("researcher", "builder", "tester"):
@@ -534,7 +534,7 @@ async def test_authorization_and_private_devices(env) -> None:  # type: ignore[n
     submitted = await start(env)
     environment_id = submitted["run"]["environment_mounts"][0]["environment_id"]
     thread = submitted["thread"]["id"]
-    accounts = f"{env.workspace}/service-accounts"
+    accounts = f"{env.management}/service-accounts"
     bearers = {}
     for role in ("viewer", "runner"):
         account = (await client.post(accounts, json={"name": role, "role": role})).json()
@@ -577,7 +577,7 @@ async def test_authorization_and_private_devices(env) -> None:  # type: ignore[n
         refused = await client.post(mounts, json=attach, headers={**bearers[role], "if-match": version})
         assert refused.status_code == 403, role
     threads = f"{env.workspace}/threads"
-    started = {"agent_id": env.agent["id"], "payload": {"content": [{"type": "text", "text": "use it"}]}}
+    started = {"agent": {"id": env.agent["id"]}, "payload": {"content": [{"type": "text", "text": "use it"}]}}
     refused = await client.post(
         threads, json={**started, "environments": [attach]}, headers={**bearers["runner"], "idempotency-key": "k"}
     )
@@ -588,7 +588,7 @@ async def test_authorization_and_private_devices(env) -> None:  # type: ignore[n
     assert (code, reason(body)) == (409, "connect_only")
 
     # Reserving a sandbox for threads is a run operation, like the reservation acceptance makes.
-    body = {"template_id": env.template["id"]}
+    body = {"template": {"id": env.template["id"]}}
     viewer = await client.post(f"{env.workspace}/environments", json=body, headers=bearers["viewer"])
     assert viewer.status_code == 403, viewer.text
     runner = await client.post(f"{env.workspace}/environments", json=body, headers=bearers["runner"])

@@ -1209,8 +1209,10 @@ async def test_revocation_ends_credentials_of_an_archived_workspace(service) -> 
     async with remote(oauth=True) as server:
         created = await create(service, {"config": {"url": f"{server.url}/mcp"}, "auth": "oauth"})
         connection = await authorized(service, server, created)
-        workspace = (await service.client.get(service.workspace)).json()
-        archived = await service.client.post(f"{service.workspace}/archive", headers={"If-Match": etag(workspace)})
+        workspace = (await service.client.get(f"/api/v1/workspaces/{service.tenant.workspace_id}")).json()
+        archived = await service.client.post(
+            f"/api/v1/workspaces/{service.tenant.workspace_id}/archive", headers={"If-Match": etag(workspace)}
+        )
         assert archived.status_code == 200, archived.text
 
         item = f"{service.workspace}/connections/{created['id']}"

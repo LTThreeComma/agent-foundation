@@ -24,7 +24,7 @@ import {
   StatePill,
   Timestamp,
 } from "../../shared/feedback";
-import { ProviderIcon, ScopeBadge } from "../../shared/identity";
+import { ProviderIcon } from "../../shared/identity";
 import { Page, PageActions } from "../../shared/page";
 import { ManageProvidersLink } from "../providers";
 import { mediaDefaultsQuery, modelApi, type ModelScope } from "./api";
@@ -33,7 +33,7 @@ import { mediaDefaultBadges } from "./media-understanding-fields";
 import { ModelIcon } from "./model-icon";
 import styles from "./models.module.css";
 
-const FILTER_KEYS = ["q", "provider_id", "scope", "status"];
+const FILTER_KEYS = ["q", "provider_id", "status"];
 
 export function ModelsPage() {
   const { t } = useTranslation(),
@@ -51,7 +51,7 @@ export function ModelsPage() {
 /** The models collection, also embedded in organization settings. */
 export function Models({ scope }: { scope: ModelScope }) {
   const { t } = useTranslation(),
-    { can, organization, organizationCan } = useAccess(),
+    { can, organization } = useAccess(),
     client = useClient(),
     [searchParams, setSearchParams] = useSearchParams();
   const api = modelApi(client, organization.id, scope);
@@ -59,12 +59,6 @@ export function Models({ scope }: { scope: ModelScope }) {
   const [search, setSearch] = useState(committedQuery);
   useEffect(() => setSearch(committedQuery), [committedQuery]);
   const providerId = searchParams.get("provider_id") ?? "";
-  const requestedScope = searchParams.get("scope");
-  const ownerScope =
-    scope.kind === "workspace" &&
-    (requestedScope === "organization" || requestedScope === "workspace")
-      ? requestedScope
-      : null;
   const requestedStatus = searchParams.get("status");
   const status =
     requestedStatus === "enabled" || requestedStatus === "disabled"
@@ -73,7 +67,7 @@ export function Models({ scope }: { scope: ModelScope }) {
   const enabled =
     status === "enabled" ? true : status === "disabled" ? false : undefined;
   const hasFilters = FILTER_KEYS.some((key) => searchParams.has(key));
-  const page = useCursor({ committedQuery, providerId, enabled, ownerScope });
+  const page = useCursor({ committedQuery, providerId, enabled });
   const updateFilters = (patch: Record<string, string>) => {
     setSearchParams((previous) => {
       const next = new URLSearchParams(previous);
@@ -93,7 +87,6 @@ export function Models({ scope }: { scope: ModelScope }) {
       committedQuery,
       providerId,
       enabled,
-      ownerScope,
     ],
     queryFn: ({ signal }) =>
       api.models(
@@ -102,7 +95,6 @@ export function Models({ scope }: { scope: ModelScope }) {
         committedQuery || undefined,
         providerId || undefined,
         enabled,
-        ownerScope ?? undefined,
       ),
   });
   const providers = useQuery({
@@ -113,13 +105,11 @@ export function Models({ scope }: { scope: ModelScope }) {
   // Only a Workspace owns media understanding defaults; the Organization collection marks nothing.
   const mediaDefaults = useQuery({
     ...mediaDefaultsQuery(client, scope.id),
-    enabled: scope.kind === "workspace",
   });
   const rows = useResourceRows<Schema["Model"]>();
   const { selected } = rows;
   const providerById = new Map(providers.data?.map((item) => [item.id, item]));
-  const manage =
-    scope.kind === "organization" ? organizationCan("write") : can("write");
+  const manage = can("write");
   const items = query.data?.items ?? [];
   return (
     <div className={styles.list}>
@@ -138,11 +128,7 @@ export function Models({ scope }: { scope: ModelScope }) {
       {selected && (
         <ModelEditor
           key={selected.id}
-          scope={
-            selected.workspace_id
-              ? { kind: "workspace", id: selected.workspace_id }
-              : { kind: "organization", id: organization.id }
-          }
+          scope={scope}
           modelId={selected.id}
           {...rows.control}
         />
@@ -172,21 +158,6 @@ export function Models({ scope }: { scope: ModelScope }) {
                 })),
               ]}
             />
-            {scope.kind === "workspace" && (
-              <ChoiceField
-                label={t("Scope")}
-                variant="filter"
-                value={ownerScope ?? "all"}
-                onValueChange={(value) =>
-                  updateFilters({ scope: value === "all" ? "" : value })
-                }
-                options={[
-                  { value: "all", label: t("All scopes") },
-                  { value: "workspace", label: t("Workspace") },
-                  { value: "organization", label: t("Organization") },
-                ]}
-              />
-            )}
             <ChoiceField
               label={t("Status")}
               variant="filter"
@@ -210,7 +181,6 @@ export function Models({ scope }: { scope: ModelScope }) {
                   updateFilters({
                     q: "",
                     provider_id: "",
-                    scope: "",
                     status: "",
                   });
                 }}
@@ -235,9 +205,7 @@ export function Models({ scope }: { scope: ModelScope }) {
             className={styles.listTable}
             caption={t("Models")}
             items={items}
-            canActivateRow={(item) =>
-              item.workspace_id ? manage : organizationCan("write")
-            }
+            canActivateRow={(item) => manage}
             onRowActivate={rows.activate}
             columns={[
               {
@@ -259,9 +227,6 @@ export function Models({ scope }: { scope: ModelScope }) {
                     description={
                       <span className={styles.modelMeta}>
                         <span title={item.key}>{item.key}</span>
-                        {scope.kind === "workspace" && !item.workspace_id && (
-                          <ScopeBadge workspaceId={item.workspace_id} />
-                        )}
                       </span>
                     }
                   />

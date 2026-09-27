@@ -14,7 +14,7 @@ All API paths below are under `/api/v1/workspaces/{workspace_id}` unless they na
 Creating and changing memories needs `write`:
 
 ```sh
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/memories" \
+curl -X POST "$A13N_URL/api/v1/memories" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
   -d '{"key": "team", "name": "Team conventions", "type": "postgres",
        "guide": "Keep one file per topic. Record decisions with their reason.",
@@ -60,7 +60,7 @@ The self-hosted credential is optional and is sent as `X-API-Key`; purging a del
 ### Create a record memory
 
 ```sh
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/memories" \
+curl -X POST "$A13N_URL/api/v1/memories" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
   -d '{"key": "user-facts", "name": "User facts", "type": "mem0_platform", "provider_id": "memprov_...",
        "guide": "Record one stable fact about the user per record."}'
@@ -94,9 +94,9 @@ When a run starts, each mounted record memory with `recall` on searches for the 
 A thread's memory mounts decide what its later runs use:
 
 ```sh
-curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/threads/$THREAD/memories" \
+curl -X POST "$A13N_URL/api/v1/threads/$THREAD/memories" \
   -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" -H "If-Match: $THREAD_ETAG" \
-  -d '{"name": "team", "memory_id": "mem_...", "access": "write"}'
+  -d '{"name": "team", "memory": {"id": "mem_..."}, "access": "write"}'
 ```
 
 - `name` matches `^[a-z][a-z0-9-]{0,62}$`; the model addresses the memory by it. `access` is `read`, which offers only the reading and searching tools, or `write`, which offers every tool.
@@ -106,7 +106,7 @@ curl -X POST "$A13N_URL/api/v1/workspaces/$WORKSPACE/threads/$THREAD/memories" \
 - Mount changes take the **thread's** `If-Match`, return the thread's new ETag, need `run`, and affect runs accepted afterwards. `GET …/threads/{thread_id}/memories` lists the mounts with the thread's ETag, and `DELETE …/threads/{thread_id}/memories/{name}` removes one.
 - New threads and forks take initial mounts in their `memories` field. A fork copies its origin thread's memory mounts. Archiving a thread removes them.
 
-To give every conversation of an agent a memory, set the agent's `memory_mounts` to `[{name, memory_id, access, recall}]`. They join a thread when its first run is accepted, for each name and memory the thread does not use yet. Afterwards the thread's own mounts decide, so removing one keeps it removed. A default whose memory was deleted fails that first run with `invalid_argument`, and defaults that would take the thread over its limit fail it with `memory_mount_limit`.
+To give every conversation of an agent a memory, set the agent's `memory_mounts` to `[{name, memory: {id} | {key}, access, recall}]`. They join a thread when its first run is accepted, for each name and memory the thread does not use yet. Afterwards the thread's own mounts decide, so removing one keeps it removed. A default whose memory was deleted fails that first run with `invalid_argument`, and defaults that would take the thread over its limit fail it with `memory_mount_limit`.
 
 An async [subagent](agents-and-runs.md#subagents)'s thread starts with the parent run's memory mounts and then adds its own agent's defaults. Inline subagents get no memory tools or context.
 

@@ -47,10 +47,10 @@ export function ConnectionsPage() {
     enabled: can("read"),
     initialPageParam: undefined as string | undefined,
     queryFn: ({ signal, pageParam }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/connections", {
+      client
+        .workspace(workspace.id)
+        .GET("/api/v1/connections", {
           params: {
-            path: { workspace_id: workspace.id },
             query: { cursor: pageParam },
           },
           signal,

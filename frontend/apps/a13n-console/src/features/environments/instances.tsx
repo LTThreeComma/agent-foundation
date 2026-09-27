@@ -44,10 +44,10 @@ export function EnvironmentInstances() {
   const query = useQuery({
     queryKey: ["environments", workspace.id, page.cursor],
     queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/environments", {
+      client
+        .workspace(workspace.id)
+        .GET("/api/v1/environments", {
           params: {
-            path: { workspace_id: workspace.id },
             query: { cursor: page.cursor },
           },
           signal,
@@ -234,7 +234,7 @@ function EnvironmentForm({ close }: { close: () => void }) {
       if (kind === "managed") {
         if (!templateId) throw new Error(t("Select an environment template."));
         return createManagedEnvironment(client, workspace.id, {
-          template_id: templateId,
+          template: { id: templateId },
           ...named,
         });
       }
@@ -243,9 +243,9 @@ function EnvironmentForm({ close }: { close: () => void }) {
         token,
         ...named,
       };
-      return client.http
-        .POST("/api/v1/workspaces/{workspace_id}/environments", {
-          params: { path: { workspace_id: workspace.id } },
+      return client
+        .workspace(workspace.id)
+        .POST("/api/v1/environments", {
           body,
         })
         .then(data);

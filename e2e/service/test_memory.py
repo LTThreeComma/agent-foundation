@@ -114,7 +114,7 @@ async def test_two_workers_edit_one_file_and_the_next_run_gets_the_changes(stack
     api, model = stack.api, stack.model
     agent = await api.create_agent("helper", await api.create_model(model.base_url))
     memory = await create_memory(api, "prefs", {"prefs.md": "- likes tea\n- reply in English\n"})
-    mounts = [{"name": "prefs", "memory_id": memory["id"], "access": "write"}]
+    mounts = [{"name": "prefs", "memory": {"id": memory["id"]}, "access": "write"}]
     view = {"memory": "prefs", "path": "prefs.md"}
 
     def edit(old: str, new: str) -> dict[str, str]:
@@ -173,7 +173,7 @@ async def test_a_recovered_attempt_continues_from_the_committed_memory_cursors(s
     api, model = stack.api, stack.model
     agent = await api.create_agent("helper", await api.create_model(model.base_url))
     memory = await create_memory(api, "notes", {"README.md": "# Notes\n"}, always_load=["README.md"])
-    mounts = [{"name": "notes", "memory_id": memory["id"], "access": "write"}]
+    mounts = [{"name": "notes", "memory": {"id": memory["id"]}, "access": "write"}]
     entry = {"memory": "notes", "path": "log.md", "content": "- first entry\n"}
     await model.call("memory_file_create", entry, call_id="call_log", to="[crash]")
     # The worker dies while this request is outstanding; its answer never comes.
@@ -210,7 +210,7 @@ async def test_a_memory_deleted_during_a_run_refuses_its_next_call(stack) -> Non
     api, model = stack.api, stack.model
     agent = await api.create_agent("helper", await api.create_model(model.base_url))
     memory = await create_memory(api, "todo", {"todo.md": "- buy milk\n"})
-    mounts = [{"name": "todo", "memory_id": memory["id"], "access": "write"}]
+    mounts = [{"name": "todo", "memory": {"id": memory["id"]}, "access": "write"}]
     append = {"memory": "todo", "path": "todo.md", "content": "- call Sam\n"}
     await model.call("memory_file_append", append, call_id="call_append", to="[gone]", hold="gone")
     await model.say("The list is gone.", to="[gone]")
@@ -233,7 +233,7 @@ async def test_a_run_recalls_records_and_writes_through_the_record_tools(stack, 
     api, model = stack.api, stack.model
     agent = await api.create_agent("helper", await api.create_model(model.base_url))
     memory = await record_memory(api, mem0, "facts", "likes green tea", "lives in Lisbon")
-    mounts = [{"name": "facts", "memory_id": memory["id"], "access": "write"}]
+    mounts = [{"name": "facts", "memory": {"id": memory["id"]}, "access": "write"}]
     add = {"memory": "facts", "text": "prefers window seats"}
     await model.call("memory_record_add", add, call_id="call_add", to="[rec]")
     await model.say("Noted.", to="[rec]")
@@ -255,7 +255,7 @@ async def test_a_failing_recall_does_not_fail_the_run(stack, mem0) -> None:  # t
     memory = await record_memory(api, mem0, "facts", "likes green tea")
     expect(await mem0.put("/fixture/failing", json={"operations": ["search"]}), 200)
     await model.say("No memories today.", to="[norecall]")
-    mounts = [{"name": "facts", "memory_id": memory["id"], "access": "read"}]
+    mounts = [{"name": "facts", "memory": {"id": memory["id"]}, "access": "read"}]
     receipt = await api.start(agent, "[norecall] Which tea do I like?", memories=mounts)
     run = await api.sealed(receipt["run"]["id"])
     assert (run["status"], run["output"]) == ("completed", "No memories today.")

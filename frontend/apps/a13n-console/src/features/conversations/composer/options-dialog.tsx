@@ -1,3 +1,4 @@
+import { overrideInput, memoryInput } from "../../../shared/resource-inputs";
 import {
   Button,
   ChoiceField,
@@ -53,11 +54,11 @@ export function optionFieldId(field: OptionField) {
  * own template is reserved when its first Run is accepted.
  */
 export type EnvironmentChoice =
-  Schema["ManagedEnvironmentCreate"] | Omit<Schema["MountCreate"], "name">;
+  Schema["ManagedEnvironmentInput"] | Omit<Schema["MountCreate"], "name">;
 
 /** What a message chooses for the Run it starts, beside its payload. */
 type Options = Pick<
-  Schema["NewThread"],
+  Schema["NewThreadInput"],
   "agent_revision_id" | "options" | "memories"
 > & {
   agent_id?: string;
@@ -143,14 +144,14 @@ export function useRunOptions() {
         agent_id: agent || undefined,
         agent_revision_id: revision || undefined,
         ...(Object.keys(override).length
-          ? { options: { overrides: override } }
+          ? { options: { overrides: overrideInput(override) } }
           : {}),
-        ...(memories.length ? { memories } : {}),
+        ...(memories.length ? { memories: memories.map(memoryInput) } : {}),
         ...(environment === "inherit"
           ? {}
           : {
               environment: environment.startsWith("template:")
-                ? { template_id: environment.slice(9) }
+                ? { template: { id: environment.slice(9) } }
                 : {
                     environment_id: environment.slice(9),
                     ...(workingDirectory
@@ -189,12 +190,12 @@ export function RunOptionsDialog({
         kind: "workspace",
         id: workspace.id,
       });
-      const path = { workspace_id: workspace.id };
       const [agents, models, templates, environments] = await Promise.all([
         allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace_id}/agents", {
-              params: { path, query: { cursor, archived: false } },
+          client
+            .workspace(workspace.id)
+            .GET("/api/v1/agents", {
+              params: { query: { cursor, archived: false } },
               signal,
             })
             .then(data),
@@ -206,9 +207,10 @@ export function RunOptionsDialog({
           environmentTemplates(client, workspace.id, signal, cursor),
         ),
         allPages((cursor) =>
-          client.http
-            .GET("/api/v1/workspaces/{workspace_id}/environments", {
-              params: { path, query: { cursor } },
+          client
+            .workspace(workspace.id)
+            .GET("/api/v1/environments", {
+              params: { query: { cursor } },
               signal,
             })
             .then(data),

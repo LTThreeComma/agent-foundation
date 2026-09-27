@@ -23,6 +23,9 @@ const state = vi.hoisted(() => ({
 vi.mock("../../auth/context", () => ({
   useClient: () => ({
     http: { GET: state.GET, POST: state.POST, PATCH: state.PATCH },
+    workspace() {
+      return this.http;
+    },
   }),
 }));
 vi.mock("react-i18next", () => ({
@@ -153,7 +156,7 @@ function mount(ids: { providerId?: string; modelId?: string } = {}) {
     </QueryClientProvider>,
   );
 }
-const modelsPath = "/api/v1/organizations/{organization_id}/models";
+const modelsPath = "/api/v1/models";
 
 beforeEach(() => {
   state.catalog = {
@@ -168,7 +171,7 @@ beforeEach(() => {
         ? { items: state.types, next_cursor: null }
         : path === "/api/v1/model-catalog"
           ? state.catalog
-          : path.endsWith("{model_id}")
+          : path.endsWith("{model_reference}")
             ? model
             : { items: state.providers, next_cursor: null },
     response: response(),
@@ -222,9 +225,7 @@ it("creates a manual model with JSON request defaults in its configuration", asy
   await user.click(screen.getByRole("button", { name: "Add model" }));
   await waitFor(() =>
     expect(state.POST).toHaveBeenCalledWith(modelsPath, {
-      params: { path: { organization_id: "org_test" } },
       body: {
-        workspace_id: "ws_test",
         provider_id: "mprov_test",
         key: "smart",
         name: "Smart",
@@ -306,9 +307,7 @@ it("applies a newly selected model immediately, including its catalog values", a
   await user.click(screen.getByRole("button", { name: "Add model" }));
   await waitFor(() =>
     expect(state.POST).toHaveBeenCalledWith(modelsPath, {
-      params: { path: { organization_id: "org_test" } },
       body: {
-        workspace_id: "ws_test",
         provider_id: "mprov_test",
         key: "gpt-5-5",
         name: "GPT-5.5",
@@ -465,24 +464,27 @@ it("saves an edited model under its ETag without offering a billable test", asyn
   await user.click(screen.getByRole("switch", { name: "Enabled" }));
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
-    expect(state.PATCH).toHaveBeenCalledWith(`${modelsPath}/{model_id}`, {
-      params: {
-        path: { organization_id: "org_test", model_id: "mdl_test" },
-      },
-      headers: { "If-Match": '"mdl_test:3"' },
-      body: {
-        name: "Smarter",
-        description: "Company gateway model",
-        enabled: false,
-        config: {
-          max_tokens: 4096,
-          model_name: "company-smart",
-          model_api: "openai.responses",
-          characteristics: { capabilities: ["image_understanding"] },
+    expect(state.PATCH).toHaveBeenCalledWith(
+      `${modelsPath}/{model_reference}`,
+      {
+        params: {
+          path: { model_reference: "mdl_test" },
         },
-        pricing: model.pricing,
-        catalog_ref: model.catalog_ref,
+        headers: { "If-Match": '"mdl_test:3"' },
+        body: {
+          name: "Smarter",
+          description: "Company gateway model",
+          enabled: false,
+          config: {
+            max_tokens: 4096,
+            model_name: "company-smart",
+            model_api: "openai.responses",
+            characteristics: { capabilities: ["image_understanding"] },
+          },
+          pricing: model.pricing,
+          catalog_ref: model.catalog_ref,
+        },
       },
-    }),
+    ),
   );
 });

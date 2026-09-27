@@ -175,7 +175,7 @@ async def test_sessions_list_most_recently_updated_first_and_refuse_malformed_fi
 
     for malformed in (
         {"updated_after": "garbage"},
-        {"agent_id": "a" * 100},
+        {"agent": {"id": "a" * 100}},
         {"label": [f"k{index}:v" for index in range(9)]},
         {"status": ["unknown"]},
         {"limit": 101},

@@ -33,7 +33,7 @@ PARALLEL_CONVERSATIONS = 4
 @dataclass(frozen=True, slots=True)
 class Seeded:
     organization: str  # API path
-    workspace: str  # API path
+    workspace: str  # canonical ID
     index: dict[str, str]  # IDs of what the report names
 
 
@@ -42,6 +42,7 @@ def seed(api: Api, model_url: str, environments: Path) -> Seeded:
     workspace = api.get("/api/v1/workspaces/default")
     org, ws = f"/api/v1/organizations/{workspace['organization_id']}", f"/api/v1/workspaces/{workspace['id']}"
     index = seed_identity(api, org, ws)
+    api, ws = api.workspace(workspace["id"]), "/api/v1"
     providers = seed_providers(api, org, workspace["id"])
     local = seed_local(api, org, ws, model_url, environments)
     skills = seed_skills(api, ws)
@@ -67,7 +68,7 @@ def seed(api: Api, model_url: str, environments: Path) -> Seeded:
     api.until(f"{ws}/threads?limit=100", lambda page: all(item["current_run_id"] is None for item in page["items"]))
     deliveries = f"{ws}/subscriptions/{subscription['id']}/deliveries"
     api.until(deliveries, lambda page: any(item["status"] == "delivered" for item in page["items"]))
-    return Seeded(org, ws, index)
+    return Seeded(org, workspace["id"], index)
 
 
 def write_report(path: Path, console_url: str, seeded: Seeded, checks: Sequence[tuple[str, bool]]) -> None:

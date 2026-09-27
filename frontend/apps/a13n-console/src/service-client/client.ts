@@ -11,6 +11,11 @@ export function createClient(options: ClientOptions) {
   const transport = new Transport(options);
   return {
     http: createFetchClient<paths>(transport.httpOptions()),
+    workspace: (workspaceId: string) =>
+      createFetchClient<paths>({
+        ...transport.httpOptions(),
+        headers: { "X-Workspace-ID": workspaceId },
+      }),
     setCsrfToken: (token: string | undefined) => transport.setCsrfToken(token),
     streamThread: (
       workspaceId: string,

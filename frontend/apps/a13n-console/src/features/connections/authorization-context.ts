@@ -34,15 +34,13 @@ export function authorizeConnection(
   connection: Schema["Connection"],
   body: Schema["AuthorizationRequest"] = {},
 ) {
-  return client.http
-    .POST(
-      "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/authorize",
-      {
-        params: { path: connectionPath(connection) },
-        headers: ifMatch(rowTag(connection)),
-        body,
-      },
-    )
+  return client
+    .workspace(connection.workspace_id)
+    .POST("/api/v1/connections/{connection_id}/authorize", {
+      params: { path: connectionPath(connection) },
+      headers: ifMatch(rowTag(connection)),
+      body,
+    })
     .then(data);
 }
 

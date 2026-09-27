@@ -27,9 +27,10 @@ export function SkillDetail() {
   const query = useQuery({
     queryKey: ["skills", workspace.id, "key", skillKey],
     queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/skills/{skill_id}", {
-          params: { path: { workspace_id: workspace.id, skill_id: skillKey } },
+      client
+        .workspace(workspace.id)
+        .GET("/api/v1/skills/{skill_reference}", {
+          params: { path: { skill_reference: `@${skillKey}` } },
           signal,
         })
         .then(representation),
