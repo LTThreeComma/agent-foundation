@@ -34,9 +34,7 @@ vi.mock("./editor", () => ({
       {identity}
       <button
         disabled={pending}
-        onClick={() =>
-          submit({ model: { model_id: "mdl_0123456789abcdef0123" } })
-        }
+        onClick={() => submit({ model: { id: "mdl_0123456789abcdef0123" } })}
       >
         Create agent
       </button>

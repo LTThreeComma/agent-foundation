@@ -11,8 +11,10 @@ from a13n_service.infra.audit import record
 from a13n_service.infra.db import Storage, lock, short_session
 from a13n_service.infra.errors import at_field
 from a13n_service.infra.http import require_match
+from a13n_service.resources.models.inputs import MediaSelectionInput, collect_media, media_ids
 from a13n_service.resources.models.schemas import MediaDefaults, MediaUnderstandingSelection
 from a13n_service.resources.models.service import resolve_media_model
+from a13n_service.resources.references import ReferenceBatch
 from a13n_service.tenancy.access import Access, administering_workspace, workspace_scope
 from a13n_service.tenancy.authorize import Principal
 from a13n_service.tenancy.tables import WorkspaceRow
@@ -34,7 +36,7 @@ async def replace_media_defaults(
     access: Access,
     actor: Principal,
     workspace_id: str,
-    body: MediaUnderstandingSelection,
+    body: MediaSelectionInput | MediaUnderstandingSelection,
     *,
     if_match: str | None,
 ) -> MediaDefaults:
@@ -45,10 +47,14 @@ async def replace_media_defaults(
         row = await lock(session, WorkspaceRow, scope.workspace_id)
         assert row is not None
         require_match(if_match, row.id, row.version)
-        for kind, model_id in body.selections().items():
+        batch = ReferenceBatch()
+        collect_media(batch, body)
+        await batch.resolve(session, scope.workspace_id)
+        selected = media_ids(batch, body)
+        for kind, model_id in selected.selections().items():
             with at_field(kind):
                 await resolve_media_model(session, actor, scope, kind, model_id, verb="read")
-        media = body.model_dump(mode="json", exclude_none=True)
+        media = selected.model_dump(mode="json", exclude_none=True)
         if media != row.settings.get("media", {}):
             row.settings = {**row.settings, "media": media}
             record(

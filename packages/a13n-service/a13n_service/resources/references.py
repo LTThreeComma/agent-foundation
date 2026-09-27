@@ -1,10 +1,9 @@
 """Explicit workspace resource addresses and bounded, deduplicated input resolution.
 
-Only transport/input code carries references. Persisted relationships and execution use canonical IDs.
+Application operations resolve input references after authorization. Storage and execution retain canonical IDs.
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import Annotated, ClassVar, Protocol
 
 from pydantic import BaseModel, ConfigDict, StringConstraints, TypeAdapter, ValidationError
@@ -56,7 +55,7 @@ def parse_reference(value: str) -> Reference:
 
 async def resolve_many[R: KeyedRow](
     session: AsyncSession, table: type[R], workspace_id: str, references: Iterable[Reference]
-) -> dict[Reference, R]:
+) -> dict[Reference, str]:
     """One set read per resource kind, scoped for both address forms. Callers authorize the workspace first."""
     wanted = set(references)
     if not wanted:
@@ -64,12 +63,14 @@ async def resolve_many[R: KeyedRow](
     ids = {ref.id for ref in wanted if isinstance(ref, IdReference)}
     keys = {ref.key for ref in wanted if isinstance(ref, KeyReference)}
     rows = (
-        await session.scalars(
-            select(table).where(table.workspace_id == workspace_id, or_(table.id.in_(ids), table.key.in_(keys)))
+        await session.execute(
+            select(table.id, table.key).where(
+                table.workspace_id == workspace_id, or_(table.id.in_(ids), table.key.in_(keys))
+            )
         )
     ).all()
-    by_id = {row.id: row for row in rows}
-    by_key = {row.key: row for row in rows}
+    by_id = {row.id: row.id for row in rows}
+    by_key = {row.key: row.id for row in rows}
     resolved = {}
     for ref in wanted:
         row = by_id.get(ref.id) if isinstance(ref, IdReference) else by_key.get(ref.key)
@@ -79,18 +80,12 @@ async def resolve_many[R: KeyedRow](
     return resolved
 
 
-@dataclass(frozen=True, slots=True)
-class ResolvedReference:
-    id: str
-    key: str
-
-
 class ReferenceBatch:
     """All references of one accepted input, deduplicated across its nested selections."""
 
     def __init__(self) -> None:
         self._wanted: dict[type[KeyedRow], set[Reference]] = {}
-        self._rows: dict[type[KeyedRow], dict[Reference, ResolvedReference]] = {}
+        self._rows: dict[type[KeyedRow], dict[Reference, str]] = {}
 
     def add(self, table: type[KeyedRow], reference: Reference | None) -> None:
         if reference is not None:
@@ -98,14 +93,10 @@ class ReferenceBatch:
 
     async def resolve(self, session: AsyncSession, workspace_id: str) -> None:
         for table, wanted in self._wanted.items():
-            rows = await resolve_many(session, table, workspace_id, wanted)
-            self._rows[table] = {ref: ResolvedReference(row.id, row.key) for ref, row in rows.items()}
-
-    def row(self, table: type[KeyedRow], reference: Reference) -> ResolvedReference:
-        return self._rows[table][address(reference)]
+            self._rows[table] = await resolve_many(session, table, workspace_id, wanted)
 
     def id(self, table: type[KeyedRow], reference: Reference) -> str:
-        return self.row(table, reference).id
+        return self._rows[table][address(reference)]
 
 
 def address(selection: Reference) -> Reference:
@@ -138,4 +129,4 @@ async def resolve_id(
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
         rows = await resolve_many(session, table, scope.workspace_id, [parsed])
-        return rows[parsed].id
+        return rows[parsed]

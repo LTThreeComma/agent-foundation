@@ -16,8 +16,10 @@ from a13n_service.infra.audit import record
 from a13n_service.infra.db import Storage, assign, short_session, transaction
 from a13n_service.infra.errors import ServiceError, at_field, conflict, not_found
 from a13n_service.infra.http import require_match
+from a13n_service.resources.memories.inputs import MemoryMountInput, mount_ids
 from a13n_service.resources.memories.schemas import MemoryMount
 from a13n_service.resources.memories.tables import MemoryRow
+from a13n_service.resources.references import ReferenceBatch
 from a13n_service.resources.rows import given
 from a13n_service.runs.memories.schemas import MemoryMountPage, MemoryMountUpdate
 from a13n_service.runs.memories.tables import ThreadMemoryRow
@@ -48,10 +50,16 @@ async def _existing(session: AsyncSession, workspace_id: str, memory_ids: Sequen
     return set(rows)
 
 
+def _view(row: ThreadMemoryRow) -> MemoryMount:
+    return MemoryMount.model_validate(
+        {"memory": {"id": row.memory_id}, "name": row.name, "access": row.access, "recall": row.recall}
+    )
+
+
 def _row(thread: ThreadRow, mount: MemoryMount) -> ThreadMemoryRow:
     return ThreadMemoryRow(
         thread_id=thread.id,
-        memory_id=mount.memory_id,
+        memory_id=mount.memory.id,
         organization_id=thread.organization_id,
         workspace_id=thread.workspace_id,
         name=mount.name,
@@ -78,14 +86,14 @@ async def mount_memories(
                 "The thread already mounts a memory by this name",
                 {"kind": "mount", "key": mount.name},
             )
-        if mount.memory_id in memory_ids:
-            raise conflict(MemoryRow.KIND, mount.memory_id, "already_mounted")
+        if mount.memory.id in memory_ids:
+            raise conflict(MemoryRow.KIND, mount.memory.id, "already_mounted")
         names.add(mount.name)
-        memory_ids.add(mount.memory_id)
-    existing = await _existing(session, thread.workspace_id, [mount.memory_id for mount in mounts])
+        memory_ids.add(mount.memory.id)
+    existing = await _existing(session, thread.workspace_id, [mount.memory.id for mount in mounts])
     for mount in mounts:
-        if mount.memory_id not in existing:
-            raise not_found(MemoryRow.KIND, mount.memory_id)
+        if mount.memory.id not in existing:
+            raise not_found(MemoryRow.KIND, mount.memory.id)
     rows = [_row(thread, mount) for mount in mounts]
     session.add_all(rows)
     await session.flush()
@@ -94,14 +102,14 @@ async def mount_memories(
 
 async def shared_memory_mounts(session: AsyncSession, origin: ThreadRow) -> list[MemoryMount]:
     """The origin thread's mounts, which a fork copies; the caller holds the origin thread lock."""
-    return [MemoryMount.model_validate(mount) for mount in await thread_mounts(session, origin.id)]
+    return [_view(mount) for mount in await thread_mounts(session, origin.id)]
 
 
 async def adopt_memory_mounts(session: AsyncSession, child: ThreadRow, frozen: Sequence[dict]) -> None:
     """A child thread mounts the memories its parent run froze, except those deleted since."""
     mounts = [MemoryMount.model_validate(mount) for mount in frozen]
-    existing = await _existing(session, child.workspace_id, [mount.memory_id for mount in mounts])
-    session.add_all(_row(child, mount) for mount in mounts if mount.memory_id in existing)
+    existing = await _existing(session, child.workspace_id, [mount.memory.id for mount in mounts])
+    session.add_all(_row(child, mount) for mount in mounts if mount.memory.id in existing)
     await session.flush()
 
 
@@ -113,16 +121,14 @@ async def freeze_memories(
     if thread.last_run_id is None and defaults:
         taken = await thread_mounts(session, thread.id)
         names, memory_ids = {mount.name for mount in taken}, {mount.memory_id for mount in taken}
-        added = [mount for mount in defaults if mount.name not in names and mount.memory_id not in memory_ids]
-        existing = await _existing(session, thread.workspace_id, [mount.memory_id for mount in added])
+        added = [mount for mount in defaults if mount.name not in names and mount.memory.id not in memory_ids]
+        existing = await _existing(session, thread.workspace_id, [mount.memory.id for mount in added])
         for index, mount in enumerate(defaults):
-            if mount in added and mount.memory_id not in existing:
-                with at_field(f"memory_mounts.{index}.memory_id"):
-                    raise not_found(MemoryRow.KIND, mount.memory_id)
+            if mount in added and mount.memory.id not in existing:
+                with at_field(f"memory_mounts.{index}.memory.id"):
+                    raise not_found(MemoryRow.KIND, mount.memory.id)
         await mount_memories(session, thread, added, limit=limit)
-    return [
-        MemoryMount.model_validate(mount).model_dump(mode="json") for mount in await thread_mounts(session, thread.id)
-    ]
+    return [_view(mount).model_dump(mode="json") for mount in await thread_mounts(session, thread.id)]
 
 
 def inherited_cursors(parent: RunRow | None, mounts: Sequence[dict]) -> dict[str, str | None]:
@@ -130,11 +136,11 @@ def inherited_cursors(parent: RunRow | None, mounts: Sequence[dict]) -> dict[str
     continues holds that memory's context as of the cursor. Any other memory gets its full context."""
     if parent is None:
         return {}
-    before = {(mount["name"], mount["memory_id"]) for mount in parent.memory_mounts}
+    before = {(mount["name"], mount["memory"]["id"]) for mount in parent.memory_mounts}
     return {
-        mount["memory_id"]: parent.memory_cursors[mount["memory_id"]]
+        mount["memory"]["id"]: parent.memory_cursors[mount["memory"]["id"]]
         for mount in mounts
-        if (mount["name"], mount["memory_id"]) in before and mount["memory_id"] in parent.memory_cursors
+        if (mount["name"], mount["memory"]["id"]) in before and mount["memory"]["id"] in parent.memory_cursors
     }
 
 
@@ -146,7 +152,7 @@ async def list_mounts(
         scope = await workspace_scope(session, actor, workspace_id, "read")
         thread = await get_thread(session, scope.workspace_id, thread_id)
         rows = await thread_mounts(session, thread.id)
-        return MemoryMountPage(items=[MemoryMount.model_validate(row) for row in rows]), thread.version
+        return MemoryMountPage(items=[_view(row) for row in rows]), thread.version
 
 
 def _audit(session: AsyncSession, actor: Principal, thread: ThreadRow, verb: str, name: str, memory_id: str) -> None:
@@ -166,7 +172,7 @@ async def add_mount(
     actor: Principal,
     workspace_id: str,
     thread_id: str,
-    body: MemoryMount,
+    body: MemoryMountInput | MemoryMount,
     *,
     if_match: str | None,
     limit: int,
@@ -180,8 +186,12 @@ async def add_mount(
         thread = await get_thread(session, scope.workspace_id, thread_id, lock=True)
         require_match(if_match, thread.id, thread.version)
         require_open(thread)
+        batch = ReferenceBatch()
+        batch.add(MemoryRow, body.memory)
+        await batch.resolve(session, scope.workspace_id)
+        body = mount_ids(batch, body)
         await mount_memories(session, thread, [body], limit=limit)
-        _audit(session, actor, thread, "create", body.name, body.memory_id)
+        _audit(session, actor, thread, "create", body.name, body.memory.id)
         await refresh_version(session, thread)
         return body, thread.version
 
@@ -210,7 +220,7 @@ async def update_mount(
         if changed:
             _audit(session, actor, thread, "update", name, mount.memory_id)
             await refresh_version(session, thread)
-        return MemoryMount.model_validate(mount), thread.version
+        return _view(mount), thread.version
 
 
 async def remove_mount(

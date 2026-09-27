@@ -287,7 +287,7 @@ async def test_a_new_thread_replays_before_resolving_reused_resource_keys(servic
         replayed = await service.client.post("/api/v1/threads", json=body, headers=headers)
         assert replayed.status_code == 200, replayed.text
         assert replayed.json()["run"]["id"] == created.json()["run"]["id"]
-        assert replayed.json()["run"]["memory_mounts"][0]["memory_id"] == memory["id"]
+        assert replayed.json()["run"]["memory_mounts"][0]["memory"]["id"] == memory["id"]
     different = await service.client.post(
         "/api/v1/threads", json={**body, "agent": {"id": agent["id"]}}, headers=headers
     )

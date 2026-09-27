@@ -50,7 +50,7 @@ export function useAgentDraft(initial: AgentConfig) {
     typeof initialMaxTokens === "number" ? String(initialMaxTokens) : "";
   const initialSettingsText = JSON.stringify(initialExtraSettings, null, 2);
   const [instructions, setInstructions] = useState(initial.instructions ?? ""),
-    [model, setModel] = useState(initial.model.model_id),
+    [model, setModel] = useState(initial.model.id),
     [mediaUnderstanding, setMediaUnderstanding] = useState(
       initial.media_understanding ?? {},
     ),
@@ -59,7 +59,7 @@ export function useAgentDraft(initial: AgentConfig) {
     [settings, setSettings] = useState(initialSettingsText),
     [advanced, setAdvanced] = useState(advancedConfig(initial)),
     [environmentTemplateId, setEnvironmentTemplateId] = useState(
-      initial.default_environment_template_id ?? null,
+      initial.default_environment_template?.id ?? null,
     ),
     [toolsets, setToolsets] = useState(initial.toolsets ?? {}),
     [skills, setSkills] = useState(initial.skills ?? []),
@@ -68,14 +68,14 @@ export function useAgentDraft(initial: AgentConfig) {
   const dirty =
     mediaKinds.some(
       ({ kind }) =>
-        (mediaUnderstanding[kind] ?? null) !==
-        (initial.media_understanding?.[kind] ?? null),
+        (mediaUnderstanding[kind]?.id ?? null) !==
+        (initial.media_understanding?.[kind]?.id ?? null),
     ) ||
     environmentTemplateId !==
-      (initial.default_environment_template_id ?? null) ||
+      (initial.default_environment_template?.id ?? null) ||
     JSON.stringify(toolsets) !== JSON.stringify(initial.toolsets ?? {}) ||
     instructions !== (initial.instructions ?? "") ||
-    model !== initial.model.model_id ||
+    model !== initial.model.id ||
     thinking !== thinkingSelection(initialThinking) ||
     maxTokens !== initialMaxTokensText ||
     settings !== initialSettingsText ||
@@ -164,7 +164,7 @@ export function buildDraftConfig(
           reviewer: initial.reviewer,
           model: {
             ...initial.model,
-            model_id: draft.model,
+            id: draft.model,
             settings: modelSettings,
           },
           skills: draft.skills,
@@ -174,7 +174,9 @@ export function buildDraftConfig(
             : {}),
           connection_tools: draft.connections,
           memory_mounts: draft.memoryMounts,
-          default_environment_template_id: draft.environmentTemplateId,
+          default_environment_template: draft.environmentTemplateId
+            ? { id: draft.environmentTemplateId }
+            : null,
         },
         draft.advanced,
       ),

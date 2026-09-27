@@ -10,7 +10,7 @@ const vision = "mdl_00000000000000000001",
 function draftFor(config: Partial<ReturnType<typeof initialConfig>> = {}) {
   const initial = {
     ...initialConfig(),
-    model: { model_id: "mdl_0123456789abcdef0123" },
+    model: { id: "mdl_0123456789abcdef0123" },
     ...config,
   };
   return renderHook(() => useAgentDraft(initial)).result;
@@ -18,26 +18,26 @@ function draftFor(config: Partial<ReturnType<typeof initialConfig>> = {}) {
 
 it("seeds media understanding from the saved configuration and publishes edits", () => {
   const draft = draftFor({
-    media_understanding: { image: vision, video: null, audio: null },
+    media_understanding: { image: { id: vision }, video: null, audio: null },
   });
   expect(draft.current.mediaUnderstanding).toEqual({
-    image: vision,
+    image: { id: vision },
     video: null,
     audio: null,
   });
   expect(draft.current.dirty).toBe(false);
   act(() =>
     draft.current.setMediaUnderstanding({
-      image: vision,
-      video: motion,
+      image: { id: vision },
+      video: { id: motion },
       audio: null,
     }),
   );
   expect(draft.current.dirty).toBe(true);
   const built = buildDraftConfig(draft.current, undefined, asIs);
   expect(built.ok && built.config.media_understanding).toEqual({
-    image: vision,
-    video: motion,
+    image: { id: vision },
+    video: { id: motion },
     audio: null,
   });
 });
@@ -46,7 +46,7 @@ it("omits media understanding while every kind inherits", () => {
   const draft = draftFor();
   act(() =>
     draft.current.setMediaUnderstanding({
-      image: vision,
+      image: { id: vision },
       video: null,
       audio: null,
     }),
@@ -115,7 +115,7 @@ it("checks model settings against the calling API's schema before publishing", (
 it("publishes default memory mounts and keeps them out of advanced JSON", () => {
   const handbook = {
     name: "handbook",
-    memory_id: "mem_0123456789abcdef0123",
+    memory: { id: "mem_0123456789abcdef0123" },
     access: "read" as const,
   };
   const draft = draftFor({ memory_mounts: [handbook] });
@@ -125,14 +125,22 @@ it("publishes default memory mounts and keeps them out of advanced JSON", () => 
   act(() =>
     draft.current.setMemoryMounts((previous) => [
       ...previous,
-      { name: "prefs", memory_id: "mem_fedcba9876543210fedc", access: "write" },
+      {
+        name: "prefs",
+        memory: { id: "mem_fedcba9876543210fedc" },
+        access: "write",
+      },
     ]),
   );
   expect(draft.current.dirty).toBe(true);
   const built = buildDraftConfig(draft.current, undefined, asIs);
   expect(built.ok && built.config.memory_mounts).toEqual([
     handbook,
-    { name: "prefs", memory_id: "mem_fedcba9876543210fedc", access: "write" },
+    {
+      name: "prefs",
+      memory: { id: "mem_fedcba9876543210fedc" },
+      access: "write",
+    },
   ]);
   act(() => draft.current.setAdvanced('{"memory_mounts": []}'));
   const restated = buildDraftConfig(draft.current, undefined, asIs);

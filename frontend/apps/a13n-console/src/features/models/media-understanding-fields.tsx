@@ -88,7 +88,7 @@ function withKind(
     image: value.image ?? null,
     video: value.video ?? null,
     audio: value.audio ?? null,
-    [kind]: key,
+    [kind]: key ? { id: key } : null,
   };
 }
 
@@ -102,7 +102,7 @@ export function mediaSelected(value: MediaSelection = {}) {
 /** Untranslated badges for the kinds a Model is the current Workspace default for. */
 export function mediaDefaultBadges(id: string, defaults?: MediaSelection) {
   return mediaKinds
-    .filter((entry) => defaults?.[entry.kind] === id)
+    .filter((entry) => defaults?.[entry.kind]?.id === id)
     .map((entry) => entry.badge);
 }
 
@@ -198,7 +198,7 @@ export function useWorkspaceMediaDefault() {
   const defaults = useQuery(mediaDefaultsQuery(client, workspace.id));
   const { find } = useMediaUnderstandingChoices();
   return (kind: MediaKind) => {
-    const id = defaults.data?.value[kind];
+    const id = defaults.data?.value[kind]?.id;
     return id ? (find(id)?.name ?? id) : undefined;
   };
 }
@@ -209,7 +209,7 @@ export function useMediaSummary() {
   const { find } = useMediaUnderstandingChoices();
   return (value: MediaSelection, inherited: string) => {
     const chosen = mediaKinds.flatMap((entry) => {
-      const id = value[entry.kind];
+      const id = value[entry.kind]?.id;
       return id ? [`${t(entry.label)} · ${find(id)?.name ?? id}`] : [];
     });
     if (!chosen.length) return inherited;
@@ -264,7 +264,7 @@ export function MediaUnderstandingFields({
       {mediaKinds.map((entry) => {
         const { kind, field, glyph: Glyph } = entry;
         const eligible = choices.eligible(kind);
-        const selected = value[kind] ?? "";
+        const selected = value[kind]?.id ?? "";
         const unavailable =
           !!selected && !eligible.some((model) => model.id === selected);
         // A selection the Workspace can no longer honour stays on show, named as far as it can be.

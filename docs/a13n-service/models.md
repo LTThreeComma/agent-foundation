@@ -74,7 +74,7 @@ curl -X PUT "$A13N_URL/api/v1/media-understanding-defaults" \
   -d '{"image": {"id": "mdl_..."}, "audio": null}'
 ```
 
-An omitted or `null` kind has no default. Each model must be usable in the workspace and declare the matching capability (`image_understanding`, `video_understanding` or `audio_understanding`).
+Reads return each selected kind as `{id}` too. An omitted or `null` kind has no default. Each model must be usable in the workspace and declare the matching capability (`image_understanding`, `video_understanding` or `audio_understanding`).
 
 At execution, an agent's own `media_understanding` choice wins and must be usable, or the run fails. A workspace default that is no longer usable is skipped with a warning, and that media kind is unavailable to the run.
 

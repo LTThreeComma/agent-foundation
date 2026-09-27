@@ -148,7 +148,7 @@ Deleting a record memory stages one `memory_purge` [outbox](07-facts-and-deliver
 
 ## Mounts
 
-A thread's **memory mounts** name the memories its later runs use: `{name, memory_id, access, recall}`. A name matches `^[a-z][a-z0-9-]{0,62}$`, the model addresses the memory by it, and `access` is `read` (reading and searching tools) or `write` (every tool). `recall`, true by default, lets a record memory recall records into each run's first input; file memories ignore it. `POST …/threads/{thread}/memories` adds one, `PATCH …/threads/{thread}/memories/{name} {access?, recall?}` changes one, and `DELETE …/threads/{thread}/memories/{name}` removes one; all need `run` and the thread `If-Match`, answer with the new thread ETag, and are audited as `thread_memory.create`, `.update` and `.delete`. Adding and changing need an open thread, and adding a memory of the thread's workspace. Changing a mount's memory is explicit: remove the name, then add it again. `GET` lists the mounts with the thread ETag.
+A thread's **memory mounts** name the memories its later runs use: `{name, memory: {id}, access, recall}`. A name matches `^[a-z][a-z0-9-]{0,62}$`, the model addresses the memory by it, and `access` is `read` (reading and searching tools) or `write` (every tool). `recall`, true by default, lets a record memory recall records into each run's first input; file memories ignore it. `POST …/threads/{thread}/memories` adds one, `PATCH …/threads/{thread}/memories/{name} {access?, recall?}` changes one, and `DELETE …/threads/{thread}/memories/{name}` removes one; all need `run` and the thread `If-Match`, answer with the new thread ETag, and are audited as `thread_memory.create`, `.update` and `.delete`. Adding and changing need an open thread, and adding a memory of the thread's workspace. Changing a mount's memory is explicit: remove the name, then add it again. `GET` lists the mounts with the thread ETag.
 
 - A duplicate name is `already_exists` (kind `mount`); a memory already mounted on the thread is `conflict` (`already_mounted`).
 - A thread holds at most `memory.mounts_per_thread` mounts: a path that would add more is `conflict` (`memory_mount_limit`, details `limit`). A request naming more than 32 is `invalid_argument`.
@@ -157,11 +157,11 @@ A thread's **memory mounts** name the memories its later runs use: `{name, memor
 Mounts reach a thread in these ways:
 
 - **New threads and forks** may name initial `memories`, added in the transaction that creates the thread. A fork also copies the origin thread's mounts; copied and named mounts count together.
-- **Agent defaults.** An agent configuration's `memory_mounts` ([04](04-resources.md#agents)) join at the thread's **first acceptance**, before any run of the thread has sealed: each default whose name and memory the thread does not use yet is mounted. A default whose memory is gone refuses the start, and the entry fails with `invalid_argument` at `memory_mounts.{index}.memory_id`; defaults that would exceed the limit fail it with `memory_mount_limit`. Afterwards only the thread's own mounts count, so removing a default's mount keeps it removed.
+- **Agent defaults.** An agent configuration's `memory_mounts` ([04](04-resources.md#agents)) join at the thread's **first acceptance**, before any run of the thread has sealed: each default whose name and memory the thread does not use yet is mounted. A default whose memory is gone refuses the start, and the entry fails with `invalid_argument` at `memory_mounts.{index}.memory.id`; defaults that would exceed the limit fail it with `memory_mount_limit`. Afterwards only the thread's own mounts count, so removing a default's mount keeps it removed.
 - **Child threads** adopt their parent run's frozen memory mounts, except memories deleted since, and then take their own agent's defaults at their first acceptance.
 - **Archive** removes the thread's memory mounts with its environment mounts ([05](05-runs.md#waiting-interrupt-and-fork)).
 
-Mount edits affect later runs only. **Acceptance** freezes the thread's mounts, ordered by name, into `runs.memory_mounts` `[{name, memory_id, access, recall}]`, which never changes afterwards.
+Mount edits affect later runs only. **Acceptance** freezes the thread's mounts, ordered by name, into `runs.memory_mounts` `[{name, memory: {id}, access, recall}]`, which never changes afterwards.
 
 ## Execution
 

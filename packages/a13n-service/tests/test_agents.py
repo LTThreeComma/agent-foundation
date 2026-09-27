@@ -51,6 +51,7 @@ from a13n_service.resources.agents.tables import AgentRow
 from a13n_service.resources.connections.schemas import ConnectionSelection
 from a13n_service.resources.models.schemas import ModelConfig
 from a13n_service.resources.models.service import ResolvedModel
+from a13n_service.resources.references import IdReference
 from a13n_service.resources.revisions import resolve_head
 from a13n_service.runs.agent import ResolvedAgent, ResolvedSubagent, build, resolve
 from a13n_service.settings import Settings
@@ -74,7 +75,7 @@ SKILL = b"---\nname: code-review\ndescription: Review a change for correctness.\
 
 
 def config(**fields: object) -> AgentConfig:
-    return AgentConfig.model_validate({"model": {"model_id": MODEL}, **fields})
+    return AgentConfig.model_validate({"model": {"id": MODEL}, **fields})
 
 
 def test_the_toolset_catalogue_names_each_tool_once() -> None:
@@ -191,11 +192,11 @@ def test_output_schemas_inline_their_references() -> None:
 def test_overrides_replace_or_merge_the_revision_fields() -> None:
     other = new_object_id("ap")
     revision = config(
-        model={"model_id": MODEL, "settings": {"temperature": 0.2}},
+        model={"id": MODEL, "settings": {"temperature": 0.2}},
         instructions="Be brief.",
         subagents={
-            "helper": {"agent_id": HELPER, "revision_id": HELPER_REVISION, "description": "Helps"},
-            "other": {"agent_id": other, "revision_id": new_object_id("apr")},
+            "helper": {"agent": {"id": HELPER}, "revision_id": HELPER_REVISION, "description": "Helps"},
+            "other": {"agent": {"id": other}, "revision_id": new_object_id("apr")},
         },
         retries={"tools": 2},
     )
@@ -204,20 +205,20 @@ def test_overrides_replace_or_merge_the_revision_fields() -> None:
             "model": {"settings": {"max_tokens": 100}},
             "instructions": "Be thorough.",
             "toolsets": {"shell": {"enabled": False}},
-            "subagents": {"helper": {"description": "Helps more"}, "other": None, "fresh": {"agent_id": FRESH}},
+            "subagents": {"helper": {"description": "Helps more"}, "other": None, "fresh": {"agent": {"id": FRESH}}},
             "retries": {"output": 1},
         }
     )
     applied = apply_override(revision, override)
 
-    assert applied.model.model_id == MODEL and applied.model.settings == {"max_tokens": 100}
+    assert applied.model.id == MODEL and applied.model.settings == {"max_tokens": 100}
     assert applied.instructions == "Be thorough." and applied.retries == RetryConfig(tools=2, output=1)
     assert not applied.toolsets["shell"].enabled and applied.toolsets["files"] == revision.toolsets["files"]
     assert set(applied.subagents) == {"helper", "fresh"} and applied.subagents["fresh"].revision_id is None
     helper = applied.subagents["helper"]
     assert (helper.revision_id, helper.description) == (HELPER_REVISION, "Helps more")
     # Another agent on an existing edge runs that agent's default revision, never the old pin.
-    moved = apply_override(revision, AgentOverride(subagents={"helper": SubagentOverride(agent_id=FRESH)}))
+    moved = apply_override(revision, AgentOverride(subagents={"helper": SubagentOverride(agent=IdReference(id=FRESH))}))
     assert moved.subagents["helper"].revision_id is None
 
     pinned = new_object_id("apr")
@@ -282,14 +283,14 @@ def test_build_composes_the_definition_without_io() -> None:
     child = resolved(HELPER, HELPER_REVISION, config())
     root_revision = new_object_id("apr")
     selected = config(
-        model={"model_id": MODEL, "settings": {"max_tokens": 64}},
+        model={"id": MODEL, "settings": {"max_tokens": 64}},
         instructions="Help.",
         toolsets={"web": {"tools": {"fetch": {}}}, "shell": {"tools": {"exec": {"permission": "review"}}}},
         user_questions=True,
         client_tools=[{"name": "lookup", "description": "Look up", "parameters_json_schema": {"type": "object"}}],
-        reviewer={"model": MODEL},
+        reviewer={"model": {"id": MODEL}},
         plugins=[{"instance_name": "audit", "plugin_key": "test.audit"}],
-        subagents={"helper": {"agent_id": HELPER, "revision_id": HELPER_REVISION}},
+        subagents={"helper": {"agent": {"id": HELPER}, "revision_id": HELPER_REVISION}},
     )
     root = resolved(
         new_object_id("ap"),
@@ -400,7 +401,7 @@ async def test_references_are_checked_at_their_field_path(service) -> None:  # t
     )
     search_only = {"toolsets": {"web": {"tools": {"scrape": {"config": {"provider_id": brave.json()["id"]}}}}}}
     cases: list[tuple[dict[str, object], str]] = [
-        ({"model": {"id": missing["mdl"]}}, "model.model_id"),
+        ({"model": {"id": missing["mdl"]}}, "model.id"),
         ({"reviewer": {"model": {"id": missing["mdl"]}}}, "reviewer.model"),
         ({"model": {"id": model_id, "settings": {"temperature": "warm"}}}, "model.settings.temperature"),
         # The model's provider resource owns the transport; settings cannot carry another request body or timeout.
@@ -422,10 +423,10 @@ async def test_references_are_checked_at_their_field_path(service) -> None:  # t
             "client_tools.0.name",
         ),
         ({"plugins": [{"instance_name": "audit", "plugin_key": "test.audit"}]}, "plugins.0"),
-        ({"default_environment_template": {"id": missing["et"]}}, "default_environment_template_id"),
+        ({"default_environment_template": {"id": missing["et"]}}, "default_environment_template.id"),
         (
             {"subagents": {"helper": {"agent": {"id": child["id"]}, "environment": dedicated}}},
-            "subagents.helper.environment.template_id",
+            "subagents.helper.environment.template.id",
         ),
         ({"output_spec": {"schema": {"$ref": "missing"}}}, "output_spec"),
     ]
@@ -435,12 +436,12 @@ async def test_references_are_checked_at_their_field_path(service) -> None:  # t
             json={"key": "invalid", "name": "Invalid", "config": {"model": {"id": model_id}, **changes}},
         )
         missing_reference = field in {
-            "model.model_id",
+            "model.id",
             "reviewer.model",
             "skills.0",
             "subagents.helper",
-            "default_environment_template_id",
-            "subagents.helper.environment.template_id",
+            "default_environment_template.id",
+            "subagents.helper.environment.template.id",
         }
         assert response.status_code == (404 if missing_reference else 400), (field, response.text)
         if missing_reference:
@@ -494,7 +495,7 @@ async def test_revisions_pin_skills_and_subagents(service) -> None:  # type: ign
     )
 
     pinned = await revision_config(service, parent)
-    assert pinned["skills"] == [{"skill_id": skill["id"], "revision_id": skill["default_revision_id"]}]
+    assert pinned["skills"] == [{"id": skill["id"], "revision_id": skill["default_revision_id"]}]
     assert pinned["subagents"]["helper"]["revision_id"] == child["default_revision_id"]
 
     # An inline path back to the agent itself is refused; an async child starts a child run of its own.
@@ -550,7 +551,7 @@ async def test_configurations_validate_as_revision_creation_would_without_storin
     assert checked.status_code == 204, checked.text
 
     for changes, field in (
-        ({"model": {"id": new_object_id("mdl")}}, "model.model_id"),
+        ({"model": {"id": new_object_id("mdl")}}, "model.id"),
         ({"skills": [{"id": new_object_id("sk")}]}, "skills.0"),
         ({"toolsets": {"shell": {"tools": {"exec": {"permission": "review"}}}}}, "reviewer"),
     ):
@@ -592,7 +593,7 @@ async def test_configurations_validate_as_revision_creation_would_without_storin
             runtime.storage,
             viewer(service),
             service.tenant.workspace_id,
-            AgentValidate(config=AgentConfig(model={"model_id": model_id})),
+            AgentValidate(config=AgentConfig(model={"id": model_id})),
             registry=runtime.registry,
             plugins=runtime.plugins,
         )
@@ -802,13 +803,13 @@ async def test_overrides_are_validated_and_pinned_as_the_run_freezes_them(servic
                 plugins=service.runtime.plugins,
             )
 
-    frozen = await validate(AgentOverride(subagents={"extra": SubagentOverride(agent_id=child["id"])}))
+    frozen = await validate(AgentOverride(subagents={"extra": SubagentOverride(agent=IdReference(id=child["id"]))}))
     assert frozen.subagents == {
-        "extra": SubagentOverride(agent_id=child["id"], revision_id=child["default_revision_id"])
+        "extra": SubagentOverride(agent=IdReference(id=child["id"]), revision_id=child["default_revision_id"])
     }
     for override, field in (
-        (AgentOverride(model=ModelOverride(model_id=new_object_id("mdl"))), "model.model_id"),
-        (AgentOverride(subagents={"extra": SubagentOverride(description="No agent")}), "subagents.extra.agent_id"),
+        (AgentOverride(model=ModelOverride(id=new_object_id("mdl"))), "model.id"),
+        (AgentOverride(subagents={"extra": SubagentOverride(description="No agent")}), "subagents.extra.agent"),
     ):
         with pytest.raises(ServiceError) as refused:
             await validate(override)
@@ -830,8 +831,8 @@ async def test_overrides_are_validated_and_pinned_as_the_run_freezes_them(servic
     kept = await validate(AgentOverride(instructions="Only this run."), pinning["id"])
     assert kept.instructions == "Only this run."
     for override, field in (
-        (AgentOverride(subagents={"extra": SubagentOverride(agent_id=child["id"])}), "subagents.extra"),
-        (AgentOverride(skills=(SkillSelection(skill_id=skill["id"]),)), "skills.0"),
+        (AgentOverride(subagents={"extra": SubagentOverride(agent=IdReference(id=child["id"]))}), "subagents.extra"),
+        (AgentOverride(skills=(SkillSelection(id=skill["id"]),)), "skills.0"),
     ):
         with pytest.raises(ServiceError) as archived_pin:
             await validate(override)
@@ -888,7 +889,7 @@ async def test_workspace_media_defaults_fill_what_an_agent_leaves_unselected(ser
     refused = await service.client.put(defaults, json={"image": {"id": plain}}, headers={"if-match": etag})
     assert refused.status_code == 400 and refused.json()["error"]["details"]["field"] == "image", refused.text
     replaced = await service.client.put(defaults, json={"image": {"id": reader}}, headers={"if-match": etag})
-    assert replaced.status_code == 200 and replaced.json()["image"] == reader, replaced.text
+    assert replaced.status_code == 200 and replaced.json()["image"] == {"id": reader}, replaced.text
     # Replacing the defaults with themselves changes nothing and records nothing.
     again = await service.client.put(
         defaults, json={"image": {"id": reader}}, headers={"if-match": replaced.headers["etag"]}
@@ -899,7 +900,7 @@ async def test_workspace_media_defaults_fill_what_an_agent_leaves_unselected(ser
             await session.scalars(select(AuditEventRow).where(AuditEventRow.action == "workspace.media.replace"))
         ).all()
     assert [(event.target_id, event.outcome, event.details) for event in events] == [
-        (service.tenant.workspace_id, "ok", {"media": {"image": reader}})
+        (service.tenant.workspace_id, "ok", {"media": {"image": {"id": reader}}})
     ]
 
     tenant = service.tenant

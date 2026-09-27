@@ -151,7 +151,7 @@ class ChildRuns(SubagentOperator):
             message = Message(
                 delivery="next_run",
                 payload=payload,
-                agent_id=edge.selection.agent_id,
+                agent_id=edge.selection.agent.id,
                 agent_revision_id=edge.revision_id,
                 options=RunOptions(max_usage=UsageLimit(requests=limit) if limit is not None else None),
             )
@@ -281,14 +281,14 @@ class ChildRuns(SubagentOperator):
         policy = edge.selection.environment
         if policy.mode == "shared":
             await adopt_mounts(session, child, [EnvironmentMount.model_validate(m) for m in run.environment_mounts])
-        elif policy.template_id is not None:  # Exactly a dedicated policy names its template.
+        elif policy.template is not None:  # Exactly a dedicated policy names its template.
             scope = WorkspaceScope(run.organization_id, run.workspace_id)
             principal = await principal_for(session, self.runtime.access, run.principal_id, confinement=scope)
             await reserve_primary(
                 session,
                 principal,
                 child,
-                template_id=policy.template_id,
+                template_id=policy.template.id,
                 limit=self.runtime.settings.environments.managed_count,
             )
 

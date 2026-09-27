@@ -121,7 +121,10 @@ beforeEach(() => {
     return response({ items: models, next_cursor: null });
   });
   state.http.PUT.mockResolvedValue(
-    response({ ...initial, version: 1, image: "mdl_vision" }, '"ws_test:1"'),
+    response(
+      { ...initial, version: 1, image: { id: "mdl_vision" } },
+      '"ws_test:1"',
+    ),
   );
 });
 afterEach(cleanup);
@@ -152,7 +155,7 @@ it("shows the row saving and keeps the other rows out of reach", async () => {
       settle = () =>
         resolve(
           response(
-            { ...initial, version: 1, image: "mdl_vision" },
+            { ...initial, version: 1, image: { id: "mdl_vision" } },
             '"ws_test:1"',
           ),
         );
@@ -187,7 +190,7 @@ it("reloads the saved selection when the defaults changed elsewhere", async () =
 });
 
 it("warns on the row whose saved model is no longer eligible", async () => {
-  saved = { ...initial, image: "mdl_disabled" };
+  saved = { ...initial, image: { id: "mdl_disabled" } };
   setup();
   const image = await imageSelect();
   expect(image.textContent).toContain("Disabled");
@@ -225,7 +228,7 @@ it("shows defaults without edit controls to non-admins", async () => {
 it("names what an inherited kind falls back to and keeps a retired selection unselectable", async () => {
   setup(
     <MediaUnderstandingFields
-      value={{ image: "retired" }}
+      value={{ image: { id: "retired" } }}
       onChange={() => {}}
       inherit={{ label: "Workspace default", describe: () => "Vision" }}
     />,

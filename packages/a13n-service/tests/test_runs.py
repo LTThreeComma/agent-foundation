@@ -515,7 +515,7 @@ async def test_the_agent_composer_follows_the_usable_models(service, scripted_mo
     first = await runs_kit.create_model(service, scripted_model)
     composer = (await service.client.post(prepare)).json()
     revision = f"{service.workspace}/agents/{composer['id']}/revisions/{composer['default_revision_id']}"
-    assert (await service.client.get(revision)).json()["config"]["model"]["model_id"] == first
+    assert (await service.client.get(revision)).json()["config"]["model"]["id"] == first
 
     # Disabling the model it runs on moves it to another usable model with a new revision.
     second = await service.client.post(
@@ -539,4 +539,4 @@ async def test_the_agent_composer_follows_the_usable_models(service, scripted_mo
     moved = (await service.client.post(prepare)).json()
     assert moved["default_revision_id"] != composer["default_revision_id"]
     revision = f"{service.workspace}/agents/{moved['id']}/revisions/{moved['default_revision_id']}"
-    assert (await service.client.get(revision)).json()["config"]["model"]["model_id"] == second.json()["id"]
+    assert (await service.client.get(revision)).json()["config"]["model"]["id"] == second.json()["id"]

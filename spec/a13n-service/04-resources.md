@@ -31,7 +31,7 @@ Every mutable row has a `version` that the database advances on each change of a
 
 Agents, skills, models, memories, environment templates and secrets each have an immutable `key`, unique within that kind and workspace: `UNIQUE (workspace_id, key)`. Different kinds and different workspaces may use the same key. Disabling or archiving a resource retains its key. Only physical deletion releases a key, for kinds whose lifecycle permits deletion. A new resource using a released key always receives a new ID; IDs are never reused, and a reference to an ID never moves to the new resource. Secret requirements name a key rather than a resource ID, so subsequent tool calls can use a replacement secret at that key.
 
-Keys are client addresses. The [HTTP input boundary](10-api.md#paths-and-scope) resolves explicit references once, in the selected workspace, before handing canonical IDs to domain operations. Persisted resource references, queued entries, runs and worker inputs retain those IDs. Secret requirements are the exception: input and stored configuration both retain the declared keys. Revisions pin their existing revision selections independently of this address resolution. ETags include both identity and version, so an old instance's ETag cannot change a replacement at the same key.
+Keys are client addresses. Application operations authorize the selected workspace before resolving explicit [input references](10-api.md#paths-and-scope) once to canonical IDs. HTTP and built-in configuration tools share these operations. Persisted resource references, queued entries, runs and worker inputs retain those IDs. Secret requirements are the exception: input and stored configuration both retain the declared keys. Revisions pin their existing revision selections independently of this address resolution. ETags include both identity and version, so an old instance's ETag cannot change a replacement at the same key.
 
 ## Revisioned heads
 
@@ -67,21 +67,21 @@ agents            head columns + source  image NULL
 agent_revisions   revision columns; config: AgentConfig
 ```
 
-`AgentConfig` is the canonical definition stored and returned by the Service. Public inputs use the explicit reference forms in [10](10-api.md#paths-and-scope); the following fields are the resolved representation:
+`AgentConfig` is the canonical definition stored and returned by the Service. Inputs, stored revisions and read responses use the same configuration structure. Inputs accept the explicit ID or key reference forms in [10](10-api.md#paths-and-scope); storage and reads use only `{id}` for those references. A returned configuration can be submitted unchanged. The fields are:
 
-- `model`: `model_id`, native `settings` for the model's calling API and context `characteristics`.
+- `model`: `id`, native `settings` for the model's calling API and context `characteristics`.
 - `instructions`.
 - `toolsets`: the built-in toolsets `files`, `shell`, `web`, `memory`, `assets` and `configuration`, stored normalized against the catalogue `GET /toolsets` serves. Enabled web search and scrape name a web provider resource.
-- `skills`: `{skill_id, revision_id}` selections.
+- `skills`: `{id, revision_id}` selections.
 - `connection_tools`: `{connection_id, tools, defer_loading, permission, permissions}` selections ([Connections](#connections)).
 - `client_tools`, whose results a client supplies through resume, and `user_questions`, which offers `ask_user_question`.
-- `subagent_mode` (`inline` or `async`) and named `subagents`: `{agent_id, revision_id, description, context, usage_limits, environment}`. `environment.mode` is `none`, `shared` or `dedicated`, and `dedicated` names a `template_id`.
-- `reviewer`: a model and its settings for the `review` tool permission.
-- `media_understanding`: an image, video and audio model.
+- `subagent_mode` (`inline` or `async`) and named `subagents`: `{agent: {id}, revision_id, description, context, usage_limits, environment}`. `environment.mode` is `none`, `shared` or `dedicated`, and `dedicated` names a `template: {id}`.
+- `reviewer`: `model: {id}` and its settings for the `review` tool permission.
+- `media_understanding`: `image`, `video` and `audio`, each `{id}` or null.
 - `plugins`: `{instance_name, plugin_key, config}` selections of installed Harness plugins ([08](08-providers.md#installed-harness-plugins)).
 - `output_spec`, `retries` and `secret_requirements` ([Secrets](#secrets)).
-- `default_environment_template_id`: referenced, not pinned; it is read when an environment is created from it, never during execution.
-- `memory_mounts`: default memory mounts `{name, memory_id, access, recall}`, at most 32 with unique names and memories, which a thread takes at its first acceptance ([11](11-memory.md#mounts)). They are referenced, not pinned, and a run's override cannot change them.
+- `default_environment_template`: `{id}` or null, referenced, not pinned; it is read when an environment is created from it, never during execution.
+- `memory_mounts`: default memory mounts `{name, memory: {id}, access, recall}`, at most 32 with unique names and memories, which a thread takes at its first acceptance ([11](11-memory.md#mounts)). They are referenced, not pinned, and a run's override cannot change them.
 
 Tool permissions live on each selection and compile into one Harness tool-permission table.
 
@@ -97,7 +97,7 @@ Revision creation, `set-default`, duplication and `POST /agents/validate` apply 
 06. Each connection selection passes the connection's own check, and the agent declares no more tool permissions than one agent may have.
 07. Each web provider is enabled and usable, and its type serves the selected operation (and domain restriction for scrape). Operation support is checked here, not at run time.
 08. The default template and every dedicated edge's template are usable.
-09. Each default memory mount names a memory of the workspace, at `memory_mounts.{index}.memory_id`. Only authoring checks it; the acceptance that mounts a default checks its memory again.
+09. Each default memory mount names a memory of the workspace, at `memory_mounts.{index}.memory.id`. Only authoring checks it; the acceptance that mounts a default checks its memory again.
 10. The inline subagent graph does not lead back to the agent itself, nests at most 16 deep and reaches at most 256 revisions.
 
 An author's references need `read`. A run's override (`options.overrides`, [05](05-runs.md#submit-and-accept)) passes the same validation on the configuration it produces, with verb `run` under the run's authority, and is frozen with the same pins. Credentials are resolved only at execution, where live references are checked again. Pinning direct edges keeps changed defaults from altering recovered execution without copying a second graph.
@@ -105,7 +105,7 @@ An author's references need `read`. A run's override (`options.overrides`, [05](
 ### Operations
 
 - `POST /agents` `{key, name, description, labels, config}` creates the head and revision 1.
-- `POST /agents/validate` `{config, agent_id?}` needs `write`, applies revision validation and writes nothing: 204, or the same `invalid_argument`. `agent_id` names the agent the configuration would become a revision of, so the graph check sees cycles through it.
+- `POST /agents/validate` `{config, agent?}` needs `write`, applies revision validation and writes nothing: 204, or the same `invalid_argument`. `agent` names the agent the configuration would become a revision of, so the graph check sees cycles through it.
 - `GET /agents` filters by `label`, `q`, `archived`, `skill_id` and `skill_revision_id`.
 - `PATCH /agents/{agent}` changes `name`, `description` and `labels`.
 - `POST /agents/{agent}/archive` and `/unarchive` take `If-Match`.

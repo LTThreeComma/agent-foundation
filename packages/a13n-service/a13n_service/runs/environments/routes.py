@@ -4,10 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response
 
-from a13n_service.infra.db import short_session
 from a13n_service.infra.http import IfMatch, PageLimit, etag, tagged
-from a13n_service.resources.environment_templates.tables import EnvironmentTemplateRow
-from a13n_service.resources.references import ReferenceBatch
 from a13n_service.runs.environments import mounts, service
 from a13n_service.runs.environments.inputs import ManagedEnvironmentInput
 from a13n_service.runs.environments.schemas import (
@@ -15,7 +12,6 @@ from a13n_service.runs.environments.schemas import (
     EnvironmentUpdate,
     EnvironmentView,
     ExternalTargetCreate,
-    ManagedEnvironmentCreate,
     MountCreate,
     MountPage,
     MountView,
@@ -52,14 +48,7 @@ async def create_environment(
     """Reserve a managed sandbox from a template (`creating`), or register an external envd target (`ready`)."""
     match body:
         case ManagedEnvironmentInput():
-            batch = ReferenceBatch()
-            batch.add(EnvironmentTemplateRow, body.template)
-            async with short_session(runtime.storage) as session:
-                await batch.resolve(session, workspace.workspace_id)
-            selected = ManagedEnvironmentCreate(
-                template_id=batch.id(EnvironmentTemplateRow, body.template), name=body.name
-            )
-            result = await service.reserve_environment(runtime, actor, workspace.workspace_id, selected)
+            result = await service.reserve_environment(runtime, actor, workspace.workspace_id, body)
         case ExternalTargetCreate():
             result = await service.register_external(runtime, actor, workspace.workspace_id, body)
     return tagged(response, result)

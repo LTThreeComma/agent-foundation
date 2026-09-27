@@ -230,7 +230,11 @@ async def delegation(session: AsyncSession, thread: ThreadRow, run_id: str) -> D
 def primary_template(thread: ThreadRow, config: AgentConfig) -> str | None:
     """The template acceptance reserves a primary sandbox from when the thread mounts none: the agent's, except on
     a child thread, whose environments the edge that delegates it decides when it is spawned."""
-    return None if thread.origin == "child" else config.default_environment_template_id
+    return (
+        None
+        if thread.origin == "child" or config.default_environment_template is None
+        else config.default_environment_template.id
+    )
 
 
 async def start_run(session: AsyncSession, runtime: Runtime, thread: ThreadRow, source: Source) -> RunRow:

@@ -4,11 +4,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from a13n_service.infra.db import short_session
 from a13n_service.infra.http import IfMatch, PageLimit, tagged
 from a13n_service.resources.models import media, service
 from a13n_service.resources.models.catalog import ModelsDevCatalog
-from a13n_service.resources.models.inputs import MediaSelectionInput, collect_media, media_ids
+from a13n_service.resources.models.inputs import MediaSelectionInput
 from a13n_service.resources.models.schemas import (
     MediaDefaults,
     Model,
@@ -18,7 +17,6 @@ from a13n_service.resources.models.schemas import (
     ModelUpdate,
 )
 from a13n_service.resources.models.tables import ModelRow
-from a13n_service.resources.references import ReferenceBatch
 from a13n_service.resources.requests import CurrentRuntime, resource_id
 from a13n_service.tenancy.requests import Actor, Workspace
 
@@ -97,12 +95,7 @@ async def replace_media_defaults(
     if_match: IfMatch = None,
 ) -> MediaDefaults:
     """Replaces all three kinds; each model must declare it understands its kind. Requires workspace admin."""
-    batch = ReferenceBatch()
-    collect_media(batch, body)
-    async with short_session(runtime.storage) as session:
-        await batch.resolve(session, workspace.workspace_id)
-    selected = media_ids(batch, body)
     replaced = await media.replace_media_defaults(
-        runtime.storage, runtime.access, actor, workspace.workspace_id, selected, if_match=if_match
+        runtime.storage, runtime.access, actor, workspace.workspace_id, body, if_match=if_match
     )
     return tagged(response, replaced)

@@ -1,4 +1,3 @@
-import { configInput } from "../../shared/resource-inputs";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button, FormField, Input } from "a13n-ui";
 import { useEffect, useState } from "react";
@@ -69,7 +68,7 @@ export function CreateAgent() {
         client
           .workspace(workspace.id)
           .POST("/api/v1/agents", {
-            body: { key, name, description, config: configInput(config) },
+            body: { key, name, description, config },
           })
           .then(representation),
       ),

@@ -180,7 +180,7 @@ it("overrides media understanding per kind and names the choice on its chip", as
       ? {
           id: "ws_test",
           version: 0,
-          image: "mdl_0123456789abcdef0123",
+          image: { id: "mdl_0123456789abcdef0123" },
           video: null,
           audio: null,
         }

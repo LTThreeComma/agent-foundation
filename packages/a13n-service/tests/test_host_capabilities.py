@@ -320,7 +320,7 @@ async def pin_skill(runtime: Any, tenant: Any) -> tuple[Any, str]:
         tenant.workspace_id,
         SkillCreate(source=UploadSource(kind="upload", upload_id=upload.upload_id)),
     )
-    selection = SkillSelection(skill_id=skill.id, revision_id=skill.default_revision_id)
+    selection = SkillSelection(id=skill.id, revision_id=skill.default_revision_id)
     async with short_session(runtime.storage) as session:
         [pinned] = await resolve_skills(session, run_row(tenant), [selection])
         with pytest.raises(ServiceError) as unmounted:

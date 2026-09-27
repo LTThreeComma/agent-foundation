@@ -70,8 +70,8 @@ async def resolve_skills(
     pinned: list[PinnedSkill] = []
     for selection in selections:
         row = found.get(selection.revision_id or "")
-        if row is None or row.skill_id != selection.skill_id:
-            raise not_found("skill_revision", selection.revision_id or selection.skill_id)
+        if row is None or row.skill_id != selection.id:
+            raise not_found("skill_revision", selection.revision_id or selection.id)
         manifest = SkillManifest.model_validate(row.config)
         pinned.append(PinnedSkill(row.id, row.digest, manifest.name, manifest.description))
     return tuple(pinned)

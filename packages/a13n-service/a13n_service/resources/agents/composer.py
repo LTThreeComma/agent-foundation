@@ -54,7 +54,7 @@ or repeat credential values; connections and secrets are configured by the user 
 
 def configuration(model_id: str) -> AgentConfig:
     return AgentConfig(
-        model=AgentModel(model_id=model_id),
+        model=AgentModel(id=model_id),
         instructions=_INSTRUCTIONS,
         toolsets={
             "files": ToolsetSelection(enabled=False),
@@ -121,7 +121,7 @@ async def _model(
     preferred: Sequence[str],
 ) -> str:
     """The current revision's model while usable, else the most preferred usable model, else the first by key."""
-    kept = None if current is None else AgentConfig.model_validate(current.config).model.model_id
+    kept = None if current is None else AgentConfig.model_validate(current.config).model.id
     rows = (
         await session.scalars(
             select(ModelRow)

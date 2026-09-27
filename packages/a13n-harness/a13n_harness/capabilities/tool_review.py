@@ -9,7 +9,7 @@ from enum import IntEnum, StrEnum
 from functools import cache
 from html import escape
 from importlib.resources import files
-from typing import Literal, Protocol, cast, runtime_checkable
+from typing import Annotated, Literal, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 from pydantic_ai import Agent, RunContext, ToolOutput, UseEnumMemberDocstrings
@@ -178,12 +178,12 @@ class ToolReviewError(Exception):
         self.usage = usage
 
 
-class ToolReviewConfig(ToolReviewPolicy):
+class ToolReviewConfig[Model = Annotated[str, Field(min_length=1, max_length=1024)]](ToolReviewPolicy):
     """Host-portable configuration for the default model-backed reviewer."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    model: str = Field(min_length=1, max_length=1024)
+    model: Model
     instruction: str | None = Field(default=None, max_length=32768)
     shell_instruction: str | None = Field(default=None, max_length=32768)
     model_settings: dict[str, JsonValue] | None = None

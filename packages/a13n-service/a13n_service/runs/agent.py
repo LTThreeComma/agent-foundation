@@ -37,6 +37,7 @@ from a13n_harness.capabilities import (
     CompactionCapability,
     SubagentCapability,
     SubagentOperator,
+    ToolReviewConfig,
     UserInteractionCapability,
 )
 from a13n_harness.capabilities.web import WebCapability
@@ -170,8 +171,8 @@ async def resolve(
             agent_id=agent_id,
             revision_id=revision_id,
             config=config,
-            model=await model(config.model.model_id),
-            reviewer=None if config.reviewer is None else await model(config.reviewer.model),
+            model=await model(config.model.id),
+            reviewer=None if config.reviewer is None else await model(config.reviewer.model.id),
             media=await media(config),
             connection_types=await connection_types(session, scope.workspace_id, config.connection_tools),
             subagents=subagents,
@@ -306,8 +307,12 @@ class _Host:
         reviewer = agent.config.reviewer
         if reviewer is None or agent.reviewer is None:
             return ToolPermissionsCapability(permissions)
-        review = reviewer.model_copy(
-            update={"model_settings": _settings(agent.reviewer, reviewer.model_settings or {})}
+        review = ToolReviewConfig.model_validate(
+            {
+                **reviewer.model_dump(exclude={"model", "model_settings"}),
+                "model": reviewer.model.id,
+                "model_settings": _settings(agent.reviewer, reviewer.model_settings or {}),
+            }
         )
         # The run's model resolver resolves `review.model`, the reviewer's model ID.
         return ToolPermissionsCapability(permissions, review=review)

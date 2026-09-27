@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query, Response
 from a13n_service.infra import images
 from a13n_service.infra.http import IfMatch, PageLimit, tagged
 from a13n_service.resources.agents import composer, service
-from a13n_service.resources.agents.requests import CreateBody, RevisionBody, ValidateBody
+from a13n_service.resources.agents.inputs import AgentCreateInput, AgentRevisionCreateInput, AgentValidateInput
 from a13n_service.resources.agents.schemas import (
     Agent,
     AgentDuplicate,
@@ -31,7 +31,7 @@ router = APIRouter(prefix="/api/v1", tags=["agents"])
 
 @router.post("/agents", response_model=Agent, status_code=201)
 async def create_agent(
-    response: Response, workspace: Workspace, body: CreateBody, actor: Actor, runtime: CurrentRuntime
+    response: Response, workspace: Workspace, body: AgentCreateInput, actor: Actor, runtime: CurrentRuntime
 ) -> Agent:
     created = await service.create_agent(
         runtime.storage, actor, workspace.workspace_id, body, registry=runtime.registry, plugins=runtime.plugins
@@ -40,7 +40,9 @@ async def create_agent(
 
 
 @router.post("/agents/validate", status_code=204)
-async def validate_revision(workspace: Workspace, body: ValidateBody, actor: Actor, runtime: CurrentRuntime) -> None:
+async def validate_revision(
+    workspace: Workspace, body: AgentValidateInput, actor: Actor, runtime: CurrentRuntime
+) -> None:
     """No content when creating a revision of the configuration would accept it, else the same `invalid_argument`
     error with the field's path relative to `config`; nothing is stored."""
     await service.validate_revision(
@@ -213,7 +215,7 @@ async def duplicate_agent(
 async def create_revision(
     workspace: Workspace,
     agent_id: AgentId,
-    body: RevisionBody,
+    body: AgentRevisionCreateInput,
     actor: Actor,
     runtime: CurrentRuntime,
     if_match: IfMatch = None,

@@ -69,13 +69,13 @@ async def resolve_memories(session: AsyncSession, run: RunRow) -> tuple[PlannedM
         for row in await session.scalars(
             select(MemoryRow).where(
                 MemoryRow.workspace_id == run.workspace_id,
-                MemoryRow.id.in_([mount.memory_id for mount in mounts]),
+                MemoryRow.id.in_([mount.memory.id for mount in mounts]),
             )
         )
     }
     planned: list[PlannedMemory] = []
     for mount in mounts:
-        if (row := rows.get(mount.memory_id)) is None:
+        if (row := rows.get(mount.memory.id)) is None:
             continue
         record = None
         if row.kind == "record":
@@ -130,11 +130,11 @@ def file_memory(
     mounts = [
         FileMount(
             name=memory.mount.name,
-            store=PostgresFileStore(storage, memory.mount.memory_id, settings, gate=gate),
+            store=PostgresFileStore(storage, memory.mount.memory.id, settings, gate=gate),
             access=memory.mount.access,
             guide=_guide(memory, settings),
             always_load=memory.always_load,
-            cursor_key=memory.mount.memory_id,
+            cursor_key=memory.mount.memory.id,
         )
         for memory in files
     ]

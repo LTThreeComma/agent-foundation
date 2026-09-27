@@ -1,4 +1,3 @@
-import { configInput } from "../../shared/resource-inputs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, MenuItem, MenuSeparator, ModalFrame } from "a13n-ui";
 import {
@@ -109,7 +108,7 @@ export function AgentDetail() {
         .POST("/api/v1/agents/{agent_reference}/revisions", {
           params: { path: { agent_reference: `@${agentKey}` } },
           headers: ifMatch(etag),
-          body: { ...requestBody, config: configInput(requestBody.config) },
+          body: { ...requestBody, config: requestBody.config },
         })
         .then(data);
     },

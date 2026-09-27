@@ -1,4 +1,3 @@
-import { configInput } from "../../shared/resource-inputs";
 import {
   CaretDownIcon,
   ChatIcon,
@@ -176,7 +175,7 @@ export function ImportAgentForm({
               key,
               name: file.name,
               description: file.description ?? "",
-              config: configInput(file.config),
+              config: file.config,
             },
           })
           .then(data),

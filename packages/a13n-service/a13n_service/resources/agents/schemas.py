@@ -19,6 +19,7 @@ from a13n_service.resources.agents.toolsets import ToolsetOverrides, Toolsets, d
 from a13n_service.resources.connections.schemas import ConnectionSelection
 from a13n_service.resources.memories.schemas import MemoryMounts
 from a13n_service.resources.models.schemas import MediaUnderstandingSelection
+from a13n_service.resources.references import IdReference
 from a13n_service.resources.secrets.schemas import SecretRequirement
 
 BoundedKey = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$")]
@@ -72,13 +73,11 @@ class ModelFields(_Frozen):
     characteristics: AgentModelCharacteristics = Field(default_factory=AgentModelCharacteristics)
 
 
-class AgentModel(ModelFields):
-    model_id: ObjectId
-    # Native settings layered over the model's own defaults.
+class AgentModel(ModelFields, IdReference):
+    """A model reference with settings layered over the model's own defaults."""
 
 
-class SkillSelection(_Frozen):
-    skill_id: ObjectId
+class SkillSelection(IdReference):
     revision_id: ObjectId | None = None
 
 
@@ -88,15 +87,15 @@ class DelegationContextPolicy(_Frozen):
     task_state: Literal["shared", "isolated"] = "shared"
 
 
-class ChildEnvironmentPolicy(_Frozen):
-    """What a child run mounts: no environment, the parent's, or a new one from `template_id`."""
+class ChildEnvironmentPolicy[Ref = IdReference](_Frozen):
+    """What a child run mounts: no environment, the parent's, or a new one from `template`."""
 
     mode: Literal["none", "shared", "dedicated"] = "shared"
-    template_id: ObjectId | None = None
+    template: Ref | None = None
 
     @model_validator(mode="after")
     def template_for_dedicated(self) -> Self:
-        if (self.mode == "dedicated") != (self.template_id is not None):
+        if (self.mode == "dedicated") != (self.template is not None):
             raise ValueError("Exactly dedicated child environments name a template")
         return self
 
@@ -107,11 +106,11 @@ class SubagentFields(_Frozen):
     usage_limits: UsageLimits | None = None
 
 
-class SubagentSelection(SubagentFields):
-    agent_id: ObjectId
+class SubagentSelection[Ref = IdReference](SubagentFields):
+    agent: Ref
     revision_id: ObjectId | None = None
     # Shown to the delegating model; the child agent's description, else its name, when omitted.
-    environment: ChildEnvironmentPolicy = Field(default_factory=ChildEnvironmentPolicy)
+    environment: ChildEnvironmentPolicy[Ref] = Field(default_factory=lambda: ChildEnvironmentPolicy[Ref]())
 
 
 class OutputVariant(_Schemas):
@@ -150,10 +149,9 @@ class RetryConfig(_Frozen):
     output: int = Field(default=0, ge=0, le=100)
 
 
-class AgentReviewer(ToolReviewConfig):
+class AgentReviewer[Ref = IdReference](ToolReviewConfig[Ref]):
     """The model reviewing calls whose permission is `review`, selected by model ID."""
 
-    model: ObjectId
     model_settings: ModelSettings | None = None
 
 
@@ -187,14 +185,14 @@ class AgentConfig(ConfigFields):
     reviewer: AgentReviewer | None = None
     media_understanding: MediaUnderstandingSelection = Field(default_factory=MediaUnderstandingSelection)
     # Referenced, not pinned: read when an environment is created from it, never during execution.
-    default_environment_template_id: ObjectId | None = None
+    default_environment_template: IdReference | None = None
     # Added to a thread's memory mounts at its first acceptance, for names and memories it does not use yet.
     memory_mounts: MemoryMounts = ()
 
     @model_validator(mode="after")
     def unique_selections(self) -> Self:
         for label, values in (
-            ("Skills", [item.skill_id for item in self.skills]),
+            ("Skills", [item.id for item in self.skills]),
             ("Connections", [item.connection_id for item in self.connection_tools]),
             ("Client tool names", [item.name for item in self.client_tools]),
             ("Plugin instance names", [item.instance_name for item in self.plugins]),
@@ -205,21 +203,24 @@ class AgentConfig(ConfigFields):
         return self
 
 
-class ModelOverride(_Frozen):
-    model_id: ObjectId | None = None
+class ModelOverrideFields(_Frozen):
     settings: ModelSettings | None = None
     characteristics: AgentModelCharacteristics | None = None
 
 
-class SubagentOverride(_Frozen):
-    """Replaces the fields it sets of an edge; an edge the revision lacks sets at least `agent_id`."""
+class ModelOverride(ModelOverrideFields):
+    id: ObjectId | None = None
 
-    agent_id: ObjectId | None = None
+
+class SubagentOverride[Ref = IdReference](_Frozen):
+    """Replaces the fields it sets of an edge; an edge the revision lacks sets at least `agent`."""
+
+    agent: Ref | None = None
     revision_id: ObjectId | None = None
     description: Description | None = None
     context: DelegationContextPolicy | None = None
     usage_limits: UsageLimits | None = None
-    environment: ChildEnvironmentPolicy | None = None
+    environment: ChildEnvironmentPolicy[Ref] | None = None
 
 
 class RetryOverride(_Frozen):
@@ -281,7 +282,7 @@ def apply_override(config: AgentConfig, override: AgentOverride) -> AgentConfig:
                 continue
             changes = _set(edge)
             # Another agent without a revision runs its own default, never the replaced agent's pin.
-            if "agent_id" in changes and "revision_id" not in changes:
+            if "agent" in changes and "revision_id" not in changes:
                 changes["revision_id"] = None
             current = config.subagents.get(name)
             edges[name] = {**(dict(current) if current is not None else {}), **changes}
@@ -345,16 +346,16 @@ class AgentRevisionCreate[Config = AgentConfig](BaseModel):
     make_default: bool = True
 
 
-class AgentValidate(BaseModel):
+class AgentValidate[Config = AgentConfig, Ref = IdReference](BaseModel):
     """A configuration to check as creating a revision would, storing nothing.
 
-    `agent_id` names the agent it would become a revision of, whose inline subagents may not lead back to it;
+    `agent` names the agent it would become a revision of, whose inline subagents may not lead back to it;
     omit it for a new agent.
     """
 
     model_config = ConfigDict(extra="forbid")
-    config: AgentConfig
-    agent_id: ObjectId | None = None
+    config: Config
+    agent: Ref | None = None
 
 
 class Agent(BaseModel):

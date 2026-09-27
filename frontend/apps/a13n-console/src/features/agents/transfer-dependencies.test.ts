@@ -1,7 +1,6 @@
 import { createClient } from "../../service-client";
 import { expect, it, vi } from "vitest";
 import { initialConfig } from "./configuration";
-import { configInput } from "../../shared/resource-inputs";
 import {
   agentDependencies,
   inspectAgentDependencies,
@@ -17,7 +16,7 @@ it("uses a same-key secret in the destination without remapping its identity", a
   }));
   const config = {
     ...initialConfig(),
-    model: { model_id: "mdl_local" },
+    model: { id: "mdl_local" },
     secret_requirements: [{ key: "TOKEN" }],
   };
   const checks = await inspectAgentDependencies(
@@ -36,7 +35,7 @@ it("uses a same-key secret in the destination without remapping its identity", a
   expect(
     agentDependencies(config).find((item) => item.kind === "secret")!.replace,
   ).toBeUndefined();
-  expect(configInput(config).secret_requirements).toEqual([{ key: "TOKEN" }]);
+  expect(config.secret_requirements).toEqual([{ key: "TOKEN" }]);
 });
 
 it("requires the declared secret key even when another secret is available", async () => {
@@ -51,7 +50,7 @@ it("requires the declared secret key even when another secret is available", asy
     "ws_target",
     {
       ...initialConfig(),
-      model: { model_id: "mdl_local" },
+      model: { id: "mdl_local" },
       secret_requirements: [{ key: "TOKEN" }],
     },
     signal,
@@ -124,8 +123,8 @@ it("checks every catalog page and retains an unavailable pinned version", async 
     "ws_target",
     {
       ...initialConfig(),
-      model: { model_id: "mdl_local" },
-      skills: [{ skill_id: "sk_local", revision_id: "skr_pinned" }],
+      model: { id: "mdl_local" },
+      skills: [{ id: "sk_local", revision_id: "skr_pinned" }],
       connection_tools: [
         { connection_id: "conn_available" },
         { connection_id: "conn_missing" },
@@ -165,7 +164,7 @@ it("only queries dependency kinds actually selected by the configuration", async
     client,
     "org_target",
     "ws_target",
-    { ...initialConfig(), model: { model_id: "mdl_local" } },
+    { ...initialConfig(), model: { id: "mdl_local" } },
     signal,
   );
   expect(checks[0]?.available).toBe(true);
@@ -192,12 +191,12 @@ it("checks dedicated child environments against the same template catalog", asyn
     "ws_target",
     {
       ...initialConfig(),
-      model: { model_id: "mdl_local" },
-      default_environment_template_id: "et_local",
+      model: { id: "mdl_local" },
+      default_environment_template: { id: "et_local" },
       subagents: {
         helper: {
-          agent_id: "ap_child",
-          environment: { mode: "dedicated", template_id: "et_local" },
+          agent: { id: "ap_child" },
+          environment: { mode: "dedicated", template: { id: "et_local" } },
         },
       },
     },
@@ -206,7 +205,7 @@ it("checks dedicated child environments against the same template catalog", asyn
   expect(checks.every((item) => item.available)).toBe(true);
   expect(
     checks
-      .find((item) => item.path === "subagents.helper.environment.template_id")
+      .find((item) => item.path === "subagents.helper.environment.template.id")
       ?.options.map((item) => item.value),
   ).toEqual(["et_local"]);
   expect(
@@ -230,8 +229,8 @@ it("blocks an unavailable root template and remaps only its identity", async () 
   });
   const config = {
     ...initialConfig(),
-    model: { model_id: "mdl_local" },
-    default_environment_template_id: "et_source",
+    model: { id: "mdl_local" },
+    default_environment_template: { id: "et_source" },
     retries: { tools: 2, output: 1 },
   };
   const checks = await inspectAgentDependencies(
@@ -242,16 +241,16 @@ it("blocks an unavailable root template and remaps only its identity", async () 
     signal,
   );
   const root = checks.find(
-    (item) => item.path === "default_environment_template_id",
+    (item) => item.path === "default_environment_template",
   );
   expect(root?.available).toBe(false);
   expect(root?.options.map((item) => item.value)).toEqual(["et_local"]);
   const replaced = agentDependencies(config).find(
-    (item) => item.path === "default_environment_template_id",
+    (item) => item.path === "default_environment_template",
   )!.replace!("et_local");
   expect(replaced).toEqual({
     ...config,
-    default_environment_template_id: "et_local",
+    default_environment_template: { id: "et_local" },
   });
 });
 
@@ -290,7 +289,7 @@ it("checks search and scrape against the shared Web Provider catalog", async () 
     "ws_target",
     {
       ...initialConfig(),
-      model: { model_id: "mdl_local" },
+      model: { id: "mdl_local" },
       toolsets: {
         web: {
           enabled: true,
@@ -316,11 +315,11 @@ it("checks search and scrape against the shared Web Provider catalog", async () 
 it("lists every selected media model and remaps one kind at a time", () => {
   const config = {
     ...initialConfig(),
-    model: { model_id: "mdl_primary" },
+    model: { id: "mdl_primary" },
     media_understanding: {
-      image: "mdl_vision",
+      image: { id: "mdl_vision" },
       video: null,
-      audio: "mdl_speech",
+      audio: { id: "mdl_speech" },
     },
   };
   const refs = agentDependencies(config);
@@ -340,9 +339,9 @@ it("lists every selected media model and remaps one kind at a time", () => {
   ]);
   const image = refs.find((ref) => ref.path === "media_understanding.image")!;
   expect(image.replace!("mdl_eyes").media_understanding).toEqual({
-    image: "mdl_eyes",
+    image: { id: "mdl_eyes" },
     video: null,
-    audio: "mdl_speech",
+    audio: { id: "mdl_speech" },
   });
 });
 
@@ -360,14 +359,17 @@ it("checks the reviewer and media models against the workspace's enabled models"
     "ws_target",
     {
       ...initialConfig(),
-      model: { model_id: "mdl_primary" },
-      media_understanding: { image: "mdl_vision", audio: "mdl_missing" },
-      reviewer: { model: "mdl_judge" },
+      model: { id: "mdl_primary" },
+      media_understanding: {
+        image: { id: "mdl_vision" },
+        audio: { id: "mdl_missing" },
+      },
+      reviewer: { model: { id: "mdl_judge" } },
     },
     signal,
   );
   expect(checks.map(({ path, available }) => ({ path, available }))).toEqual([
-    { path: "model.model_id", available: true },
+    { path: "model.id", available: true },
     { path: "media_understanding.image", available: true },
     { path: "media_understanding.audio", available: false },
     { path: "reviewer.model", available: false },
@@ -396,10 +398,14 @@ it("checks default memory mounts and remaps only the memory", async () => {
   });
   const config = {
     ...initialConfig(),
-    model: { model_id: "mdl_local" },
+    model: { id: "mdl_local" },
     memory_mounts: [
-      { name: "handbook", memory_id: "mem_local", access: "read" as const },
-      { name: "prefs", memory_id: "mem_source", access: "write" as const },
+      {
+        name: "handbook",
+        memory: { id: "mem_local" },
+        access: "read" as const,
+      },
+      { name: "prefs", memory: { id: "mem_source" }, access: "write" as const },
     ],
   };
   const checks = await inspectAgentDependencies(
@@ -410,9 +416,9 @@ it("checks default memory mounts and remaps only the memory", async () => {
     signal,
   );
   expect(checks.map(({ path, available }) => [path, available])).toEqual([
-    ["model.model_id", true],
-    ["memory_mounts.0.memory_id", true],
-    ["memory_mounts.1.memory_id", false],
+    ["model.id", true],
+    ["memory_mounts.0.memory.id", true],
+    ["memory_mounts.1.memory.id", false],
   ]);
   expect(checks[2]?.options).toEqual([
     { value: "mem_local", label: "Handbook · handbook", id: "mem_local" },
@@ -423,10 +429,10 @@ it("checks default memory mounts and remaps only the memory", async () => {
     ),
   ).toHaveLength(1);
   const replaced = agentDependencies(config).find(
-    (item) => item.path === "memory_mounts.1.memory_id",
+    (item) => item.path === "memory_mounts.1.memory.id",
   )!.replace!("mem_local");
   expect(replaced.memory_mounts).toEqual([
     config.memory_mounts[0],
-    { name: "prefs", memory_id: "mem_local", access: "write" },
+    { name: "prefs", memory: { id: "mem_local" }, access: "write" },
   ]);
 });

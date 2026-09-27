@@ -102,10 +102,6 @@ class ManagedEnvironmentFields(BaseModel):
     name: EnvironmentName | None = None
 
 
-class ManagedEnvironmentCreate(ManagedEnvironmentFields):
-    template_id: ObjectId
-
-
 class ExternalTargetCreate(BaseModel):
     """An envd daemon someone runs, registered by its endpoint and the token it accepts."""
 

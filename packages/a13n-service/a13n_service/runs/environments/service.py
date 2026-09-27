@@ -15,7 +15,10 @@ from a13n_service.infra.db import Storage, short_session, transaction
 from a13n_service.infra.errors import ServiceError, conflict, invalid, not_found
 from a13n_service.infra.http import require_match
 from a13n_service.infra.ids import new_object_id
+from a13n_service.resources.environment_templates.tables import EnvironmentTemplateRow
+from a13n_service.resources.references import ReferenceBatch
 from a13n_service.runs.environments import external
+from a13n_service.runs.environments.inputs import ManagedEnvironmentInput
 from a13n_service.runs.environments.lifecycle import (
     PHASES,
     begin,
@@ -32,7 +35,6 @@ from a13n_service.runs.environments.schemas import (
     EnvironmentUpdate,
     EnvironmentView,
     ExternalTargetCreate,
-    ManagedEnvironmentCreate,
 )
 from a13n_service.runs.environments.tables import EnvironmentRow, ThreadEnvironmentRow
 from a13n_service.runs.runtime import Runtime
@@ -102,7 +104,7 @@ async def get_environment(
 
 
 async def reserve_environment(
-    runtime: Runtime, actor: Principal, workspace_id: str, body: ManagedEnvironmentCreate
+    runtime: Runtime, actor: Principal, workspace_id: str, body: ManagedEnvironmentInput
 ) -> EnvironmentView:
     """A workspace-managed sandbox for threads to mount, reserved as acceptance reserves a primary sandbox.
 
@@ -113,7 +115,11 @@ async def reserve_environment(
     async with transaction(runtime.storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "run")
         limit = runtime.settings.environments.managed_count
-        environment = await reserve(session, actor, scope, body.template_id, limit=limit, name=body.name)
+        batch = ReferenceBatch()
+        batch.add(EnvironmentTemplateRow, body.template)
+        await batch.resolve(session, scope.workspace_id)
+        template_id = batch.id(EnvironmentTemplateRow, body.template)
+        environment = await reserve(session, actor, scope, template_id, limit=limit, name=body.name)
         _audit(session, actor, environment, "create")
         return EnvironmentView.model_validate(environment)
 

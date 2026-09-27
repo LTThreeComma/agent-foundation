@@ -14,6 +14,7 @@ from a13n_service.infra.http import require_match
 from a13n_service.infra.ids import new_object_id
 from a13n_service.infra.outbox import OutboxRow
 from a13n_service.resources.rows import audit_row, find_row, given, record_update
+from a13n_service.resources.subscriptions.inputs import SubscriptionCreateInput, SubscriptionUpdateInput, normalize
 from a13n_service.resources.subscriptions.schemas import (
     SECRET_UNAVAILABLE,
     CreatedSubscription,
@@ -63,7 +64,7 @@ async def create_subscription(
     policy: EndpointPolicy,
     actor: Principal,
     workspace_id: str,
-    body: SubscriptionCreate,
+    body: SubscriptionCreateInput,
     *,
     limit: int,
 ) -> CreatedSubscription:
@@ -74,6 +75,7 @@ async def create_subscription(
         session,
         scope,
     ):
+        selected = await normalize(session, scope.workspace_id, body, SubscriptionCreate)
         # Serializes creates per workspace so concurrent requests cannot pass the count together.
         await advisory_lock(session, "subscriptions", scope.workspace_id)
         count = await session.scalar(
@@ -88,7 +90,7 @@ async def create_subscription(
             name=body.name,
             url=url,
             kinds=body.kinds,
-            filter=body.filter.model_dump(exclude_none=True),
+            filter=selected.filter.model_dump(exclude_none=True),
             enabled=body.enabled,
             created_by_id=actor.id,
             updated_by_id=actor.id,
@@ -137,7 +139,7 @@ async def update_subscription(
     actor: Principal,
     workspace_id: str,
     subscription_id: str,
-    body: SubscriptionUpdate,
+    body: SubscriptionUpdateInput,
     *,
     if_match: str | None,
 ) -> Subscription:
@@ -149,13 +151,14 @@ async def update_subscription(
         else await _permitted_url(storage, access, policy, actor, workspace_id, body.url, action=action)
     )
     async with administering_workspace(storage, access, actor, workspace_id, action=action) as (session, scope):
+        selected = await normalize(session, scope.workspace_id, body, SubscriptionUpdate)
         row = await find_row(session, actor, SubscriptionRow, scope, subscription_id, "read", lock=True)
         require_match(if_match, row.id, row.version)
         values = given(body, "name", "kinds", "enabled")
         if url is not None:
             values["url"] = url
-        if body.filter is not None:
-            values["filter"] = body.filter.model_dump(exclude_none=True)
+        if selected.filter is not None:
+            values["filter"] = selected.filter.model_dump(exclude_none=True)
         changed = assign(row, values)
         if body.signing_secret is not None:
             # Write-only: a replacement always changes the stored envelope, equal or not.

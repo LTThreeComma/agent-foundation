@@ -72,12 +72,14 @@ async def validate_config(
             ),
         }
     )
-    with at_field("model.model_id"):
-        model = await resolve_model(session, actor, scope, config.model.model_id, verb=verb, authority=authority)
+    with at_field("model.id"):
+        model = await resolve_model(session, actor, scope, config.model.id, verb=verb, authority=authority)
     registry.check_model_settings(model.config.model_api, config.model.settings, field="model.settings")
     if config.reviewer is not None:
         with at_field("reviewer.model"):
-            reviewer = await resolve_model(session, actor, scope, config.reviewer.model, verb=verb, authority=authority)
+            reviewer = await resolve_model(
+                session, actor, scope, config.reviewer.model.id, verb=verb, authority=authority
+            )
         if config.reviewer.model_settings is not None:
             registry.check_model_settings(
                 reviewer.config.model_api, config.reviewer.model_settings, field="reviewer.model_settings"
@@ -94,19 +96,19 @@ async def validate_config(
     except ValidationError:
         raise invalid("connection_tools", "declares more tool permissions than an agent may have") from None
     await _check_web(session, actor, scope, config, registry=registry, verb=verb, authority=authority)
-    templates = {"default_environment_template_id": config.default_environment_template_id} | {
-        f"subagents.{name}.environment.template_id": edge.environment.template_id
+    templates = {"default_environment_template.id": config.default_environment_template} | {
+        f"subagents.{name}.environment.template.id": edge.environment.template
         for name, edge in config.subagents.items()
     }
     for path, template_id in templates.items():
         if template_id is not None:
             with at_field(path):
-                await resolve_template(session, actor, scope, template_id, verb=verb, authority=authority)
+                await resolve_template(session, actor, scope, template_id.id, verb=verb, authority=authority)
     if held is None:
         # A run's thread takes default mounts at its first acceptance, which checks them then.
         for index, mount in enumerate(config.memory_mounts):
-            with at_field(f"memory_mounts.{index}.memory_id"):
-                await resolve_memory(session, actor, scope, mount.memory_id, verb=verb, authority=authority)
+            with at_field(f"memory_mounts.{index}.memory.id"):
+                await resolve_memory(session, actor, scope, mount.memory.id, verb=verb, authority=authority)
     await subagent_graph(session, scope.workspace_id, agent_id, config)
     return config
 
@@ -177,7 +179,7 @@ async def _pin_skills(
 ) -> tuple[SkillSelection, ...]:
     """Each skill at its selected revision, by default the skill's default revision; archived skills refuse a pin
     that is not `held` already."""
-    unpinned = {skill.skill_id for skill in skills if skill.revision_id is None}
+    unpinned = {skill.id for skill in skills if skill.revision_id is None}
     defaults = dict(
         (
             await session.execute(
@@ -192,13 +194,13 @@ async def _pin_skills(
     pinned: list[SkillSelection] = []
     checked: dict[str, SkillPin] = {}
     for index, skill in enumerate(skills):
-        revision_id = skill.revision_id or defaults.get(skill.skill_id)
+        revision_id = skill.revision_id or defaults.get(skill.id)
         if revision_id is None:
             with at_field(f"skills.{index}"):
-                raise not_found(SkillRow.KIND, skill.skill_id)
+                raise not_found(SkillRow.KIND, skill.id)
         selection = skill.model_copy(update={"revision_id": revision_id})
         if selection not in held:
-            checked[f"skills.{index}"] = SkillPin(skill_id=skill.skill_id, revision_id=revision_id)
+            checked[f"skills.{index}"] = SkillPin(skill_id=skill.id, revision_id=revision_id)
         pinned.append(selection)
     await require_pins(session, workspace_id, checked)
     return tuple(pinned)
@@ -216,15 +218,15 @@ async def _pin_subagents(
         head.id: head
         for head in await session.scalars(
             select(AgentRow).where(
-                AgentRow.workspace_id == workspace_id, AgentRow.id.in_({edge.agent_id for edge in subagents.values()})
+                AgentRow.workspace_id == workspace_id, AgentRow.id.in_({edge.agent.id for edge in subagents.values()})
             )
         )
     }
     wanted = {
         revision_id
         for edge in subagents.values()
-        if edge.agent_id in heads
-        and (revision_id := edge.revision_id or heads[edge.agent_id].default_revision_id) is not None
+        if edge.agent.id in heads
+        and (revision_id := edge.revision_id or heads[edge.agent.id].default_revision_id) is not None
     }
     revisions = set(
         (
@@ -238,9 +240,9 @@ async def _pin_subagents(
     pinned = {}
     for name, edge in subagents.items():
         with at_field(f"subagents.{name}"):
-            head = heads.get(edge.agent_id)
+            head = heads.get(edge.agent.id)
             if head is None:
-                raise not_found(AgentRow.KIND, edge.agent_id)
+                raise not_found(AgentRow.KIND, edge.agent.id)
             selection = edge.model_copy(update={"revision_id": edge.revision_id or head.default_revision_id})
             if head.archived_at is not None and _pin(selection) not in {_pin(kept) for kept in held.values()}:
                 raise conflict(head.KIND, head.id, "archived")
@@ -251,7 +253,7 @@ async def _pin_subagents(
 
 
 def _pin(edge: SubagentSelection) -> tuple[str, str | None]:
-    return edge.agent_id, edge.revision_id
+    return edge.agent.id, edge.revision_id
 
 
 async def connection_types(
@@ -347,7 +349,7 @@ async def subagent_graph(
             for name, edge in node.subagents.items():
                 path = via or f"subagents.{name}"
                 child = graph.get(edge.revision_id or "")
-                if child is None or child.agent_id != edge.agent_id:
+                if child is None or child.agent_id != edge.agent.id:
                     raise invalid(path, "a pinned subagent revision is missing")
                 if node.subagent_mode != "inline":
                     continue

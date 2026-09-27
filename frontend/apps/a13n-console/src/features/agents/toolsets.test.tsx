@@ -69,7 +69,7 @@ function renderDraft(starting: NonNullable<AgentConfig["toolsets"]>) {
         <AgentToolsets
           value={value}
           onChange={setValue}
-          config={{ model: { model_id: "mdl_test" }, toolsets: value }}
+          config={{ model: { id: "mdl_test" }, toolsets: value }}
           agentId="ap_test"
         />
         <output data-testid="draft">{JSON.stringify(value)}</output>

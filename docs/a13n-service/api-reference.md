@@ -77,7 +77,7 @@ No content when creating a revision of the configuration would accept it, else t
 
 Request body: required.
 
-- `application/json`: `AgentValidateInput`.
+- `application/json`: `AgentValidate_ConfigInput_Reference_`.
 
 Responses:
 
@@ -1602,7 +1602,7 @@ Add Mount.
 
 Request body: required.
 
-- `application/json`: `MemoryMountInput`.
+- `application/json`: `MemoryMount_Reference_`.
 
 Responses:
 
@@ -1677,7 +1677,7 @@ Replaces all three kinds; each model must declare it understands its kind. Requi
 
 Request body: required.
 
-- `application/json`: `MediaSelectionInput`.
+- `application/json`: `MediaUnderstandingSelection_Reference_`.
 
 Responses:
 

@@ -20,6 +20,8 @@ from a13n_service.infra.objects.interface import ObjectStore
 from a13n_service.providers.registry import Registry, web_operations
 from a13n_service.resources import revisions
 from a13n_service.resources.agents import toolsets
+from a13n_service.resources.agents.inputs import AgentCreateInput, AgentRevisionCreateInput, AgentValidateInput
+from a13n_service.resources.agents.resolve_inputs import collect_config, config_ids, resolve_config
 from a13n_service.resources.agents.schemas import (
     Agent,
     AgentConfig,
@@ -37,6 +39,7 @@ from a13n_service.resources.agents.schemas import (
 )
 from a13n_service.resources.agents.tables import AgentRevisionRow, AgentRow
 from a13n_service.resources.agents.validation import validate_config
+from a13n_service.resources.references import ReferenceBatch
 from a13n_service.resources.rows import audit_row, given
 from a13n_service.tenancy.access import workspace_scope
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, WorkspaceScope
@@ -71,14 +74,16 @@ async def create_agent(
     storage: Storage,
     actor: Principal,
     workspace_id: str,
-    body: AgentCreate,
+    body: AgentCreateInput | AgentCreate,
     *,
     registry: Registry,
     plugins: HarnessPluginFactoryCatalog,
 ) -> Agent:
     async with transaction(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
-        head = await insert_head(session, actor, scope, body, registry=registry, plugins=plugins)
+        config = await resolve_config(session, scope.workspace_id, body.config)
+        selected = AgentCreate(**body.model_dump(exclude={"config"}), config=config)
+        head = await insert_head(session, actor, scope, selected, registry=registry, plugins=plugins)
         audit_row(session, actor, head, "create")
         return agent_view(head)
 
@@ -210,7 +215,7 @@ async def create_revision(
     actor: Principal,
     workspace_id: str,
     agent_id: str,
-    body: AgentRevisionCreate,
+    body: AgentRevisionCreateInput | AgentRevisionCreate,
     *,
     if_match: str | None,
     registry: Registry,
@@ -220,7 +225,8 @@ async def create_revision(
     async with transaction(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
         head = await revisions.open_head(session, AgentRow, scope.workspace_id, agent_id, if_match)
-        config = await validate_config(session, actor, scope, head.id, body.config, registry=registry, plugins=plugins)
+        selected = await resolve_config(session, scope.workspace_id, body.config)
+        config = await validate_config(session, actor, scope, head.id, selected, registry=registry, plugins=plugins)
         revision, created = await revisions.publish(
             session, head, AgentRevisionRow, config, actor=actor, note=body.note, make_default=body.make_default
         )
@@ -235,7 +241,7 @@ async def validate_revision(
     storage: Storage,
     actor: Principal,
     workspace_id: str,
-    body: AgentValidate,
+    body: AgentValidateInput | AgentValidate,
     *,
     registry: Registry,
     plugins: HarnessPluginFactoryCatalog,
@@ -243,10 +249,14 @@ async def validate_revision(
     """Check `body.config` as creating a revision checks it, in a session that writes nothing."""
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
-        agent_id = None
-        if body.agent_id is not None:
-            agent_id = (await resolve_agent(session, scope.workspace_id, body.agent_id)).id
-        await validate_config(session, actor, scope, agent_id, body.config, registry=registry, plugins=plugins)
+        batch = ReferenceBatch()
+        collect_config(batch, body.config)
+        batch.add(AgentRow, body.agent)
+        await batch.resolve(session, scope.workspace_id)
+        agent_id = None if body.agent is None else batch.id(AgentRow, body.agent)
+        await validate_config(
+            session, actor, scope, agent_id, config_ids(batch, body.config), registry=registry, plugins=plugins
+        )
 
 
 async def get_agent(storage: Storage, actor: Principal, workspace_id: str, agent_id: str) -> Agent:
@@ -284,8 +294,8 @@ async def list_agents(
             label_filter(AgentRow.labels, labels),
             revisions.head_filter(AgentRow, q=q, archived=archived),
         )
-        # Agent revisions store their pins as `config.skills: [{skill_id, revision_id}]`.
-        pin = {name: value for name, value in (("skill_id", skill_id), ("revision_id", skill_revision_id)) if value}
+        # Agent revisions store their pins as `config.skills: [{id, revision_id}]`.
+        pin = {name: value for name, value in (("id", skill_id), ("revision_id", skill_revision_id)) if value}
         if pin:
             query = query.where(
                 exists().where(

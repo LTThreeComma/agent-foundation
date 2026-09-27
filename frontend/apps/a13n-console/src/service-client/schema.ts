@@ -2946,8 +2946,8 @@ export interface components {
        * @default []
        */
       connection_tools?: components["schemas"]["ConnectionSelection"][];
-      /** Default Environment Template Id */
-      default_environment_template_id?: string | null;
+      default_environment_template?:
+        components["schemas"]["IdReference"] | null;
       /**
        * Instructions
        * @default
@@ -3036,11 +3036,14 @@ export interface components {
       /** Revision Id */
       revision_id?: string | null;
     };
-    /** AgentModel */
+    /**
+     * AgentModel
+     * @description A model reference with settings layered over the model's own defaults.
+     */
     AgentModel: {
       characteristics?: components["schemas"]["AgentModelCharacteristics"];
-      /** Model Id */
-      model_id: string;
+      /** Id */
+      id: string;
       /** Settings */
       settings?: {
         [key: string]: components["schemas"]["JsonValue"];
@@ -3111,8 +3114,42 @@ export interface components {
     AgentReviewer: {
       /** Instruction */
       instruction?: string | null;
-      /** Model */
-      model: string;
+      model: components["schemas"]["IdReference"];
+      /** Model Settings */
+      model_settings?: {
+        [key: string]: components["schemas"]["JsonValue"];
+      } | null;
+      /**
+       * On Error
+       * @default approval_required
+       * @enum {string}
+       */
+      on_error?: "deny" | "approval_required" | "allow";
+      /**
+       * On Flagged
+       * @default deny
+       * @enum {string}
+       */
+      on_flagged?: "deny" | "approval_required";
+      /** @default extra_high */
+      risk_threshold?: components["schemas"]["ToolRiskLevel"];
+      /** Rules */
+      rules?: {
+        [key: string]: components["schemas"]["ToolReviewRule"];
+      };
+      /** Shell Instruction */
+      shell_instruction?: string | null;
+      /**
+       * Timeout Seconds
+       * @default 120
+       */
+      timeout_seconds?: number;
+    };
+    /** AgentReviewer[Reference] */
+    AgentReviewer_Reference_: {
+      /** Instruction */
+      instruction?: string | null;
+      model: components["schemas"]["Reference"];
       /** Model Settings */
       model_settings?: {
         [key: string]: components["schemas"]["JsonValue"];
@@ -3193,8 +3230,8 @@ export interface components {
       /** Name */
       name?: string | null;
     };
-    /** AgentValidateInput */
-    AgentValidateInput: {
+    /** AgentValidate[ConfigInput, Reference] */
+    AgentValidate_ConfigInput_Reference_: {
       agent?: components["schemas"]["Reference"] | null;
       config: components["schemas"]["ConfigInput"];
     };
@@ -3490,8 +3527,8 @@ export interface components {
     };
     /** @enum {string} */
     Certainty: "not_dispatched" | "known" | "unknown";
-    /** ChildEnvironmentInput */
-    ChildEnvironmentInput: {
+    /** ChildEnvironmentPolicy[Reference] */
+    ChildEnvironmentPolicy_Reference_: {
       /**
        * Mode
        * @default shared
@@ -3500,19 +3537,15 @@ export interface components {
       mode?: "none" | "shared" | "dedicated";
       template?: components["schemas"]["Reference"] | null;
     };
-    /**
-     * ChildEnvironmentPolicy
-     * @description What a child run mounts: no environment, the parent's, or a new one from `template_id`.
-     */
-    ChildEnvironmentPolicy: {
+    /** ChildEnvironmentPolicy[TypeVar] */
+    ChildEnvironmentPolicy_TypeVar_: {
       /**
        * Mode
        * @default shared
        * @enum {string}
        */
       mode?: "none" | "shared" | "dedicated";
-      /** Template Id */
-      template_id?: string | null;
+      template?: components["schemas"]["IdReference"] | null;
     };
     /** @enum {string} */
     ClientAuthentication: "none" | "client_secret_post" | "client_secret_basic";
@@ -3571,12 +3604,12 @@ export interface components {
        * @default
        */
       instructions?: string;
-      media_understanding?: components["schemas"]["MediaSelectionInput"];
+      media_understanding?: components["schemas"]["MediaUnderstandingSelection_Reference_"];
       /**
        * Memory Mounts
        * @default []
        */
-      memory_mounts?: components["schemas"]["MemoryMountInput"][];
+      memory_mounts?: components["schemas"]["MemoryMount_Reference_"][];
       model: components["schemas"]["ModelInput"];
       output_spec?: components["schemas"]["OutputSpec"] | null;
       /**
@@ -3585,7 +3618,7 @@ export interface components {
        */
       plugins?: components["schemas"]["PluginSelection"][];
       retries?: components["schemas"]["RetryConfig"] | null;
-      reviewer?: components["schemas"]["ReviewerInput"] | null;
+      reviewer?: components["schemas"]["AgentReviewer_Reference_"] | null;
       /**
        * Secret Requirements
        * @default []
@@ -3604,7 +3637,7 @@ export interface components {
       subagent_mode?: "inline" | "async";
       /** Subagents */
       subagents?: {
-        [key: string]: components["schemas"]["SubagentInput"];
+        [key: string]: components["schemas"]["SubagentSelection_Reference_"];
       };
       /** Toolsets */
       toolsets?: {
@@ -4149,7 +4182,7 @@ export interface components {
        * Memories
        * @default []
        */
-      memories?: components["schemas"]["MemoryMountInput"][];
+      memories?: components["schemas"]["MemoryMount_Reference_"][];
       options?: components["schemas"]["RunOptions_OverrideInput_"];
       payload: components["schemas"]["MessagePayload"];
     };
@@ -4546,34 +4579,28 @@ export interface components {
      * @description A workspace's media-understanding models for agents that select none for a kind; `id` is the workspace's.
      */
     MediaDefaults: {
-      /** Audio */
-      audio?: string | null;
+      audio?: components["schemas"]["IdReference"] | null;
       /** Id */
       id: string;
-      /** Image */
-      image?: string | null;
+      image?: components["schemas"]["IdReference"] | null;
       /** Version */
       version: number;
-      /** Video */
-      video?: string | null;
-    };
-    /** MediaSelectionInput */
-    MediaSelectionInput: {
-      audio?: components["schemas"]["Reference"] | null;
-      image?: components["schemas"]["Reference"] | null;
-      video?: components["schemas"]["Reference"] | null;
+      video?: components["schemas"]["IdReference"] | null;
     };
     /**
      * MediaUnderstandingSelection
      * @description The model describing each media kind a model cannot read; a kind without one is unavailable.
      */
     MediaUnderstandingSelection: {
-      /** Audio */
-      audio?: string | null;
-      /** Image */
-      image?: string | null;
-      /** Video */
-      video?: string | null;
+      audio?: components["schemas"]["IdReference"] | null;
+      image?: components["schemas"]["IdReference"] | null;
+      video?: components["schemas"]["IdReference"] | null;
+    };
+    /** MediaUnderstandingSelection[Reference] */
+    MediaUnderstandingSelection_Reference_: {
+      audio?: components["schemas"]["Reference"] | null;
+      image?: components["schemas"]["Reference"] | null;
+      video?: components["schemas"]["Reference"] | null;
     };
     /** MemberPage */
     MemberPage: {
@@ -4770,20 +4797,7 @@ export interface components {
     /** MemoryMount */
     MemoryMount: {
       access: components["schemas"]["MemoryAccess"];
-      /** Memory Id */
-      memory_id: string;
-      /** Name */
-      name: string;
-      /**
-       * Recall
-       * @default true
-       */
-      recall?: boolean;
-    };
-    /** MemoryMountInput */
-    MemoryMountInput: {
-      access: components["schemas"]["MemoryAccess"];
-      memory: components["schemas"]["Reference"];
+      memory: components["schemas"]["IdReference"];
       /** Name */
       name: string;
       /**
@@ -4807,6 +4821,18 @@ export interface components {
       access?: components["schemas"]["MemoryAccess"] | null;
       /** Recall */
       recall?: boolean | null;
+    };
+    /** MemoryMount[Reference] */
+    MemoryMount_Reference_: {
+      access: components["schemas"]["MemoryAccess"];
+      memory: components["schemas"]["Reference"];
+      /** Name */
+      name: string;
+      /**
+       * Recall
+       * @default true
+       */
+      recall?: boolean;
     };
     /** MemoryPage */
     MemoryPage: {
@@ -4994,16 +5020,6 @@ export interface components {
       /** Workspace Id */
       workspace_id: string;
     };
-    /** ModelById */
-    ModelById: {
-      characteristics?: components["schemas"]["AgentModelCharacteristics"];
-      /** Id */
-      id: string;
-      /** Settings */
-      settings?: {
-        [key: string]: components["schemas"]["JsonValue"];
-      };
-    };
     /** ModelByKey */
     ModelByKey: {
       characteristics?: components["schemas"]["AgentModelCharacteristics"];
@@ -5088,24 +5104,13 @@ export interface components {
       provider_id: string;
     };
     ModelInput:
-      components["schemas"]["ModelById"] | components["schemas"]["ModelByKey"];
+      components["schemas"]["AgentModel"] | components["schemas"]["ModelByKey"];
     /** ModelOverride */
     ModelOverride: {
       characteristics?:
         components["schemas"]["AgentModelCharacteristics"] | null;
-      /** Model Id */
-      model_id?: string | null;
-      /** Settings */
-      settings?: {
-        [key: string]: components["schemas"]["JsonValue"];
-      } | null;
-    };
-    /** ModelOverrideById */
-    ModelOverrideById: {
-      characteristics?:
-        components["schemas"]["AgentModelCharacteristics"] | null;
       /** Id */
-      id: string;
+      id?: string | null;
       /** Settings */
       settings?: {
         [key: string]: components["schemas"]["JsonValue"];
@@ -5122,19 +5127,9 @@ export interface components {
         [key: string]: components["schemas"]["JsonValue"];
       } | null;
     };
-    /** ModelOverrideFields */
-    ModelOverrideFields: {
-      characteristics?:
-        components["schemas"]["AgentModelCharacteristics"] | null;
-      /** Settings */
-      settings?: {
-        [key: string]: components["schemas"]["JsonValue"];
-      } | null;
-    };
     ModelOverrideInput:
-      | components["schemas"]["ModelOverrideById"]
-      | components["schemas"]["ModelOverrideByKey"]
-      | components["schemas"]["ModelOverrideFields"];
+      | components["schemas"]["ModelOverride"]
+      | components["schemas"]["ModelOverrideByKey"];
     /** ModelPage */
     ModelPage: {
       /** Items */
@@ -5286,7 +5281,7 @@ export interface components {
        * Memories
        * @default []
        */
-      memories?: components["schemas"]["MemoryMountInput"][];
+      memories?: components["schemas"]["MemoryMount_Reference_"][];
       options?: components["schemas"]["RunOptions_OverrideInput_"];
       payload: components["schemas"]["MessagePayload"];
       /** Session Id */
@@ -5418,18 +5413,20 @@ export interface components {
       connection_tools?: components["schemas"]["ConnectionSelection"][] | null;
       /** Instructions */
       instructions?: string | null;
-      media_understanding?: components["schemas"]["MediaSelectionInput"] | null;
+      media_understanding?:
+        components["schemas"]["MediaUnderstandingSelection_Reference_"] | null;
       model?: components["schemas"]["ModelOverrideInput"] | null;
       output_spec?: components["schemas"]["OutputSpec"] | null;
       /** Plugins */
       plugins?: components["schemas"]["PluginSelection"][] | null;
       retries?: components["schemas"]["RetryOverride"] | null;
-      reviewer?: components["schemas"]["ReviewerInput"] | null;
+      reviewer?: components["schemas"]["AgentReviewer_Reference_"] | null;
       /** Skills */
       skills?: components["schemas"]["SkillInput"][] | null;
       /** Subagents */
       subagents?: {
-        [key: string]: components["schemas"]["SubagentOverrideInput"] | null;
+        [key: string]:
+          components["schemas"]["SubagentOverride_Reference_"] | null;
       } | null;
       /** Toolsets */
       toolsets?: {
@@ -5844,41 +5841,6 @@ export interface components {
       output?: number | null;
       /** Tools */
       tools?: number | null;
-    };
-    /** ReviewerInput */
-    ReviewerInput: {
-      /** Instruction */
-      instruction?: string | null;
-      model: components["schemas"]["Reference"];
-      /** Model Settings */
-      model_settings?: {
-        [key: string]: components["schemas"]["JsonValue"];
-      } | null;
-      /**
-       * On Error
-       * @default approval_required
-       * @enum {string}
-       */
-      on_error?: "deny" | "approval_required" | "allow";
-      /**
-       * On Flagged
-       * @default deny
-       * @enum {string}
-       */
-      on_flagged?: "deny" | "approval_required";
-      /** @default extra_high */
-      risk_threshold?: components["schemas"]["ToolRiskLevel"];
-      /** Rules */
-      rules?: {
-        [key: string]: components["schemas"]["ToolReviewRule"];
-      };
-      /** Shell Instruction */
-      shell_instruction?: string | null;
-      /**
-       * Timeout Seconds
-       * @default 120
-       */
-      timeout_seconds?: number;
     };
     /** RevokedConnection */
     RevokedConnection: {
@@ -6308,13 +6270,6 @@ export interface components {
       /** Workspace Id */
       workspace_id: string;
     };
-    /** SkillById */
-    SkillById: {
-      /** Id */
-      id: string;
-      /** Revision Id */
-      revision_id?: string | null;
-    };
     /** SkillByKey */
     SkillByKey: {
       /** Key */
@@ -6350,7 +6305,8 @@ export interface components {
       size: number;
     };
     SkillInput:
-      components["schemas"]["SkillById"] | components["schemas"]["SkillByKey"];
+      | components["schemas"]["SkillSelection"]
+      | components["schemas"]["SkillByKey"];
     /**
      * SkillManifest
      * @description The frozen configuration of a skill revision: what its SKILL.md declares and the exact package bytes.
@@ -6448,10 +6404,10 @@ export interface components {
     };
     /** SkillSelection */
     SkillSelection: {
+      /** Id */
+      id: string;
       /** Revision Id */
       revision_id?: string | null;
-      /** Skill Id */
-      skill_id: string;
     };
     /** SkillUpdate */
     SkillUpdate: {
@@ -6571,54 +6527,54 @@ export interface components {
       /** Next Cursor */
       next_cursor: string | null;
     };
-    /** SubagentInput */
-    SubagentInput: {
-      agent: components["schemas"]["Reference"];
-      context?: components["schemas"]["DelegationContextPolicy"];
-      /** Description */
-      description?: string | null;
-      environment?: components["schemas"]["ChildEnvironmentInput"];
-      /** Revision Id */
-      revision_id?: string | null;
-      usage_limits?: components["schemas"]["UsageLimits-Input"] | null;
-    };
     /**
      * SubagentOverride
-     * @description Replaces the fields it sets of an edge; an edge the revision lacks sets at least `agent_id`.
+     * @description Replaces the fields it sets of an edge; an edge the revision lacks sets at least `agent`.
      */
     SubagentOverride: {
-      /** Agent Id */
-      agent_id?: string | null;
+      agent?: components["schemas"]["IdReference"] | null;
       context?: components["schemas"]["DelegationContextPolicy"] | null;
       /** Description */
       description?: string | null;
-      environment?: components["schemas"]["ChildEnvironmentPolicy"] | null;
+      environment?:
+        components["schemas"]["ChildEnvironmentPolicy_TypeVar_"] | null;
       /** Revision Id */
       revision_id?: string | null;
       usage_limits?: components["schemas"]["UsageLimits-Output"] | null;
     };
-    /** SubagentOverrideInput */
-    SubagentOverrideInput: {
+    /** SubagentOverride[Reference] */
+    SubagentOverride_Reference_: {
       agent?: components["schemas"]["Reference"] | null;
       context?: components["schemas"]["DelegationContextPolicy"] | null;
       /** Description */
       description?: string | null;
-      environment?: components["schemas"]["ChildEnvironmentInput"] | null;
+      environment?:
+        components["schemas"]["ChildEnvironmentPolicy_Reference_"] | null;
       /** Revision Id */
       revision_id?: string | null;
       usage_limits?: components["schemas"]["UsageLimits-Input"] | null;
     };
     /** SubagentSelection */
     SubagentSelection: {
-      /** Agent Id */
-      agent_id: string;
+      agent: components["schemas"]["IdReference"];
       context?: components["schemas"]["DelegationContextPolicy"];
       /** Description */
       description?: string | null;
-      environment?: components["schemas"]["ChildEnvironmentPolicy"];
+      environment?: components["schemas"]["ChildEnvironmentPolicy_TypeVar_"];
       /** Revision Id */
       revision_id?: string | null;
       usage_limits?: components["schemas"]["UsageLimits-Output"] | null;
+    };
+    /** SubagentSelection[Reference] */
+    SubagentSelection_Reference_: {
+      agent: components["schemas"]["Reference"];
+      context?: components["schemas"]["DelegationContextPolicy"];
+      /** Description */
+      description?: string | null;
+      environment?: components["schemas"]["ChildEnvironmentPolicy_Reference_"];
+      /** Revision Id */
+      revision_id?: string | null;
+      usage_limits?: components["schemas"]["UsageLimits-Input"] | null;
     };
     /**
      * Submitted
@@ -7373,7 +7329,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["AgentValidateInput"];
+        "application/json": components["schemas"]["AgentValidate_ConfigInput_Reference_"];
       };
     };
     responses: {
@@ -8811,7 +8767,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["MediaSelectionInput"];
+        "application/json": components["schemas"]["MediaUnderstandingSelection_Reference_"];
       };
     };
     responses: {
@@ -12325,7 +12281,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["MemoryMountInput"];
+        "application/json": components["schemas"]["MemoryMount_Reference_"];
       };
     };
     responses: {

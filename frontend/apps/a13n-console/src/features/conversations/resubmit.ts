@@ -1,4 +1,3 @@
-import { optionsInput } from "../../shared/resource-inputs";
 import type { Schema } from "../../shared/api";
 import { isRecord } from "../../service-client";
 
@@ -25,7 +24,7 @@ export function runResubmission(run: Schema["RunView"]): Resubmission | null {
       payload,
       agent_revision_id:
         run.revision_selection === "pinned" ? run.agent_revision_id : null,
-      options: optionsInput(run.options),
+      options: run.options,
     }
   );
 }
@@ -41,7 +40,7 @@ export function entryResubmission(
         agent: { id: entry.agent_id },
         agent_revision_id: entry.agent_revision_id,
         delivery: entry.delivery,
-        options: optionsInput(entry.options),
+        options: entry.options,
       }
     : null;
 }

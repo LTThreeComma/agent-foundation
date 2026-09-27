@@ -15,12 +15,12 @@ const commonFields = new Set([
   "connection_tools",
   "memory_mounts",
   "reviewer",
-  "default_environment_template_id",
+  "default_environment_template",
   "plugins",
   "secret_requirements",
 ]);
 export function initialConfig(): AgentConfig {
-  return { model: { model_id: "" }, instructions: "" };
+  return { model: { id: "" }, instructions: "" };
 }
 export function advancedConfig(config: AgentConfig) {
   return JSON.stringify(
@@ -43,7 +43,7 @@ export function buildConfig(
     | "memory_mounts"
     | "toolsets"
     | "reviewer"
-    | "default_environment_template_id"
+    | "default_environment_template"
   >,
   advanced: string,
 ): AgentConfig {

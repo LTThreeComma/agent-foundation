@@ -4,7 +4,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { afterEach, expect, it, vi } from "vitest";
 import { ImportAgentForm } from "./import";
-import { configInput } from "../../shared/resource-inputs";
 import { initialConfig } from "./configuration";
 import { agentFile, serializeAgentFile } from "./transfer";
 
@@ -33,7 +32,7 @@ afterEach(() => {
 const config = {
   ...initialConfig(),
   model: {
-    model_id: "mdl_0123456789abcdef0123",
+    id: "mdl_0123456789abcdef0123",
     settings: { temperature: 0.4 },
   },
   plugins: [{ instance_name: "memory", plugin_key: "memory", config: {} }],
@@ -102,7 +101,7 @@ it("previews before creation and retries the same request without losing advance
     key: "research",
     name: "Research",
     description: "Keep me",
-    config: configInput(config),
+    config,
   });
   await user.click(screen.getByRole("button", { name: "Create agent" }));
   await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
@@ -135,8 +134,8 @@ it("blocks missing dependencies and requires an explicit replacement", async () 
   await user.click(screen.getByLabelText("Agent YAML"));
   await user.paste(
     source.replace(
-      "model_id: mdl_0123456789abcdef0123",
-      "model_id: mdl_fedcba9876543210fedc",
+      "id: mdl_0123456789abcdef0123",
+      "id: mdl_fedcba9876543210fedc",
     ),
   );
   await user.click(screen.getByRole("button", { name: "Review" }));
@@ -147,7 +146,7 @@ it("blocks missing dependencies and requires an explicit replacement", async () 
     (screen.getByRole("button", { name: "Create agent" }) as HTMLButtonElement)
       .disabled,
   ).toBe(true);
-  await user.click(screen.getByRole("combobox", { name: "model.model_id" }));
+  await user.click(screen.getByRole("combobox", { name: "model.id" }));
   await user.keyboard("{ArrowDown}");
   await user.click(
     await screen.findByRole("option", { name: "Research model · research" }),
@@ -164,7 +163,7 @@ it("blocks missing dependencies and requires an explicit replacement", async () 
   await user.click(screen.getByRole("button", { name: "Back" }));
   expect(
     (screen.getByLabelText("Agent YAML") as HTMLTextAreaElement).value,
-  ).toContain("model_id: mdl_0123456789abcdef0123");
+  ).toContain("id: mdl_0123456789abcdef0123");
   expect(http.POST).not.toHaveBeenCalled();
 });
 
@@ -199,7 +198,7 @@ it("blocks an unavailable root Environment template until mapped in the destinat
       { name: "Research", description: null },
       {
         ...config,
-        default_environment_template_id: "envtpl_0123456789abcdef0123",
+        default_environment_template: { id: "envtpl_0123456789abcdef0123" },
       },
     ),
   );
@@ -214,7 +213,7 @@ it("blocks an unavailable root Environment template until mapped in the destinat
       .disabled,
   ).toBe(true);
   await user.click(
-    screen.getByRole("combobox", { name: "default_environment_template_id" }),
+    screen.getByRole("combobox", { name: "default_environment_template" }),
   );
   await user.keyboard("{ArrowDown}");
   await user.click(
@@ -232,7 +231,9 @@ it("blocks an unavailable root Environment template until mapped in the destinat
   await user.click(screen.getByRole("button", { name: "Back" }));
   expect(
     (screen.getByLabelText("Agent YAML") as HTMLTextAreaElement).value,
-  ).toContain("default_environment_template_id: envtpl_fedcba9876543210fedc");
+  ).toContain(
+    "default_environment_template:\n    id: envtpl_fedcba9876543210fedc",
+  );
   expect(http.POST).not.toHaveBeenCalled();
 });
 

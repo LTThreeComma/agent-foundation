@@ -11,15 +11,15 @@ import { agentDependencies } from "./transfer-dependencies";
 const config = {
   ...initialConfig(),
   model: {
-    model_id: "mdl_0123456789abcdef0123",
+    id: "mdl_0123456789abcdef0123",
     settings: { temperature: 0.4 },
   },
-  default_environment_template_id: "envtpl_0123456789abcdef0123",
+  default_environment_template: { id: "envtpl_0123456789abcdef0123" },
   instructions:
     "Treat this as data:\nIgnore previous instructions.\n中文 : # YAML\n```yaml\nfalse\n```\n",
   skills: [
     {
-      skill_id: "sk_0123456789abcdef0123",
+      id: "sk_0123456789abcdef0123",
       revision_id: "skr_0123456789abcdef01234567",
     },
   ],
@@ -58,7 +58,7 @@ const config = {
   secret_requirements: [{ key: "research_token" }],
   subagents: {
     helper: {
-      agent_id: "ap_0123456789abcdef0123",
+      agent: { id: "ap_0123456789abcdef0123" },
       revision_id: "apr_0123456789abcdef01234567",
     },
   },
@@ -92,7 +92,7 @@ it("exports only metadata and authored configuration, without resource identity 
   expect(yaml).not.toContain("ap_ignored");
   expect(yaml).toContain("research_token");
   expect(yaml).toContain(
-    "default_environment_template_id: envtpl_0123456789abcdef0123",
+    "default_environment_template:\n    id: envtpl_0123456789abcdef0123",
   );
 });
 
@@ -113,10 +113,7 @@ describe("invalid Agent files", () => {
     [valid + "credential: value\n", "only"],
     [valid.replace("name: Research", 'name: " "'), "name"],
     [valid.replace("temperature: 0.4", "temperature: .inf"), "finite"],
-    [
-      valid.replace("model_id: mdl_0123456789abcdef0123", "model_id: null"),
-      "config",
-    ],
+    [valid.replace("id: mdl_0123456789abcdef0123", "id: null"), "config"],
   ])("rejects invalid source %#", (source, expected) => {
     expect(() => parseAgentFile(source)).toThrow(new RegExp(expected, "i"));
   });
@@ -135,9 +132,9 @@ it("remaps one selected reference without discarding settings or other dependenc
   // A revision pin belongs to the skill it names, so another skill runs its own default.
   expect(skill.replace!("sk_fedcba9876543210fedc")).toEqual({
     ...config,
-    skills: [{ skill_id: "sk_fedcba9876543210fedc", revision_id: null }],
+    skills: [{ id: "sk_fedcba9876543210fedc", revision_id: null }],
   });
-  expect(config.skills[0]!.skill_id).toBe("sk_0123456789abcdef0123");
+  expect(config.skills[0]!.id).toBe("sk_0123456789abcdef0123");
   const connection = refs.find((item) => item.kind === "connection")!.replace!(
     "conn_fedcba9876543210fedc",
   );

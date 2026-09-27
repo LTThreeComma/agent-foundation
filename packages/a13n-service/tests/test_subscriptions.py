@@ -25,7 +25,8 @@ from a13n_service.resources.subscriptions.delivery import (
     stage_webhooks,
     webhook_target,
 )
-from a13n_service.resources.subscriptions.schemas import SECRET_UNAVAILABLE, SubscriptionCreate
+from a13n_service.resources.subscriptions.inputs import SubscriptionCreateInput
+from a13n_service.resources.subscriptions.schemas import SECRET_UNAVAILABLE
 from a13n_service.resources.subscriptions.tables import SubscriptionRow
 from a13n_service.runs.tables import RunRow
 from a13n_service.runs.webhooks import notify_subscribers
@@ -94,7 +95,7 @@ async def test_subscription_configuration_is_admin_only(service) -> None:  # typ
     admin = Principal(
         tenant.principal_id, "user", (Grant(tenant.organization_id, tenant.workspace_id, BUILT_IN_ROLES["admin"]),)
     )
-    request = SubscriptionCreate.model_validate(body)
+    request = SubscriptionCreateInput.model_validate(body)
     with pytest.raises(ServiceError) as limited:
         await subscriptions.create_subscription(
             runtime.storage,
@@ -214,7 +215,7 @@ async def test_webhooks_are_signed_retried_and_redelivered(runtime, tenant) -> N
     )
 
     with receiver([200, 500, 500, 200]) as (url, received):
-        body = SubscriptionCreate.model_validate(
+        body = SubscriptionCreateInput.model_validate(
             {"name": "Runs", "url": url, "kinds": ["run.completed"], "signing_secret": SECRET}
         )
         subscription = await subscriptions.create_subscription(

@@ -47,8 +47,13 @@ beforeEach(() => {
   mocks.canRun = true;
   mocks.thread = fixtureThread();
   mocks.mounts = [
-    { name: "handbook", memory_id: "mem_book", access: "read" },
-    { name: "facts", memory_id: "mem_facts", access: "write", recall: true },
+    { name: "handbook", memory: { id: "mem_book" }, access: "read" },
+    {
+      name: "facts",
+      memory: { id: "mem_facts" },
+      access: "write",
+      recall: true,
+    },
   ];
   mocks.POST.mockReset().mockResolvedValue({ data: {} });
   mocks.PATCH.mockReset().mockResolvedValue({ data: {} });
@@ -218,14 +223,14 @@ it("links a run's frozen mounts to the changes that run made", async () => {
   const cache = show(
     <MemoryMountRows
       mounts={[
-        { name: "handbook", memory_id: "mem_book", access: "read" },
+        { name: "handbook", memory: { id: "mem_book" }, access: "read" },
         {
           name: "facts",
-          memory_id: "mem_facts",
+          memory: { id: "mem_facts" },
           access: "read",
           recall: false,
         },
-        { name: "gone", memory_id: "mem_gone", access: "write" },
+        { name: "gone", memory: { id: "mem_gone" }, access: "write" },
       ]}
       empty="None"
       runId="run_2"

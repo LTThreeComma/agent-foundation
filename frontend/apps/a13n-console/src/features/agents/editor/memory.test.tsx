@@ -48,8 +48,8 @@ function show(readOnly = false) {
     const draft = useAgentDraft({
       ...initialConfig(),
       memory_mounts: [
-        { name: "handbook", memory_id: "mem_book", access: "read" },
-        { name: "facts", memory_id: "mem_facts", access: "write" },
+        { name: "handbook", memory: { id: "mem_book" }, access: "read" },
+        { name: "facts", memory: { id: "mem_facts" }, access: "write" },
       ],
     });
     drafts.push(draft);
@@ -90,8 +90,13 @@ it("adds, changes and removes the agent's default memories", async () => {
   // A record memory recalls unless the agent turns it off.
   await user.click(screen.getByRole("switch", { name: "Recall for facts" }));
   expect(draft().memoryMounts).toEqual([
-    { name: "handbook", memory_id: "mem_book", access: "write" },
-    { name: "facts", memory_id: "mem_facts", access: "write", recall: false },
+    { name: "handbook", memory: { id: "mem_book" }, access: "write" },
+    {
+      name: "facts",
+      memory: { id: "mem_facts" },
+      access: "write",
+      recall: false,
+    },
   ]);
   expect(draft().dirty).toBe(true);
 });

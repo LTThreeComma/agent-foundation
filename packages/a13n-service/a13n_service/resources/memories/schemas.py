@@ -10,6 +10,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstra
 from a13n_service.infra.ids import ObjectId
 from a13n_service.infra.labels import Labels
 from a13n_service.resources.memories.tables import MemoryKind
+from a13n_service.resources.references import IdReference
 
 # The Service-owned file store; other types belong to Memory Providers.
 POSTGRES = "postgres"
@@ -226,12 +227,12 @@ class MountFields(BaseModel):
     recall: bool = True
 
 
-class MemoryMount(MountFields):
-    memory_id: ObjectId
+class MemoryMount[Ref = IdReference](MountFields):
+    memory: Ref
 
 
 def _unique(mounts: tuple[MemoryMount, ...]) -> tuple[MemoryMount, ...]:
-    names, memories = [mount.name for mount in mounts], [mount.memory_id for mount in mounts]
+    names, memories = [mount.name for mount in mounts], [mount.memory.id for mount in mounts]
     if len(set(names)) != len(names) or len(set(memories)) != len(memories):
         raise ValueError("Memory mount names and memories must be unique")
     return mounts

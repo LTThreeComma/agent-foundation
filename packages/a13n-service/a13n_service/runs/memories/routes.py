@@ -2,12 +2,9 @@
 
 from fastapi import APIRouter, Response
 
-from a13n_service.infra.db import short_session
 from a13n_service.infra.http import IfMatch, etag
-from a13n_service.resources.memories.inputs import MemoryMountInput, mount_ids
+from a13n_service.resources.memories.inputs import MemoryMountInput
 from a13n_service.resources.memories.schemas import MemoryMount
-from a13n_service.resources.memories.tables import MemoryRow
-from a13n_service.resources.references import ReferenceBatch
 from a13n_service.resources.requests import CurrentRuntime
 from a13n_service.runs.memories import mounts
 from a13n_service.runs.memories.schemas import MemoryMountPage, MemoryMountUpdate
@@ -35,17 +32,12 @@ async def add_mount(
     actor: Actor,
     if_match: IfMatch = None,
 ) -> MemoryMount:
-    batch = ReferenceBatch()
-    batch.add(MemoryRow, body.memory)
-    async with short_session(runtime.storage) as session:
-        await batch.resolve(session, workspace.workspace_id)
-    selected = mount_ids(batch, body)
     mount, version = await mounts.add_mount(
         runtime.storage,
         actor,
         workspace.workspace_id,
         thread_id,
-        selected,
+        body,
         if_match=if_match,
         limit=runtime.settings.memory.mounts_per_thread,
     )

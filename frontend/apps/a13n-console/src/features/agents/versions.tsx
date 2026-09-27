@@ -37,8 +37,7 @@ export function AgentVersions({
   const [selected, setSelected] = useState<Schema["AgentRevision"]>();
   // Revisions name their model by ID; versions show the model's key.
   const modelKey = (revision: Schema["AgentRevision"]) =>
-    models.get(revision.config.model.model_id)?.key ??
-    revision.config.model.model_id;
+    models.get(revision.config.model.id)?.key ?? revision.config.model.id;
   const query = useQuery({
     queryKey: ["agent-revisions", workspace.id, agent.id, page.cursor],
     queryFn: ({ signal }) =>

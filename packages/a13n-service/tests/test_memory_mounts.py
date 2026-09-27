@@ -27,7 +27,7 @@ def mount(name: str, memory: dict[str, Any], access: str = "write") -> dict[str,
 
 
 def mounted(run: dict[str, Any]) -> list[tuple[str, str, str]]:
-    return [(item["name"], item["memory_id"], item["access"]) for item in run["memory_mounts"]]
+    return [(item["name"], item["memory"]["id"], item["access"]) for item in run["memory_mounts"]]
 
 
 def reason(response: Any) -> str:
@@ -57,7 +57,7 @@ async def test_thread_mounts_are_edited_under_the_thread_version(service, script
     added = await client.post(mounts, json=body, headers={"if-match": version})
     assert (
         added.status_code == 201
-        and added.json() == {"name": "notes", "memory_id": notes["id"], "access": "read", "recall": True}
+        and added.json() == {"name": "notes", "memory": {"id": notes["id"]}, "access": "read", "recall": True}
         and added.headers["etag"] != version
     )
     assert (await client.post(mounts, json=body, headers={"if-match": version})).status_code == 412
@@ -150,14 +150,14 @@ async def test_a_deleted_default_memory_fails_the_entry(service, scripted_model,
     assert deleted.status_code == 204, deleted.text
     refused = await runs_kit.start_thread(service, agent, "hi")
     assert refused["run"] is None and refused["entry"]["failure"]["code"] == "invalid_argument", refused
-    assert "memory_mounts.0.memory_id" in refused["entry"]["failure"]["message"]
+    assert "memory_mounts.0.memory.id" in refused["entry"]["failure"]["message"]
 
 
 async def test_agent_default_mounts_are_validated_when_authored(service, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
     model_id = await runs_kit.create_model(service, scripted_model)
     team = await create_memory(service, "team")
     cases = [
-        ([mount("team", {"id": "mem_" + "0" * 20})], "memory_mounts.0.memory_id"),
+        ([mount("team", {"id": "mem_" + "0" * 20})], "memory_mounts.0.memory.id"),
         ([mount("team", team), mount("team", team)], None),
         ([mount("Team", team)], None),
     ]
@@ -215,7 +215,7 @@ async def test_a_child_thread_adopts_its_parents_mounts_and_its_own_defaults(ser
         ).one()
         run = await session.get_one(RunRow, child.current_run_id)
     # The parent's `team` keeps its name; the worker's default of that name does not join, its `notes` does.
-    assert [(item["name"], item["memory_id"]) for item in run.memory_mounts] == [
+    assert [(item["name"], item["memory"]["id"]) for item in run.memory_mounts] == [
         ("notes", notes["id"]),
         ("team", team["id"]),
     ]
@@ -237,17 +237,17 @@ async def test_deleting_a_memory_unmounts_it_and_moves_the_thread_version(servic
 async def test_a_run_inherits_cursors_of_memories_mounted_under_the_same_name() -> None:
     parent = RunRow(
         memory_mounts=[
-            {"name": "team", "memory_id": "mem_a", "access": "write"},
-            {"name": "notes", "memory_id": "mem_b", "access": "read"},
-            {"name": "docs", "memory_id": "mem_c", "access": "read"},
+            {"name": "team", "memory": {"id": "mem_a"}, "access": "write"},
+            {"name": "notes", "memory": {"id": "mem_b"}, "access": "read"},
+            {"name": "docs", "memory": {"id": "mem_c"}, "access": "read"},
         ],
         memory_cursors={"mem_a": "7", "mem_b": "3", "mem_c": None},
     )
     mounts = [
-        {"name": "team", "memory_id": "mem_a", "access": "read"},
-        {"name": "renamed", "memory_id": "mem_b", "access": "read"},
-        {"name": "docs", "memory_id": "mem_c", "access": "read"},
-        {"name": "new", "memory_id": "mem_d", "access": "write"},
+        {"name": "team", "memory": {"id": "mem_a"}, "access": "read"},
+        {"name": "renamed", "memory": {"id": "mem_b"}, "access": "read"},
+        {"name": "docs", "memory": {"id": "mem_c"}, "access": "read"},
+        {"name": "new", "memory": {"id": "mem_d"}, "access": "write"},
     ]
     assert inherited_cursors(parent, mounts) == {"mem_a": "7", "mem_c": None}
     assert inherited_cursors(None, mounts) == {}

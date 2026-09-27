@@ -45,12 +45,12 @@ function pin(current: string, value: string, revision?: string | null) {
 export function agentDependencies(config: AgentConfig): AgentDependency[] {
   const refs: AgentDependency[] = [
     {
-      path: "model.model_id",
+      path: "model.id",
       kind: "model",
-      value: config.model.model_id,
+      value: config.model.id,
       replace: (value) => ({
         ...config,
-        model: { ...config.model, model_id: value },
+        model: { ...config.model, id: value },
       }),
     },
   ];
@@ -59,20 +59,23 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
       refs.push({
         path: `media_understanding.${kind}`,
         kind: "model",
-        value: id,
+        value: id.id,
         replace: (value) => ({
           ...config,
-          media_understanding: { ...config.media_understanding, [kind]: value },
+          media_understanding: {
+            ...config.media_understanding,
+            [kind]: { id: value },
+          },
         }),
       });
-  if (config.default_environment_template_id)
+  if (config.default_environment_template)
     refs.push({
-      path: "default_environment_template_id",
+      path: "default_environment_template",
       kind: "environment_template",
-      value: config.default_environment_template_id,
+      value: config.default_environment_template.id,
       replace: (value) => ({
         ...config,
-        default_environment_template_id: value,
+        default_environment_template: { id: value },
       }),
     });
   const reviewer = config.reviewer;
@@ -80,17 +83,17 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
     refs.push({
       path: "reviewer.model",
       kind: "model",
-      value: reviewer.model,
+      value: reviewer.model.id,
       replace: (value) => ({
         ...config,
-        reviewer: { ...reviewer, model: value },
+        reviewer: { ...reviewer, model: { id: value } },
       }),
     });
   for (const [index, skill] of (config.skills ?? []).entries())
     refs.push({
-      path: `skills.${index}.skill_id`,
+      path: `skills.${index}.id`,
       kind: "skill",
-      value: skill.skill_id,
+      value: skill.id,
       revision: skill.revision_id,
       replace: (value) => ({
         ...config,
@@ -98,8 +101,8 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
           i === index
             ? {
                 ...item,
-                skill_id: value,
-                revision_id: pin(item.skill_id, value, item.revision_id),
+                id: value,
+                revision_id: pin(item.id, value, item.revision_id),
               }
             : item,
         ),
@@ -119,13 +122,13 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
     });
   for (const [index, mount] of (config.memory_mounts ?? []).entries())
     refs.push({
-      path: `memory_mounts.${index}.memory_id`,
+      path: `memory_mounts.${index}.memory.id`,
       kind: "memory",
-      value: mount.memory_id,
+      value: mount.memory.id,
       replace: (value) => ({
         ...config,
         memory_mounts: config.memory_mounts?.map((item, i) =>
-          i === index ? { ...item, memory_id: value } : item,
+          i === index ? { ...item, memory: { id: value } } : item,
         ),
       }),
     });
@@ -139,9 +142,9 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
     });
   for (const [name, child] of Object.entries(config.subagents ?? {})) {
     refs.push({
-      path: `subagents.${name}.agent_id`,
+      path: `subagents.${name}.agent.id`,
       kind: "agent",
-      value: child.agent_id,
+      value: child.agent.id,
       revision: child.revision_id,
       replace: (value) => ({
         ...config,
@@ -149,25 +152,25 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
           ...config.subagents,
           [name]: {
             ...child,
-            agent_id: value,
-            revision_id: pin(child.agent_id, value, child.revision_id),
+            agent: { id: value },
+            revision_id: pin(child.agent.id, value, child.revision_id),
           },
         },
       }),
     });
     const environment = child.environment;
-    if (environment?.template_id)
+    if (environment?.template)
       refs.push({
-        path: `subagents.${name}.environment.template_id`,
+        path: `subagents.${name}.environment.template.id`,
         kind: "environment_template",
-        value: environment.template_id,
+        value: environment.template.id,
         replace: (value) => ({
           ...config,
           subagents: {
             ...config.subagents,
             [name]: {
               ...child,
-              environment: { ...environment, template_id: value },
+              environment: { ...environment, template: { id: value } },
             },
           },
         }),

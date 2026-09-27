@@ -248,7 +248,7 @@ function AgentRows({ items }: { items: readonly Agent[] }) {
               if (!agent.default_revision_id)
                 return <span className={styles.modelName}>—</span>;
               if (revision?.isPending) return <InlineLoading width="6rem" />;
-              const id = revision?.data?.config.model.model_id;
+              const id = revision?.data?.config.model.id;
               const model = id ? modelsById.get(id) : undefined;
               return (
                 <span className={styles.modelName} title={id ?? undefined}>

@@ -5,14 +5,12 @@ from fastapi import APIRouter, Response
 from a13n_service.infra.http import IfMatch, PageLimit, tagged
 from a13n_service.resources.requests import CurrentRuntime
 from a13n_service.resources.subscriptions import service
-from a13n_service.resources.subscriptions.inputs import SubscriptionCreateInput, SubscriptionUpdateInput, normalize
+from a13n_service.resources.subscriptions.inputs import SubscriptionCreateInput, SubscriptionUpdateInput
 from a13n_service.resources.subscriptions.schemas import (
     CreatedSubscription,
     DeliveryPage,
     Subscription,
-    SubscriptionCreate,
     SubscriptionPage,
-    SubscriptionUpdate,
     WebhookDelivery,
 )
 from a13n_service.tenancy.requests import Actor, Workspace
@@ -32,7 +30,7 @@ async def create_subscription(
         runtime.endpoint_policy,
         actor,
         workspace.workspace_id,
-        await normalize(runtime.storage, workspace.workspace_id, body, SubscriptionCreate),
+        body,
         limit=runtime.settings.control.subscriptions,
     )
     return tagged(response, result)
@@ -79,7 +77,7 @@ async def update_subscription(
         actor,
         workspace.workspace_id,
         subscription_id,
-        await normalize(runtime.storage, workspace.workspace_id, body, SubscriptionUpdate),
+        body,
         if_match=if_match,
     )
     return tagged(response, result)

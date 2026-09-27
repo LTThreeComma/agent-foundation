@@ -77,7 +77,7 @@ export function MountForm({
   const { name, setName, suggestName } = useSuggestedName();
   const taken = mounts.some((mount) => mount.name === name);
   const available = (choices.data ?? []).filter(
-    (memory) => !mounts.some((mount) => mount.memory_id === memory.id),
+    (memory) => !mounts.some((mount) => mount.memory.id === memory.id),
   );
   const record =
     available.find((memory) => memory.id === memoryId)?.kind === "record";
@@ -91,7 +91,7 @@ export function MountForm({
         if (memoryId && !taken)
           onSubmit({
             name,
-            memory_id: memoryId,
+            memory: { id: memoryId },
             access,
             // File memories ignore recall.
             ...(record && { recall }),
@@ -199,9 +199,9 @@ export function MemoryMountRows({
     <ListRows>
       {mounts.map((mount) => {
         const memory = choices.data?.find(
-          (item) => item.id === mount.memory_id,
+          (item) => item.id === mount.memory.id,
         );
-        const path = `${basePath}/memories/${encodeURIComponent(mount.memory_id)}`;
+        const path = `${basePath}/memories/${encodeURIComponent(mount.memory.id)}`;
         const recall = mount.recall !== false;
         return (
           <ListRow
@@ -212,9 +212,9 @@ export function MemoryMountRows({
               memory ? (
                 <Link to={path}>{memory.name}</Link>
               ) : choices.isPending ? (
-                mount.memory_id
+                mount.memory.id
               ) : (
-                `${t("Memory unavailable")} · ${mount.memory_id}`
+                `${t("Memory unavailable")} · ${mount.memory.id}`
               )
             }
             control={

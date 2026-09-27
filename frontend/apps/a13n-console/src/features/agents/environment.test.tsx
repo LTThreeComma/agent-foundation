@@ -64,7 +64,7 @@ it("saves the environment choice together with other configuration edits", async
         <AgentEditor
           initial={{
             ...initialConfig(),
-            model: { model_id: "mdl_0123456789abcdef0123" },
+            model: { id: "mdl_0123456789abcdef0123" },
             instructions: "Check the evidence.",
           }}
           version={7}
@@ -90,7 +90,7 @@ it("saves the environment choice together with other configuration edits", async
   expect(submit).toHaveBeenCalledWith(
     expect.objectContaining({
       instructions: "Check the evidence. Keep the draft.",
-      default_environment_template_id: "envtpl_1234567890abcdef1234",
+      default_environment_template: { id: "envtpl_1234567890abcdef1234" },
     }),
     '"agent-v1"',
     null,

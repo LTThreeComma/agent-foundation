@@ -62,7 +62,7 @@ export function RunOptions({
         />
       )}
       {mediaKinds.map(({ kind, label }) => {
-        const key = options.mediaUnderstanding[kind];
+        const key = options.mediaUnderstanding[kind]?.id;
         return key ? (
           <OptionChip
             key={kind}

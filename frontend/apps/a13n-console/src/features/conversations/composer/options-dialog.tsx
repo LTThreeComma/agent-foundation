@@ -1,4 +1,3 @@
-import { overrideInput, memoryInput } from "../../../shared/resource-inputs";
 import {
   Button,
   ChoiceField,
@@ -130,7 +129,7 @@ export function useRunOptions() {
         ...(model || settings.trim()
           ? {
               model: {
-                ...(model ? { model_id: model } : {}),
+                ...(model ? { id: model } : {}),
                 ...(settings.trim() ? { settings: jsonObject(settings) } : {}),
               },
             }
@@ -144,9 +143,9 @@ export function useRunOptions() {
         agent_id: agent || undefined,
         agent_revision_id: revision || undefined,
         ...(Object.keys(override).length
-          ? { options: { overrides: overrideInput(override) } }
+          ? { options: { overrides: override } }
           : {}),
-        ...(memories.length ? { memories: memories.map(memoryInput) } : {}),
+        ...(memories.length ? { memories } : {}),
         ...(environment === "inherit"
           ? {}
           : {
@@ -452,7 +451,7 @@ function ModelOptions({
             }}
             onChange={(value, kind) => {
               options.setMediaUnderstanding(value);
-              const key = value[kind];
+              const key = value[kind]?.id;
               options.setLabels((previous) => ({
                 ...previous,
                 media: {

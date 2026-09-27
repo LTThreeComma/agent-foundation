@@ -1,4 +1,3 @@
-import { memoryInput } from "../../shared/resource-inputs";
 import { PlusIcon } from "@phosphor-icons/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, ModalFrame } from "a13n-ui";
@@ -60,7 +59,7 @@ export function ThreadMemoryMounts({ run }: { run: Schema["RunView"] }) {
         .POST("/api/v1/threads/{thread_id}/memories", {
           params: { path },
           headers: ifMatch(thread.data && rowTag(thread.data)),
-          body: memoryInput(mount),
+          body: mount,
         })
         .then(data),
     onSuccess: () => {

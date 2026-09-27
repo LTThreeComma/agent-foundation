@@ -1,4 +1,3 @@
-import { configInput } from "../../shared/resource-inputs";
 import {
   Collapsible,
   CollapsiblePanel,
@@ -145,9 +144,7 @@ export function AgentToolsets({
   const providers = webProviders.data ?? [];
   const providerTypes = webProviderTypes.data?.items ?? [];
   // The draft rebuilds its configuration on every render; the text identifies it.
-  const configText = config?.model.model_id
-    ? JSON.stringify(config)
-    : undefined;
+  const configText = config?.model.id ? JSON.stringify(config) : undefined;
   const [candidate, setCandidate] = useState<{
     text: string;
     config: AgentConfig;
@@ -173,7 +170,7 @@ export function AgentToolsets({
       if (candidate)
         await client.workspace(workspace.id).POST("/api/v1/agents/validate", {
           body: {
-            config: configInput(candidate.config),
+            config: candidate.config,
             agent: agentId ? { id: agentId } : null,
           },
           signal,

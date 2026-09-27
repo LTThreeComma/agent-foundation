@@ -89,7 +89,7 @@ def _providers(api: Api, org: str, ws: str) -> Iterator[Check]:
         "The scripted models are enabled, and the media model is every media default",
         models["local-scripted"]["enabled"]
         and models["local-scripted-media"]["enabled"]
-        and {media["image"], media["audio"], media["video"]} == {models["local-scripted-media"]["id"]},
+        and {media[kind]["id"] for kind in ("image", "audio", "video")} == {models["local-scripted-media"]["id"]},
     )
 
 

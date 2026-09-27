@@ -9,6 +9,7 @@ from a13n_harness.toolsets.file_media import NativeInputMediaKind
 from pydantic import BaseModel, ConfigDict, Field
 
 from a13n_service.infra.ids import ObjectId
+from a13n_service.resources.references import IdReference
 
 
 class ModelConfig(BaseModel):
@@ -107,16 +108,16 @@ class ModelCatalog(BaseModel):
 MEDIA_KINDS: tuple[NativeInputMediaKind, ...] = ("image", "video", "audio")
 
 
-class MediaUnderstandingSelection(BaseModel):
+class MediaUnderstandingSelection[Ref = IdReference](BaseModel):
     """The model describing each media kind a model cannot read; a kind without one is unavailable."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    image: ObjectId | None = None
-    video: ObjectId | None = None
-    audio: ObjectId | None = None
+    image: Ref | None = None
+    video: Ref | None = None
+    audio: Ref | None = None
 
     def selections(self) -> dict[NativeInputMediaKind, str]:
-        return {kind: model_id for kind in MEDIA_KINDS if (model_id := getattr(self, kind)) is not None}
+        return {kind: ref.id for kind in MEDIA_KINDS if (ref := getattr(self, kind)) is not None}
 
 
 class MediaDefaults(MediaUnderstandingSelection):

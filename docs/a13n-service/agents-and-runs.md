@@ -28,26 +28,26 @@ The built-in [Agent Composer](agent-composer.md) is an agent too; it cannot be c
 
 ### Agent configuration
 
-When creating an agent or revision, `config` accepts the following fields. Stored revisions return canonical IDs for resource references and retain Secret requirement keys.
+When creating an agent or revision, `config` accepts the following fields. Stored revisions use the same field names and nesting: resource references return `{id}`, and Secret requirements retain `{key}`. You can submit a returned `config` unchanged; no field conversion is needed.
 
-| Field                          | Meaning                                                                                                                                                                          |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                        | `id` or `key`, plus `settings` (model-API-specific, such as reasoning effort) and `characteristics` (context window and context-management thresholds). See [Models](models.md). |
-| `instructions`                 | The system instructions, up to 256 KiB.                                                                                                                                          |
-| `toolsets`                     | Built-in toolsets and each tool's enablement, configuration and permission. See [Tools and connections](tools.md#built-in-toolsets).                                             |
-| `skills`                       | Skills and the revisions they pin. See [Skills](skills.md).                                                                                                                      |
-| `connection_tools`             | Connections and their tools. See [Use a connection in an agent](tools.md#use-a-connection-in-an-agent).                                                                          |
-| `client_tools`                 | Tools your application executes; see [client tools](#client-tools-and-questions).                                                                                                |
-| `user_questions`               | Offers the `ask_user_question` tool.                                                                                                                                             |
-| `subagents`, `subagent_mode`   | Other agents this agent can delegate to; see [subagents](#subagents).                                                                                                            |
-| `reviewer`                     | The model that decides calls whose permission is `review`.                                                                                                                       |
-| `media_understanding`          | Models that read images, video or audio for this agent; see [media understanding](models.md#media-understanding).                                                                |
-| `plugins`                      | Instances of Harness plugins the deployment installed (`plugins.keys`).                                                                                                          |
-| `output_spec`                  | Structured output: one JSON Schema, or 2–32 named `variants`. Without it the result is text.                                                                                     |
-| `retries`                      | How many times the model may retry failed tool calls (`tools`) and invalid output (`output`), 0–100 each.                                                                        |
-| `secret_requirements`          | Secrets the agent's tools need; see [Secrets](skills.md#secrets).                                                                                                                |
-| `default_environment_template` | An [environment template](environments.md#templates) reference (`{id}` or `{key}`) from which each new thread gets its own primary environment.                                  |
-| `memory_mounts`                | [Memories](memory.md#mount-a-memory-on-a-thread) each new thread mounts when its first run is accepted, \`\[{name, memory: {id}                                                  |
+| Field                          | Meaning                                                                                                                                                                                  |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                        | `id` or `key`, plus `settings` (model-API-specific, such as reasoning effort) and `characteristics` (context window and context-management thresholds). See [Models](models.md).         |
+| `instructions`                 | The system instructions, up to 256 KiB.                                                                                                                                                  |
+| `toolsets`                     | Built-in toolsets and each tool's enablement, configuration and permission. See [Tools and connections](tools.md#built-in-toolsets).                                                     |
+| `skills`                       | Skills and the revisions they pin. See [Skills](skills.md).                                                                                                                              |
+| `connection_tools`             | Connections and their tools. See [Use a connection in an agent](tools.md#use-a-connection-in-an-agent).                                                                                  |
+| `client_tools`                 | Tools your application executes; see [client tools](#client-tools-and-questions).                                                                                                        |
+| `user_questions`               | Offers the `ask_user_question` tool.                                                                                                                                                     |
+| `subagents`, `subagent_mode`   | Other agents this agent can delegate to; see [subagents](#subagents).                                                                                                                    |
+| `reviewer`                     | The model that decides calls whose permission is `review`.                                                                                                                               |
+| `media_understanding`          | Models that read images, video or audio for this agent; see [media understanding](models.md#media-understanding).                                                                        |
+| `plugins`                      | Instances of Harness plugins the deployment installed (`plugins.keys`).                                                                                                                  |
+| `output_spec`                  | Structured output: one JSON Schema, or 2–32 named `variants`. Without it the result is text.                                                                                             |
+| `retries`                      | How many times the model may retry failed tool calls (`tools`) and invalid output (`output`), 0–100 each.                                                                                |
+| `secret_requirements`          | Secrets the agent's tools need; see [Secrets](skills.md#secrets).                                                                                                                        |
+| `default_environment_template` | An [environment template](environments.md#templates) reference (`{id}` or `{key}`) from which each new thread gets its own primary environment.                                          |
+| `memory_mounts`                | [Memories](memory.md#mount-a-memory-on-a-thread) each new thread mounts at its first acceptance. Each entry has `name`, a `memory` reference (`{id}` or `{key}`), `access` and `recall`. |
 
 Saving validates the whole configuration against the workspace: every referenced model, skill, connection, provider and agent must exist and be usable by you, and skill and subagent references without a `revision_id` are pinned to the current default revision. A revision therefore always runs exactly what it was saved with.
 

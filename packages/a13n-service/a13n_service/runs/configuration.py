@@ -22,8 +22,6 @@ from a13n_service.infra.errors import ServiceError, invalid
 from a13n_service.infra.http import etag
 from a13n_service.resources.agents import service as agents
 from a13n_service.resources.agents.inputs import AgentCreateInput, AgentRevisionCreateInput, ConfigInput
-from a13n_service.resources.agents.resolve_inputs import collect_config, config_ids, resolve_config
-from a13n_service.resources.agents.schemas import AgentCreate, AgentRevisionCreate
 from a13n_service.resources.agents.tables import AgentRow
 from a13n_service.resources.agents.toolsets import CONFIGURATION_TOOL_IDS
 from a13n_service.resources.connections import service as connections
@@ -221,14 +219,11 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
     ) -> JsonValue:
         with self._acting("write"):
             body = _parsed(AgentCreateInput, {"key": key, "name": name, "description": description, "config": config})
-            async with short_session(self.runtime.storage) as session:
-                selected = await resolve_config(session, self.scope.workspace_id, body.config)
-            command = AgentCreate(**body.model_dump(exclude={"config"}), config=selected)
             agent = await agents.create_agent(
                 self.runtime.storage,
                 self.principal,
                 self.scope.workspace_id,
-                command,
+                body,
                 registry=self.runtime.registry,
                 plugins=self.runtime.plugins,
             )
@@ -246,11 +241,8 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
             body = _parsed(AgentRevisionCreateInput, {"config": config, "note": note, "make_default": make_default})
             batch = ReferenceBatch()
             batch.add(AgentRow, agent)
-            collect_config(batch, body.config)
             async with short_session(storage) as session:
                 await batch.resolve(session, workspace_id)
-            selected = config_ids(batch, body.config)
-            command = AgentRevisionCreate(**body.model_dump(exclude={"config"}), config=selected)
             agent_id = batch.id(AgentRow, agent)
             # Revisions are immutable and appended, so the head's current version is the one to extend.
             head = await agents.get_agent(storage, self.principal, workspace_id, agent_id)
@@ -259,7 +251,7 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
                 self.principal,
                 workspace_id,
                 head.id,
-                command,
+                body,
                 if_match=etag(head.id, head.version),
                 registry=self.runtime.registry,
                 plugins=self.runtime.plugins,

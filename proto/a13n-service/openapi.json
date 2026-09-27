@@ -174,18 +174,15 @@
             "title": "Connection Tools",
             "type": "array"
           },
-          "default_environment_template_id": {
+          "default_environment_template": {
             "anyOf": [
               {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
+                "$ref": "#/components/schemas/IdReference"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Default Environment Template Id"
+            ]
           },
           "instructions": {
             "default": "",
@@ -408,14 +405,15 @@
       },
       "AgentModel": {
         "additionalProperties": false,
+        "description": "A model reference with settings layered over the model's own defaults.",
         "properties": {
           "characteristics": {
             "$ref": "#/components/schemas/AgentModelCharacteristics"
           },
-          "model_id": {
+          "id": {
             "maxLength": 41,
             "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-            "title": "Model Id",
+            "title": "Id",
             "type": "string"
           },
           "settings": {
@@ -427,7 +425,7 @@
           }
         },
         "required": [
-          "model_id"
+          "id"
         ],
         "title": "AgentModel",
         "type": "object"
@@ -689,10 +687,7 @@
             "title": "Instruction"
           },
           "model": {
-            "maxLength": 41,
-            "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-            "title": "Model",
-            "type": "string"
+            "$ref": "#/components/schemas/IdReference"
           },
           "model_settings": {
             "anyOf": [
@@ -763,6 +758,95 @@
           "model"
         ],
         "title": "AgentReviewer",
+        "type": "object"
+      },
+      "AgentReviewer_Reference_": {
+        "additionalProperties": false,
+        "properties": {
+          "instruction": {
+            "anyOf": [
+              {
+                "maxLength": 32768,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instruction"
+          },
+          "model": {
+            "$ref": "#/components/schemas/Reference"
+          },
+          "model_settings": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Settings"
+          },
+          "on_error": {
+            "default": "approval_required",
+            "enum": [
+              "deny",
+              "approval_required",
+              "allow"
+            ],
+            "title": "On Error",
+            "type": "string"
+          },
+          "on_flagged": {
+            "default": "deny",
+            "enum": [
+              "deny",
+              "approval_required"
+            ],
+            "title": "On Flagged",
+            "type": "string"
+          },
+          "risk_threshold": {
+            "$ref": "#/components/schemas/ToolRiskLevel",
+            "default": "extra_high"
+          },
+          "rules": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ToolReviewRule"
+            },
+            "maxProperties": 1024,
+            "title": "Rules",
+            "type": "object"
+          },
+          "shell_instruction": {
+            "anyOf": [
+              {
+                "maxLength": 32768,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shell Instruction"
+          },
+          "timeout_seconds": {
+            "default": 120,
+            "exclusiveMinimum": 0.0,
+            "maximum": 120.0,
+            "title": "Timeout Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "AgentReviewer[Reference]",
         "type": "object"
       },
       "AgentRevision": {
@@ -930,7 +1014,7 @@
         "title": "AgentUpdate",
         "type": "object"
       },
-      "AgentValidateInput": {
+      "AgentValidate_ConfigInput_Reference_": {
         "additionalProperties": false,
         "properties": {
           "agent": {
@@ -950,7 +1034,7 @@
         "required": [
           "config"
         ],
-        "title": "AgentValidateInput",
+        "title": "AgentValidate[ConfigInput, Reference]",
         "type": "object"
       },
       "Answer": {
@@ -1830,7 +1914,7 @@
         ],
         "type": "string"
       },
-      "ChildEnvironmentInput": {
+      "ChildEnvironmentPolicy_Reference_": {
         "additionalProperties": false,
         "properties": {
           "mode": {
@@ -1854,12 +1938,11 @@
             ]
           }
         },
-        "title": "ChildEnvironmentInput",
+        "title": "ChildEnvironmentPolicy[Reference]",
         "type": "object"
       },
-      "ChildEnvironmentPolicy": {
+      "ChildEnvironmentPolicy_TypeVar_": {
         "additionalProperties": false,
-        "description": "What a child run mounts: no environment, the parent's, or a new one from `template_id`.",
         "properties": {
           "mode": {
             "default": "shared",
@@ -1871,21 +1954,18 @@
             "title": "Mode",
             "type": "string"
           },
-          "template_id": {
+          "template": {
             "anyOf": [
               {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
+                "$ref": "#/components/schemas/IdReference"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Template Id"
+            ]
           }
         },
-        "title": "ChildEnvironmentPolicy",
+        "title": "ChildEnvironmentPolicy[TypeVar]",
         "type": "object"
       },
       "ClientAuthentication": {
@@ -2023,12 +2103,12 @@
             "type": "string"
           },
           "media_understanding": {
-            "$ref": "#/components/schemas/MediaSelectionInput"
+            "$ref": "#/components/schemas/MediaUnderstandingSelection_Reference_"
           },
           "memory_mounts": {
             "default": [],
             "items": {
-              "$ref": "#/components/schemas/MemoryMountInput"
+              "$ref": "#/components/schemas/MemoryMount_Reference_"
             },
             "maxItems": 32,
             "title": "Memory Mounts",
@@ -2069,7 +2149,7 @@
           "reviewer": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ReviewerInput"
+                "$ref": "#/components/schemas/AgentReviewer_Reference_"
               },
               {
                 "type": "null"
@@ -2107,7 +2187,7 @@
             "maxProperties": 128,
             "patternProperties": {
               "^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$": {
-                "$ref": "#/components/schemas/SubagentInput"
+                "$ref": "#/components/schemas/SubagentSelection_Reference_"
               }
             },
             "title": "Subagents",
@@ -3774,7 +3854,7 @@
           "memories": {
             "default": [],
             "items": {
-              "$ref": "#/components/schemas/MemoryMountInput"
+              "$ref": "#/components/schemas/MemoryMount_Reference_"
             },
             "maxItems": 32,
             "title": "Memories",
@@ -4892,15 +4972,12 @@
           "audio": {
             "anyOf": [
               {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
+                "$ref": "#/components/schemas/IdReference"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Audio"
+            ]
           },
           "id": {
             "title": "Id",
@@ -4909,15 +4986,12 @@
           "image": {
             "anyOf": [
               {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
+                "$ref": "#/components/schemas/IdReference"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Image"
+            ]
           },
           "version": {
             "title": "Version",
@@ -4926,15 +5000,12 @@
           "video": {
             "anyOf": [
               {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
+                "$ref": "#/components/schemas/IdReference"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Video"
+            ]
           }
         },
         "required": [
@@ -4944,43 +5015,6 @@
         "title": "MediaDefaults",
         "type": "object"
       },
-      "MediaSelectionInput": {
-        "additionalProperties": false,
-        "properties": {
-          "audio": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Reference"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "image": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Reference"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "video": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Reference"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "title": "MediaSelectionInput",
-        "type": "object"
-      },
       "MediaUnderstandingSelection": {
         "additionalProperties": false,
         "description": "The model describing each media kind a model cannot read; a kind without one is unavailable.",
@@ -4988,44 +5022,72 @@
           "audio": {
             "anyOf": [
               {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
+                "$ref": "#/components/schemas/IdReference"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Audio"
+            ]
           },
           "image": {
             "anyOf": [
               {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
+                "$ref": "#/components/schemas/IdReference"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Image"
+            ]
           },
           "video": {
             "anyOf": [
               {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
+                "$ref": "#/components/schemas/IdReference"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Video"
+            ]
           }
         },
         "title": "MediaUnderstandingSelection",
+        "type": "object"
+      },
+      "MediaUnderstandingSelection_Reference_": {
+        "additionalProperties": false,
+        "properties": {
+          "audio": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Reference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "image": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Reference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "video": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Reference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "MediaUnderstandingSelection[Reference]",
         "type": "object"
       },
       "MemberPage": {
@@ -5624,39 +5686,8 @@
           "access": {
             "$ref": "#/components/schemas/MemoryAccess"
           },
-          "memory_id": {
-            "maxLength": 41,
-            "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-            "title": "Memory Id",
-            "type": "string"
-          },
-          "name": {
-            "pattern": "^[a-z][a-z0-9-]{0,62}$",
-            "title": "Name",
-            "type": "string"
-          },
-          "recall": {
-            "default": true,
-            "title": "Recall",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "name",
-          "access",
-          "memory_id"
-        ],
-        "title": "MemoryMount",
-        "type": "object"
-      },
-      "MemoryMountInput": {
-        "additionalProperties": false,
-        "properties": {
-          "access": {
-            "$ref": "#/components/schemas/MemoryAccess"
-          },
           "memory": {
-            "$ref": "#/components/schemas/Reference"
+            "$ref": "#/components/schemas/IdReference"
           },
           "name": {
             "pattern": "^[a-z][a-z0-9-]{0,62}$",
@@ -5674,7 +5705,7 @@
           "access",
           "memory"
         ],
-        "title": "MemoryMountInput",
+        "title": "MemoryMount",
         "type": "object"
       },
       "MemoryMountPage": {
@@ -5731,6 +5762,34 @@
           }
         },
         "title": "MemoryMountUpdate",
+        "type": "object"
+      },
+      "MemoryMount_Reference_": {
+        "additionalProperties": false,
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/MemoryAccess"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/Reference"
+          },
+          "name": {
+            "pattern": "^[a-z][a-z0-9-]{0,62}$",
+            "title": "Name",
+            "type": "string"
+          },
+          "recall": {
+            "default": true,
+            "title": "Recall",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "access",
+          "memory"
+        ],
+        "title": "MemoryMount[Reference]",
         "type": "object"
       },
       "MemoryPage": {
@@ -6344,32 +6403,6 @@
         "title": "Model",
         "type": "object"
       },
-      "ModelById": {
-        "additionalProperties": false,
-        "properties": {
-          "characteristics": {
-            "$ref": "#/components/schemas/AgentModelCharacteristics"
-          },
-          "id": {
-            "maxLength": 41,
-            "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-            "title": "Id",
-            "type": "string"
-          },
-          "settings": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/JsonValue"
-            },
-            "title": "Settings",
-            "type": "object"
-          }
-        },
-        "required": [
-          "id"
-        ],
-        "title": "ModelById",
-        "type": "object"
-      },
       "ModelByKey": {
         "additionalProperties": false,
         "properties": {
@@ -6630,7 +6663,7 @@
       "ModelInput": {
         "anyOf": [
           {
-            "$ref": "#/components/schemas/ModelById"
+            "$ref": "#/components/schemas/AgentModel"
           },
           {
             "$ref": "#/components/schemas/ModelByKey"
@@ -6650,7 +6683,7 @@
               }
             ]
           },
-          "model_id": {
+          "id": {
             "anyOf": [
               {
                 "maxLength": 41,
@@ -6661,7 +6694,7 @@
                 "type": "null"
               }
             ],
-            "title": "Model Id"
+            "title": "Id"
           },
           "settings": {
             "anyOf": [
@@ -6679,46 +6712,6 @@
           }
         },
         "title": "ModelOverride",
-        "type": "object"
-      },
-      "ModelOverrideById": {
-        "additionalProperties": false,
-        "properties": {
-          "characteristics": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/AgentModelCharacteristics"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "id": {
-            "maxLength": 41,
-            "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-            "title": "Id",
-            "type": "string"
-          },
-          "settings": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "$ref": "#/components/schemas/JsonValue"
-                },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Settings"
-          }
-        },
-        "required": [
-          "id"
-        ],
-        "title": "ModelOverrideById",
         "type": "object"
       },
       "ModelOverrideByKey": {
@@ -6760,47 +6753,13 @@
         "title": "ModelOverrideByKey",
         "type": "object"
       },
-      "ModelOverrideFields": {
-        "additionalProperties": false,
-        "properties": {
-          "characteristics": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/AgentModelCharacteristics"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "settings": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "$ref": "#/components/schemas/JsonValue"
-                },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Settings"
-          }
-        },
-        "title": "ModelOverrideFields",
-        "type": "object"
-      },
       "ModelOverrideInput": {
         "anyOf": [
           {
-            "$ref": "#/components/schemas/ModelOverrideById"
+            "$ref": "#/components/schemas/ModelOverride"
           },
           {
             "$ref": "#/components/schemas/ModelOverrideByKey"
-          },
-          {
-            "$ref": "#/components/schemas/ModelOverrideFields"
           }
         ]
       },
@@ -7352,7 +7311,7 @@
           "memories": {
             "default": [],
             "items": {
-              "$ref": "#/components/schemas/MemoryMountInput"
+              "$ref": "#/components/schemas/MemoryMount_Reference_"
             },
             "maxItems": 32,
             "title": "Memories",
@@ -7790,7 +7749,7 @@
           "media_understanding": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/MediaSelectionInput"
+                "$ref": "#/components/schemas/MediaUnderstandingSelection_Reference_"
               },
               {
                 "type": "null"
@@ -7845,7 +7804,7 @@
           "reviewer": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ReviewerInput"
+                "$ref": "#/components/schemas/AgentReviewer_Reference_"
               },
               {
                 "type": "null"
@@ -7875,7 +7834,7 @@
                   "^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$": {
                     "anyOf": [
                       {
-                        "$ref": "#/components/schemas/SubagentOverrideInput"
+                        "$ref": "#/components/schemas/SubagentOverride_Reference_"
                       },
                       {
                         "type": "null"
@@ -9134,95 +9093,6 @@
           }
         },
         "title": "RetryOverride",
-        "type": "object"
-      },
-      "ReviewerInput": {
-        "additionalProperties": false,
-        "properties": {
-          "instruction": {
-            "anyOf": [
-              {
-                "maxLength": 32768,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Instruction"
-          },
-          "model": {
-            "$ref": "#/components/schemas/Reference"
-          },
-          "model_settings": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "$ref": "#/components/schemas/JsonValue"
-                },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Model Settings"
-          },
-          "on_error": {
-            "default": "approval_required",
-            "enum": [
-              "deny",
-              "approval_required",
-              "allow"
-            ],
-            "title": "On Error",
-            "type": "string"
-          },
-          "on_flagged": {
-            "default": "deny",
-            "enum": [
-              "deny",
-              "approval_required"
-            ],
-            "title": "On Flagged",
-            "type": "string"
-          },
-          "risk_threshold": {
-            "$ref": "#/components/schemas/ToolRiskLevel",
-            "default": "extra_high"
-          },
-          "rules": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/ToolReviewRule"
-            },
-            "maxProperties": 1024,
-            "title": "Rules",
-            "type": "object"
-          },
-          "shell_instruction": {
-            "anyOf": [
-              {
-                "maxLength": 32768,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Shell Instruction"
-          },
-          "timeout_seconds": {
-            "default": 120,
-            "exclusiveMinimum": 0.0,
-            "maximum": 120.0,
-            "title": "Timeout Seconds",
-            "type": "number"
-          }
-        },
-        "required": [
-          "model"
-        ],
-        "title": "ReviewerInput",
         "type": "object"
       },
       "RevokedConnection": {
@@ -10495,35 +10365,6 @@
         "title": "Skill",
         "type": "object"
       },
-      "SkillById": {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "maxLength": 41,
-            "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-            "title": "Id",
-            "type": "string"
-          },
-          "revision_id": {
-            "anyOf": [
-              {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Revision Id"
-          }
-        },
-        "required": [
-          "id"
-        ],
-        "title": "SkillById",
-        "type": "object"
-      },
       "SkillByKey": {
         "additionalProperties": false,
         "properties": {
@@ -10653,7 +10494,7 @@
       "SkillInput": {
         "anyOf": [
           {
-            "$ref": "#/components/schemas/SkillById"
+            "$ref": "#/components/schemas/SkillSelection"
           },
           {
             "$ref": "#/components/schemas/SkillByKey"
@@ -10932,6 +10773,12 @@
       "SkillSelection": {
         "additionalProperties": false,
         "properties": {
+          "id": {
+            "maxLength": 41,
+            "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
+            "title": "Id",
+            "type": "string"
+          },
           "revision_id": {
             "anyOf": [
               {
@@ -10944,16 +10791,10 @@
               }
             ],
             "title": "Revision Id"
-          },
-          "skill_id": {
-            "maxLength": 41,
-            "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-            "title": "Skill Id",
-            "type": "string"
           }
         },
         "required": [
-          "skill_id"
+          "id"
         ],
         "title": "SkillSelection",
         "type": "object"
@@ -11311,76 +11152,19 @@
         "title": "SpanPage",
         "type": "object"
       },
-      "SubagentInput": {
+      "SubagentOverride": {
         "additionalProperties": false,
+        "description": "Replaces the fields it sets of an edge; an edge the revision lacks sets at least `agent`.",
         "properties": {
           "agent": {
-            "$ref": "#/components/schemas/Reference"
-          },
-          "context": {
-            "$ref": "#/components/schemas/DelegationContextPolicy"
-          },
-          "description": {
             "anyOf": [
               {
-                "maxLength": 4096,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description"
-          },
-          "environment": {
-            "$ref": "#/components/schemas/ChildEnvironmentInput"
-          },
-          "revision_id": {
-            "anyOf": [
-              {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Revision Id"
-          },
-          "usage_limits": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/UsageLimits-Input"
+                "$ref": "#/components/schemas/IdReference"
               },
               {
                 "type": "null"
               }
             ]
-          }
-        },
-        "required": [
-          "agent"
-        ],
-        "title": "SubagentInput",
-        "type": "object"
-      },
-      "SubagentOverride": {
-        "additionalProperties": false,
-        "description": "Replaces the fields it sets of an edge; an edge the revision lacks sets at least `agent_id`.",
-        "properties": {
-          "agent_id": {
-            "anyOf": [
-              {
-                "maxLength": 41,
-                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Agent Id"
           },
           "context": {
             "anyOf": [
@@ -11407,7 +11191,7 @@
           "environment": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ChildEnvironmentPolicy"
+                "$ref": "#/components/schemas/ChildEnvironmentPolicy_TypeVar_"
               },
               {
                 "type": "null"
@@ -11441,7 +11225,7 @@
         "title": "SubagentOverride",
         "type": "object"
       },
-      "SubagentOverrideInput": {
+      "SubagentOverride_Reference_": {
         "additionalProperties": false,
         "properties": {
           "agent": {
@@ -11479,7 +11263,7 @@
           "environment": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ChildEnvironmentInput"
+                "$ref": "#/components/schemas/ChildEnvironmentPolicy_Reference_"
               },
               {
                 "type": "null"
@@ -11510,17 +11294,14 @@
             ]
           }
         },
-        "title": "SubagentOverrideInput",
+        "title": "SubagentOverride[Reference]",
         "type": "object"
       },
       "SubagentSelection": {
         "additionalProperties": false,
         "properties": {
-          "agent_id": {
-            "maxLength": 41,
-            "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-            "title": "Agent Id",
-            "type": "string"
+          "agent": {
+            "$ref": "#/components/schemas/IdReference"
           },
           "context": {
             "$ref": "#/components/schemas/DelegationContextPolicy"
@@ -11538,7 +11319,7 @@
             "title": "Description"
           },
           "environment": {
-            "$ref": "#/components/schemas/ChildEnvironmentPolicy"
+            "$ref": "#/components/schemas/ChildEnvironmentPolicy_TypeVar_"
           },
           "revision_id": {
             "anyOf": [
@@ -11565,9 +11346,63 @@
           }
         },
         "required": [
-          "agent_id"
+          "agent"
         ],
         "title": "SubagentSelection",
+        "type": "object"
+      },
+      "SubagentSelection_Reference_": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "$ref": "#/components/schemas/Reference"
+          },
+          "context": {
+            "$ref": "#/components/schemas/DelegationContextPolicy"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "environment": {
+            "$ref": "#/components/schemas/ChildEnvironmentPolicy_Reference_"
+          },
+          "revision_id": {
+            "anyOf": [
+              {
+                "maxLength": 41,
+                "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision Id"
+          },
+          "usage_limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageLimits-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "agent"
+        ],
+        "title": "SubagentSelection[Reference]",
         "type": "object"
       },
       "Submitted": {
@@ -13833,7 +13668,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AgentValidateInput"
+                "$ref": "#/components/schemas/AgentValidate_ConfigInput_Reference_"
               }
             }
           },
@@ -17579,7 +17414,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/MediaSelectionInput"
+                "$ref": "#/components/schemas/MediaUnderstandingSelection_Reference_"
               }
             }
           },
@@ -27245,7 +27080,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/MemoryMountInput"
+                "$ref": "#/components/schemas/MemoryMount_Reference_"
               }
             }
           },

@@ -577,7 +577,7 @@ async def test_pins_and_the_agents_pinning_a_skill(service) -> None:  # type: ig
                 workspace_id=workspace_id,
                 agent_id=agent_id,
                 number=1,
-                config={"skills": [{"skill_id": skill["id"], "revision_id": revision_id}]},
+                config={"skills": [{"id": skill["id"], "revision_id": revision_id}]},
                 digest="0" * 64,
                 created_by_id=service.tenant.principal_id,
             )
