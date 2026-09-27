@@ -55,9 +55,7 @@ const config = {
       tools: { shell: { permission: "ask" as const } },
     },
   },
-  secret_requirements: [
-    { key: "research_token", secret_id: "sec_0123456789abcdef0123" },
-  ],
+  secret_requirements: [{ key: "research_token" }],
   subagents: {
     helper: {
       agent_id: "ap_0123456789abcdef0123",
@@ -133,16 +131,16 @@ it("remaps one selected reference without discarding settings or other dependenc
   const refs = agentDependencies(config);
   const skill = refs.find((item) => item.kind === "skill")!;
   expect(skill.revision).toBe("skr_0123456789abcdef01234567");
-  expect(skill.replace("sk_0123456789abcdef0123")).toEqual(config);
+  expect(skill.replace!("sk_0123456789abcdef0123")).toEqual(config);
   // A revision pin belongs to the skill it names, so another skill runs its own default.
-  expect(skill.replace("sk_fedcba9876543210fedc")).toEqual({
+  expect(skill.replace!("sk_fedcba9876543210fedc")).toEqual({
     ...config,
     skills: [{ skill_id: "sk_fedcba9876543210fedc", revision_id: null }],
   });
   expect(config.skills[0]!.skill_id).toBe("sk_0123456789abcdef0123");
-  const connection = refs
-    .find((item) => item.kind === "connection")!
-    .replace("conn_fedcba9876543210fedc");
+  const connection = refs.find((item) => item.kind === "connection")!.replace!(
+    "conn_fedcba9876543210fedc",
+  );
   expect(connection.connection_tools?.[0]).toEqual({
     ...config.connection_tools[0],
     connection_id: "conn_fedcba9876543210fedc",
@@ -151,9 +149,9 @@ it("remaps one selected reference without discarding settings or other dependenc
 
 it("remaps Web search and scrape independently while retaining complete toolset settings", () => {
   const refs = agentDependencies(config);
-  const updated = refs
-    .find((item) => item.path.includes(".scrape."))!
-    .replace("wprov_local");
+  const updated = refs.find((item) => item.path.includes(".scrape."))!.replace!(
+    "wprov_local",
+  );
   expect(updated.toolsets).toEqual({
     ...config.toolsets,
     web: {

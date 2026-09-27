@@ -74,18 +74,12 @@ class ReviewerInput(ToolReviewPolicy):
     on_error: Literal["deny", "approval_required", "allow"] = "approval_required"
 
 
-class SecretRequirementInput(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    secret: Reference
-
-
 class ConfigInput(ConfigFields):
     model: ModelInput
     skills: tuple[SkillInput, ...] = Field(default=(), max_length=512)
     subagents: dict[BoundedKey, SubagentInput] = Field(default_factory=dict, max_length=128)
     reviewer: ReviewerInput | None = None
     media_understanding: MediaSelectionInput = Field(default_factory=MediaSelectionInput)
-    secret_requirements: tuple[SecretRequirementInput, ...] = Field(default=(), max_length=128)
     default_environment_template: Reference | None = None
     memory_mounts: MemoryMountsInput = ()
 

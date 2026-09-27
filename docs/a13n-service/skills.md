@@ -68,10 +68,11 @@ All secrets belong to the workspace. `read` reveals metadata only; `write` creat
 
 `PUT …/secrets/{secret_id}` with `{value}` and `If-Match` replaces the value. The key is immutable. `DELETE` removes the instance and releases its key, but the next instance always has a different ID.
 
-An agent input declares `secret_requirements`, for example `[{"secret": {"key": "JIRA_TOKEN"}}]` or `[{"secret": {"id": "sec_..."}}]`. The Service resolves that selection once and stores its ID and credential audience key.
+An agent declares `secret_requirements: [{"key": "JIRA_TOKEN"}]`. The same key is saved in its configuration and used as the tool's credential audience. Secret IDs are only used to manage the secret itself.
 
-- Before a run starts, every declared ID must exist. A missing one fails the run naming its ID, without decrypting values.
-- A tool receives a value only when its agent declares the requested audience and the call is authorized. Inline subagents use their own declarations.
-- Values are read and decrypted per call. Rotation applies to the next call. Deleting a secret makes its old references fail even if a new secret reuses the key.
+- Before a run starts, every declared key must exist in its workspace. A missing one fails the run naming its key, without decrypting values.
+- A tool receives a value only when its agent declares the requested key and the call is authorized. Inline subagents use their own declarations.
+- Each call looks up the key in the run's workspace and decrypts its current value. Rotation applies to the next call. Deletion makes calls fail while the key is missing; recreating the same key lets the next authorized call use the replacement without editing the agent.
+- When importing an agent into another workspace, create its required secrets there with the same keys. Import checks those keys without remapping them to different names or copying secret values.
 
 Secrets are not injected into environments or connection requests; connections and providers keep their own write-only credentials.

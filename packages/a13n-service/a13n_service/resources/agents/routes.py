@@ -81,7 +81,9 @@ async def list_agents(
     """Agents of the workspace. `q` matches the key, name or description, ignoring case; `archived` keeps only
     archived agents, or only open ones; the skill filters keep those with a revision pinning that skill or
     revision."""
-    skill_id = None if skill is None else await resolve_id(runtime.storage, workspace.workspace_id, SkillRow, skill)
+    skill_id = (
+        None if skill is None else await resolve_id(runtime.storage, actor, workspace.workspace_id, SkillRow, skill)
+    )
     return await service.list_agents(
         runtime.storage,
         actor,

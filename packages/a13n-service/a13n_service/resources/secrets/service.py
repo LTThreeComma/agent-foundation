@@ -118,7 +118,7 @@ async def replace_secret(
 async def delete_secret(
     storage: Storage, actor: Principal, workspace_id: str, secret_id: str, *, if_match: str | None
 ) -> None:
-    """Later uses of this ID fail, even if its key is reused; accepted runs keep no copy of the value."""
+    """Release the key for a replacement; accepted runs keep no copy of the value."""
     async with transaction(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
         row = await find_row(session, actor, SecretRow, scope, secret_id, "write", lock=True)
@@ -136,7 +136,7 @@ class StoredSecret:
 async def required_secrets(
     storage: Storage, workspace_id: str, requirements: Sequence[SecretRequirement]
 ) -> dict[str, StoredSecret]:
-    """Check the fixed identities and detach encrypted values; this never reveals plaintext."""
+    """Resolve keys within one workspace and detach encrypted values without revealing plaintext."""
     if not requirements:
         return {}
     async with short_session(storage) as session:
@@ -144,16 +144,16 @@ async def required_secrets(
             await session.scalars(
                 select(SecretRow).where(
                     SecretRow.workspace_id == workspace_id,
-                    SecretRow.id.in_({requirement.secret_id for requirement in requirements}),
+                    SecretRow.key.in_({requirement.key for requirement in requirements}),
                 )
             )
         ).all()
-        found = {row.id: StoredSecret(Envelope.model_validate(row.ciphertext), _location(row)) for row in rows}
+        found = {row.key: StoredSecret(Envelope.model_validate(row.ciphertext), _location(row)) for row in rows}
     selected = {}
     for requirement in requirements:
-        value = found.get(requirement.secret_id)
+        value = found.get(requirement.key)
         if value is None:
-            raise not_found(SecretRow.KIND, requirement.secret_id)
+            raise not_found(SecretRow.KIND, requirement.key)
         selected[requirement.key] = value
     return selected
 
@@ -165,6 +165,6 @@ async def resolve_secrets(
     workspace_id: str,
     requirements: Sequence[SecretRequirement],
 ) -> dict[str, SecretStr]:
-    """Reveal each fixed identity's current value for an authorized tool call, after closing the session."""
+    """Reveal the current value for each key during an authorized tool call, after closing the session."""
     selected = await required_secrets(storage, workspace_id, requirements)
     return {key: SecretStr(keys.reveal(value.envelope, value.location).decode()) for key, value in selected.items()}

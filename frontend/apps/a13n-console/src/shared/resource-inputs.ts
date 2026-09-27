@@ -48,7 +48,6 @@ export function configInput(
     subagents,
     default_environment_template_id,
     memory_mounts,
-    secret_requirements,
     ...fields
   } = config;
   const { model_id, ...modelFields } = model;
@@ -78,9 +77,6 @@ export function configInput(
         ? default_environment_template_id
         : { id: default_environment_template_id },
     memory_mounts: memory_mounts?.map(memoryInput),
-    secret_requirements: secret_requirements?.map(({ secret_id }) => ({
-      secret: { id: secret_id },
-    })),
   };
 }
 export function overrideInput(

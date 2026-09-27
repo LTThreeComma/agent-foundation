@@ -5,17 +5,14 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints
 
-from a13n_service.infra.ids import ObjectId
-
 SecretKey = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")]
 SecretValue = Annotated[SecretStr, Field(min_length=1, max_length=16384)]
 
 
 class SecretRequirement(BaseModel):
-    """A fixed secret identity and its tool audience; values are read only when used."""
+    """A tool audience resolved by key in the run's workspace whenever it is used."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    secret_id: ObjectId
     key: SecretKey
 
 

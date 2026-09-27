@@ -38,7 +38,6 @@ from a13n_harness.tools.metadata import HarnessTool, HarnessToolMetadata, ToolOu
 from a13n_service.distribution import OSS
 from a13n_service.infra.db import short_session
 from a13n_service.infra.errors import ServiceError
-from a13n_service.infra.ids import new_object_id
 from a13n_service.providers.environments.local import LocalEnvironment
 from a13n_service.providers.registry import Registry
 from a13n_service.resources.agents.schemas import SkillSelection
@@ -48,7 +47,7 @@ from a13n_service.resources.providers.schemas import ProviderCreate
 from a13n_service.resources.providers.service import create_provider
 from a13n_service.resources.providers.tables import WebProviderRow
 from a13n_service.resources.secrets.schemas import SecretCreate, SecretRequirement
-from a13n_service.resources.secrets.service import create_secret
+from a13n_service.resources.secrets.service import create_secret, delete_secret
 from a13n_service.resources.skills.github import GitHub
 from a13n_service.resources.skills.schemas import SkillCreate, UploadSource
 from a13n_service.resources.skills.service import create_skill
@@ -395,12 +394,12 @@ async def test_a_tool_gets_only_the_secrets_its_node_declares(runtime, tenant) -
     secret = await create_secret(runtime.storage, runtime.keys, admin(tenant), tenant.workspace_id, body)
     row = run_row(tenant)
     requirements = {
-        REVISION: [SecretRequirement(secret_id=secret.id, key="API_KEY")],
-        CHILD: [SecretRequirement(secret_id=new_object_id("sec"), key="OTHER")],
+        REVISION: [SecretRequirement(key="API_KEY")],
+        CHILD: [SecretRequirement(key="OTHER")],
     }
     with pytest.raises(ServiceError) as missing:
         await require_secrets(runtime, row.workspace_id, requirements)
-    assert missing.value.details == {"kind": "secret", "id": requirements[CHILD][0].secret_id}
+    assert missing.value.details == {"kind": "secret", "id": requirements[CHILD][0].key}
     await require_secrets(runtime, row.workspace_id, {REVISION: requirements[REVISION]})
 
     policy = secrets_policy(runtime, row.workspace_id, row.agent_revision_id, requirements)
@@ -411,6 +410,23 @@ async def test_a_tool_gets_only_the_secrets_its_node_declares(runtime, tenant) -
     denied, used = script.results
     assert "denied" in str(denied) and used == {"ok": True, "length": len(VALUE)}
     assert VALUE not in result.state.model_dump_json()
+
+    # The existing policy keeps only keys: the next call uses a replacement without a new revision.
+    await delete_secret(
+        runtime.storage, admin(tenant), tenant.workspace_id, secret.id, if_match=f'"{secret.id}:{secret.version}"'
+    )
+    replacement = await create_secret(
+        runtime.storage,
+        runtime.keys,
+        admin(tenant),
+        tenant.workspace_id,
+        SecretCreate.model_validate({"key": "API_KEY", "value": VALUE + "-replacement"}),
+    )
+    assert replacement.id != secret.id
+    script = Script([("use_key", {}, "call_replacement"), "done"])
+    result = await run(script, [tools], capabilities=(policy,))
+    assert script.results == [{"ok": True, "length": len(VALUE + "-replacement")}]
+    assert result.state is not None and VALUE not in result.state.model_dump_json()
 
     # An inline child runs under its own definition ID and may use only what that revision declares.
     def node(parent: str | None, definition_id: str | None) -> Any:

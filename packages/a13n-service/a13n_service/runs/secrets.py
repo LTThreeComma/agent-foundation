@@ -27,8 +27,8 @@ type Requirements = Mapping[str, Sequence[SecretRequirement]]
 
 
 async def require_secrets(runtime: Runtime, workspace_id: str, requirements: Requirements) -> None:
-    """Fail before the run starts, with the missing ID, when a declared secret is not set."""
-    declared = {item.secret_id: item for items in requirements.values() for item in items}
+    """Fail before the run starts, with the missing key, when a declared secret is not set."""
+    declared = {item.key: item for items in requirements.values() for item in items}
     await required_secrets(runtime.storage, workspace_id, list(declared.values()))
 
 

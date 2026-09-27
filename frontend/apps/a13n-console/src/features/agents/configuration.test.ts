@@ -7,9 +7,7 @@ test("ordinary editing preserves hidden configuration and leaves omission distin
   const original = {
     ...initialConfig(),
     model,
-    secret_requirements: [
-      { key: "support_token", secret_id: "sec_0123456789abcdef0123" },
-    ],
+    secret_requirements: [{ key: "support_token" }],
   };
   const config = buildConfig(
     original,

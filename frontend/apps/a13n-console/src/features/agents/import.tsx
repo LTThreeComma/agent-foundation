@@ -364,24 +364,28 @@ export function ImportAgentForm({
                         </span>
                       )}
                     </div>
-                    <SearchPicker
-                      label={ref.path}
-                      placeholder={ref.value}
-                      emptyMessage={t("No available resources")}
-                      value={ref.value}
-                      disabled={create.isPending || dependencies.isFetching}
-                      groups={[
-                        {
-                          label: t("Available resources"),
-                          options: check?.options ?? [],
-                        },
-                      ]}
-                      onValueChange={(value) => {
-                        setDraft({ ...draft, config: ref.replace(value) });
-                        create.reset();
-                        setError(undefined);
-                      }}
-                    />
+                    {ref.replace ? (
+                      <SearchPicker
+                        label={ref.path}
+                        placeholder={ref.value}
+                        emptyMessage={t("No available resources")}
+                        value={ref.value}
+                        disabled={create.isPending || dependencies.isFetching}
+                        groups={[
+                          {
+                            label: t("Available resources"),
+                            options: check?.options ?? [],
+                          },
+                        ]}
+                        onValueChange={(value) => {
+                          setDraft({ ...draft, config: ref.replace!(value) });
+                          create.reset();
+                          setError(undefined);
+                        }}
+                      />
+                    ) : (
+                      <p>{ref.value}</p>
+                    )}
                     {check?.issue && (
                       <p role="alert" className={styles.dependencyIssue}>
                         {t(check.issue)}

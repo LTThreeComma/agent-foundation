@@ -141,7 +141,7 @@ def seed_agents(api: Api, ws: str, local: Local, skills: dict[str, Json], connec
             {"team": "platform"},
             default_environment_template={"id": local.template["id"]},
             skills=[{"id": skills["accessibility-review"]["id"]}],
-            secret_requirements=[{"secret": {"key": "RELEASE_TOKEN"}}],
+            secret_requirements=[{"key": "RELEASE_TOKEN"}],
         ),
     )
     api.put(f"{ws}/agents/{cast.writer['id']}/avatar", cast.writer, png())

@@ -60,7 +60,7 @@ async def list_sessions(
     agent_id = (
         None
         if query.agent is None
-        else await resolve_id(runtime.storage, workspace.workspace_id, AgentRow, query.agent)
+        else await resolve_id(runtime.storage, actor, workspace.workspace_id, AgentRow, query.agent)
     )
     selected = SessionQuery(**query.model_dump(exclude={"agent"}), agent_id=agent_id)
     return await sessions.list_sessions(runtime.storage, actor, workspace.workspace_id, selected)

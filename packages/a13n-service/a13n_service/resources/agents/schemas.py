@@ -175,6 +175,7 @@ class ConfigFields(_Frozen):
     plugins: tuple[PluginSelection, ...] = Field(default=(), max_length=128)
     output_spec: OutputSpec | None = None
     retries: RetryConfig | None = None
+    secret_requirements: tuple[SecretRequirement, ...] = Field(default=(), max_length=128)
 
 
 class AgentConfig(ConfigFields):
@@ -185,7 +186,6 @@ class AgentConfig(ConfigFields):
     subagents: dict[BoundedKey, SubagentSelection] = Field(default_factory=dict, max_length=128)
     reviewer: AgentReviewer | None = None
     media_understanding: MediaUnderstandingSelection = Field(default_factory=MediaUnderstandingSelection)
-    secret_requirements: tuple[SecretRequirement, ...] = Field(default=(), max_length=128)
     # Referenced, not pinned: read when an environment is created from it, never during execution.
     default_environment_template_id: ObjectId | None = None
     # Added to a thread's memory mounts at its first acceptance, for names and memories it does not use yet.

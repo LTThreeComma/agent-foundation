@@ -21,7 +21,7 @@ export interface AgentDependency {
   value: string;
   /** The pinned revision of a skill or subagent, which belongs to `value` only. */
   revision?: string | null;
-  replace: (value: string) => AgentConfig;
+  replace?: (value: string) => AgentConfig;
 }
 export interface DependencyOption {
   value: string;
@@ -133,15 +133,9 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
     config.secret_requirements ?? []
   ).entries())
     refs.push({
-      path: `secret_requirements.${index}.secret_id`,
+      path: `secret_requirements.${index}.key`,
       kind: "secret",
-      value: requirement.secret_id,
-      replace: (value) => ({
-        ...config,
-        secret_requirements: config.secret_requirements?.map((item, i) =>
-          i === index ? { ...item, secret_id: value } : item,
-        ),
-      }),
+      value: requirement.key,
     });
   for (const [name, child] of Object.entries(config.subagents ?? {})) {
     refs.push({
@@ -294,7 +288,7 @@ export async function inspectAgentDependencies(
             .then(data),
         );
         return items.map((item) => ({
-          value: item.id,
+          value: item.key,
           label: item.key,
           id: item.id,
         }));
@@ -350,7 +344,10 @@ export async function inspectAgentDependencies(
           path: ref.path,
           options,
           available: false,
-          issue: "Dependency unavailable. Choose a resource in this workspace.",
+          issue:
+            ref.kind === "secret"
+              ? "Required secret is missing. Create a secret with this key in this workspace."
+              : "Dependency unavailable. Choose a resource in this workspace.",
         };
       if (ref.revision && (ref.kind === "skill" || ref.kind === "agent")) {
         const id = selected.id;

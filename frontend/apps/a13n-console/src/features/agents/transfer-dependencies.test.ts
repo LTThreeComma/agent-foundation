@@ -9,7 +9,7 @@ import {
 
 const signal = new AbortController().signal;
 
-it("requires remapping a secret identity even when its key exists in the destination", async () => {
+it("uses a same-key secret in the destination without remapping its identity", async () => {
   const { client } = clientFor((url) => ({
     items: url.pathname.endsWith("/secrets")
       ? [{ id: "sec_target", key: "TOKEN" }]
@@ -18,7 +18,7 @@ it("requires remapping a secret identity even when its key exists in the destina
   const config = {
     ...initialConfig(),
     model: { model_id: "mdl_local" },
-    secret_requirements: [{ secret_id: "sec_source", key: "TOKEN" }],
+    secret_requirements: [{ key: "TOKEN" }],
   };
   const checks = await inspectAgentDependencies(
     client,
@@ -28,17 +28,41 @@ it("requires remapping a secret identity even when its key exists in the destina
     signal,
   );
   expect(
-    checks.find((item) => item.path === "secret_requirements.0.secret_id"),
+    checks.find((item) => item.path === "secret_requirements.0.key"),
+  ).toMatchObject({
+    available: true,
+    options: [{ value: "TOKEN", id: "sec_target", label: "TOKEN" }],
+  });
+  expect(
+    agentDependencies(config).find((item) => item.kind === "secret")!.replace,
+  ).toBeUndefined();
+  expect(configInput(config).secret_requirements).toEqual([{ key: "TOKEN" }]);
+});
+
+it("requires the declared secret key even when another secret is available", async () => {
+  const { client } = clientFor((url) => ({
+    items: url.pathname.endsWith("/secrets")
+      ? [{ id: "sec_other", key: "OTHER_TOKEN" }]
+      : [{ id: "mdl_local", key: "model", name: "Model", enabled: true }],
+  }));
+  const checks = await inspectAgentDependencies(
+    client,
+    "org_target",
+    "ws_target",
+    {
+      ...initialConfig(),
+      model: { model_id: "mdl_local" },
+      secret_requirements: [{ key: "TOKEN" }],
+    },
+    signal,
+  );
+  expect(
+    checks.find((item) => item.path === "secret_requirements.0.key"),
   ).toMatchObject({
     available: false,
-    options: [{ value: "sec_target", id: "sec_target", label: "TOKEN" }],
+    issue:
+      "Required secret is missing. Create a secret with this key in this workspace.",
   });
-  const replaced = agentDependencies(config)
-    .find((item) => item.kind === "secret")!
-    .replace("sec_target");
-  expect(configInput(replaced).secret_requirements).toEqual([
-    { secret: { id: "sec_target" } },
-  ]);
 });
 
 function clientFor(read: (url: URL) => object) {
@@ -222,9 +246,9 @@ it("blocks an unavailable root template and remaps only its identity", async () 
   );
   expect(root?.available).toBe(false);
   expect(root?.options.map((item) => item.value)).toEqual(["et_local"]);
-  const replaced = agentDependencies(config)
-    .find((item) => item.path === "default_environment_template_id")!
-    .replace("et_local");
+  const replaced = agentDependencies(config).find(
+    (item) => item.path === "default_environment_template_id",
+  )!.replace!("et_local");
   expect(replaced).toEqual({
     ...config,
     default_environment_template_id: "et_local",
@@ -315,7 +339,7 @@ it("lists every selected media model and remaps one kind at a time", () => {
     }),
   ]);
   const image = refs.find((ref) => ref.path === "media_understanding.image")!;
-  expect(image.replace("mdl_eyes").media_understanding).toEqual({
+  expect(image.replace!("mdl_eyes").media_understanding).toEqual({
     image: "mdl_eyes",
     video: null,
     audio: "mdl_speech",
@@ -398,9 +422,9 @@ it("checks default memory mounts and remaps only the memory", async () => {
       new URL(new Request(request).url).pathname.endsWith("/memories"),
     ),
   ).toHaveLength(1);
-  const replaced = agentDependencies(config)
-    .find((item) => item.path === "memory_mounts.1.memory_id")!
-    .replace("mem_local");
+  const replaced = agentDependencies(config).find(
+    (item) => item.path === "memory_mounts.1.memory_id",
+  )!.replace!("mem_local");
   expect(replaced.memory_mounts).toEqual([
     config.memory_mounts[0],
     { name: "prefs", memory_id: "mem_local", access: "write" },

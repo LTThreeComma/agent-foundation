@@ -15,6 +15,8 @@ from sqlalchemy.orm import Mapped
 from a13n_service.infra.db import Storage, short_session
 from a13n_service.infra.errors import ServiceError, invalid, not_found
 from a13n_service.infra.ids import OBJECT_ID_PATTERN, ObjectId
+from a13n_service.tenancy.access import workspace_scope
+from a13n_service.tenancy.authorize import Principal
 
 # Resource kinds retain their own key rules; this is the union of their address alphabets.
 ReferenceKey = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")]
@@ -128,9 +130,12 @@ def resolved_model[M: BaseModel](model: type[M], values: object) -> M:
         ) from None
 
 
-async def resolve_id(storage: Storage, workspace_id: str, table: type[KeyedRow], reference: str) -> str:
-    """Resolve a path or query address after the caller authorizes the workspace."""
+async def resolve_id(
+    storage: Storage, actor: Principal, workspace_id: str, table: type[KeyedRow], reference: str
+) -> str:
+    """Authorize the workspace before resolving a key or validating a query filter's ID."""
     parsed = parse_reference(reference)
     async with short_session(storage) as session:
-        rows = await resolve_many(session, table, workspace_id, [parsed])
+        scope = await workspace_scope(session, actor, workspace_id, "read")
+        rows = await resolve_many(session, table, scope.workspace_id, [parsed])
         return rows[parsed].id

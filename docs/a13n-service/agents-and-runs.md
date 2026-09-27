@@ -28,7 +28,7 @@ The built-in [Agent Composer](agent-composer.md) is an agent too; it cannot be c
 
 ### Agent configuration
 
-When creating an agent or revision, `config` accepts the following fields. Stored revisions return canonical IDs for all resource references.
+When creating an agent or revision, `config` accepts the following fields. Stored revisions return canonical IDs for resource references and retain Secret requirement keys.
 
 | Field                          | Meaning                                                                                                                                                                          |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

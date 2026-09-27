@@ -3590,7 +3590,7 @@ export interface components {
        * Secret Requirements
        * @default []
        */
-      secret_requirements?: components["schemas"]["SecretRequirementInput"][];
+      secret_requirements?: components["schemas"]["SecretRequirement"][];
       /**
        * Skills
        * @default []
@@ -6106,17 +6106,11 @@ export interface components {
     };
     /**
      * SecretRequirement
-     * @description A fixed secret identity and its tool audience; values are read only when used.
+     * @description A tool audience resolved by key in the run's workspace whenever it is used.
      */
     SecretRequirement: {
       /** Key */
       key: string;
-      /** Secret Id */
-      secret_id: string;
-    };
-    /** SecretRequirementInput */
-    SecretRequirementInput: {
-      secret: components["schemas"]["Reference"];
     };
     /** SecretUpdate */
     SecretUpdate: {

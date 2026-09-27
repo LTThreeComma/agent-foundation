@@ -101,12 +101,19 @@ async def test_nested_references_resolve_once_and_all_keyed_kinds_keep_their_key
             "skills": [{"key": "box"}],
             "subagents": {"helper": {"agent": {"key": "builder"}}},
             "default_environment_template": {"key": "box"},
-            "secret_requirements": [{"secret": {"key": "box"}}],
+            "secret_requirements": [{"key": "box"}],
             "memory_mounts": [{"name": "box", "memory": {"key": "box"}, "access": "read"}],
         },
     }
     for malformed in ({}, {"id": model["id"], "key": "unused"}, "unused"):
         invalid_body = {**body, "config": {"model": malformed}}
+        assert (await client.post("/api/v1/agents", json=invalid_body)).status_code == 400
+    for legacy in (
+        {"secret_id": secret["id"], "key": "box"},
+        {"secret": {"key": "box"}},
+        {"secret": {"id": secret["id"]}},
+    ):
+        invalid_body = {**body, "config": {**body["config"], "secret_requirements": [legacy]}}
         assert (await client.post("/api/v1/agents", json=invalid_body)).status_code == 400
     counts: Counter[str] = Counter()
     tables = (AgentRow, SkillRow, ModelRow, MemoryRow, EnvironmentTemplateRow, SecretRow)
@@ -123,7 +130,7 @@ async def test_nested_references_resolve_once_and_all_keyed_kinds_keep_their_key
     finally:
         event.remove(engine, "before_cursor_execute", count_references)
     assert created.status_code == 201, created.text
-    assert counts == {table.__tablename__: 1 for table in tables}
+    assert counts == {table.__tablename__: 1 for table in tables if table is not SecretRow}
     agent = created.json()
     revision = (await client.get(f"/api/v1/agents/{agent['id']}/revisions/{agent['default_revision_id']}")).json()
     config = revision["config"]
@@ -133,7 +140,7 @@ async def test_nested_references_resolve_once_and_all_keyed_kinds_keep_their_key
     assert config["subagents"]["helper"]["revision_id"] == service.agent["default_revision_id"]
     assert config["default_environment_template_id"] == service.template["id"]
     assert config["memory_mounts"][0]["memory_id"] == memory["id"]
-    assert config["secret_requirements"] == [{"secret_id": secret["id"], "key": "box"}]
+    assert config["secret_requirements"] == [{"key": "box"}]
 
     for table, item, collection in (
         (AgentRow, agent, "agents"),
@@ -158,3 +165,29 @@ async def test_nested_references_resolve_once_and_all_keyed_kinds_keep_their_key
     assert archived.status_code == 200, archived.text
     duplicate = await client.post("/api/v1/agents", json=body)
     assert duplicate.status_code == 409 and duplicate.json()["error"]["code"] == "already_exists"
+
+
+async def test_id_paths_read_the_workspace_and_resource_only_once(service) -> None:  # type: ignore[no-untyped-def]
+    from collections import Counter
+
+    from sqlalchemy import event
+
+    client = service.client
+    created = await client.post("/api/v1/secrets", json={"key": "TOKEN", "value": "value"})
+    assert created.status_code == 201
+    counts: Counter[str] = Counter()
+
+    def count_reads(connection, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        if statement.startswith("SELECT"):
+            for table in ("workspaces", "secrets"):
+                if f"FROM {table} " in statement or f"FROM {table}\n" in statement:
+                    counts[table] += 1
+
+    engine = service.runtime.storage.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", count_reads)
+    try:
+        response = await client.get(f"/api/v1/secrets/{created.json()['id']}")
+    finally:
+        event.remove(engine, "before_cursor_execute", count_reads)
+    assert response.status_code == 200
+    assert counts == {"workspaces": 1, "secrets": 1}

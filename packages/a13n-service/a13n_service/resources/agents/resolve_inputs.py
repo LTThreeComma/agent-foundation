@@ -11,7 +11,6 @@ from a13n_service.resources.memories.tables import MemoryRow
 from a13n_service.resources.models.inputs import collect_media, media_ids
 from a13n_service.resources.models.tables import ModelRow
 from a13n_service.resources.references import IdReference, KeyReference, ReferenceBatch, resolved_model
-from a13n_service.resources.secrets.tables import SecretRow
 from a13n_service.resources.skills.tables import SkillRow
 
 
@@ -31,8 +30,6 @@ def collect_config(batch: ReferenceBatch, config: ConfigInput | OverrideInput) -
                 batch.add(EnvironmentTemplateRow, edge.environment.template)
     if isinstance(config, ConfigInput):
         batch.add(EnvironmentTemplateRow, config.default_environment_template)
-        for requirement in config.secret_requirements:
-            batch.add(SecretRow, requirement.secret)
         for mount in config.memory_mounts:
             batch.add(MemoryRow, mount.memory)
 
@@ -83,11 +80,6 @@ def config_ids(batch: ReferenceBatch, config: ConfigInput) -> AgentConfig:
         else batch.id(EnvironmentTemplateRow, config.default_environment_template)
     )
     values["memory_mounts"] = [mount_ids(batch, mount) for mount in config.memory_mounts]
-    values["secret_requirements"] = [
-        {"secret_id": row.id, "key": row.key}
-        for requirement in config.secret_requirements
-        for row in [batch.row(SecretRow, requirement.secret)]
-    ]
     return resolved_model(AgentConfig, values)
 
 

@@ -910,6 +910,12 @@ async def test_paths_resolve_only_within_membership(service) -> None:  # type: i
         assert (await client.get(path)).status_code == 404, path
     assert await audit_actions(service, outcome="denied") == ["grant.list"]
     assert await audit_actions(service, organization_id=foreign) == []
+    # Business headers conceal foreign workspaces just like management paths, including key lookups.
+    for workspace_id in (hidden, new_object_id("ws")):
+        for path in ("/api/v1/secrets", f"/api/v1/secrets/{new_object_id('sec')}", "/api/v1/secrets/@TOKEN"):
+            response = await client.get(path, headers={"X-Workspace-ID": workspace_id})
+            assert response.status_code == 404, response.text
+            assert response.json()["error"]["details"] == {"kind": "workspace", "id": workspace_id}
     # A grant goes only to a principal already in the organization; any other is indistinguishable from none.
     for principal_id in (outsider, new_object_id("usr")):
         refused = await client.post(

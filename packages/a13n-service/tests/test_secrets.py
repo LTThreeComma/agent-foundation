@@ -55,7 +55,7 @@ async def test_values_are_write_only_and_changes_need_preconditions(service) -> 
         service.runtime.storage,
         service.runtime.keys,
         workspace_id=service.tenant.workspace_id,
-        requirements=[SecretRequirement(secret_id=secret["id"], key="OPENAI_API_KEY")],
+        requirements=[SecretRequirement(key="OPENAI_API_KEY")],
     )
     assert resolved["OPENAI_API_KEY"].get_secret_value() == VALUE + "-rotated"
 
@@ -67,9 +67,9 @@ async def test_values_are_write_only_and_changes_need_preconditions(service) -> 
             service.runtime.storage,
             service.runtime.keys,
             workspace_id=service.tenant.workspace_id,
-            requirements=[SecretRequirement(secret_id=secret["id"], key="OPENAI_API_KEY")],
+            requirements=[SecretRequirement(key="OPENAI_API_KEY")],
         )
-    assert missing.value.details == {"kind": "secret", "id": secret["id"]}
+    assert missing.value.details == {"kind": "secret", "id": "OPENAI_API_KEY"}
     assert VALUE not in str(missing.value)
 
 
@@ -112,7 +112,7 @@ async def test_workspace_members_share_metadata_and_only_writers_change_values(r
         SecretUpdate(value=SecretStr("rotated")),
         if_match=f'"{secret.id}:1"',
     )
-    requirement = SecretRequirement(secret_id=secret.id, key=secret.key)
+    requirement = SecretRequirement(key=secret.key)
     values = await secrets.resolve_secrets(
         runtime.storage, runtime.keys, workspace_id=workspace_id, requirements=[requirement]
     )
@@ -122,11 +122,10 @@ async def test_workspace_members_share_metadata_and_only_writers_change_values(r
     )
     replacement = await secrets.create_secret(runtime.storage, runtime.keys, colleague, workspace_id, body)
     assert replacement.id != secret.id and replacement.key == secret.key
-    with pytest.raises(ServiceError) as missing:
-        await secrets.resolve_secrets(
-            runtime.storage, runtime.keys, workspace_id=workspace_id, requirements=[requirement]
-        )
-    assert missing.value.code == "not_found"
+    values = await secrets.resolve_secrets(
+        runtime.storage, runtime.keys, workspace_id=workspace_id, requirements=[requirement]
+    )
+    assert values[secret.key].get_secret_value() == "first"
 
 
 async def test_ciphertext_is_bound_to_its_resource_identity(runtime, tenant) -> None:  # type: ignore[no-untyped-def]
@@ -148,6 +147,30 @@ async def test_ciphertext_is_bound_to_its_resource_identity(runtime, tenant) -> 
             runtime.storage,
             runtime.keys,
             workspace_id=tenant.workspace_id,
-            requirements=[SecretRequirement(secret_id=second.id, key=second.key)],
+            requirements=[SecretRequirement(key=second.key)],
         )
     assert unbound.value.code == "unavailable"
+
+
+async def test_key_lookup_is_confined_to_the_runs_workspace(service) -> None:  # type: ignore[no-untyped-def]
+    client = service.client
+    await client.post("/api/v1/secrets", json={"key": "TOKEN", "value": "home"})
+    other = await client.post(f"{service.organization}/workspaces", json={"key": "other", "name": "Other"})
+    assert other.status_code == 201
+    workspace_id = other.json()["id"]
+    requirement = SecretRequirement(key="TOKEN")
+    with pytest.raises(ServiceError) as missing:
+        await secrets.resolve_secrets(
+            service.runtime.storage, service.runtime.keys, workspace_id=workspace_id, requirements=[requirement]
+        )
+    assert missing.value.code == "not_found"
+    created = await client.post(
+        "/api/v1/secrets",
+        json={"key": "TOKEN", "value": "destination"},
+        headers={"X-Workspace-ID": workspace_id},
+    )
+    assert created.status_code == 201
+    values = await secrets.resolve_secrets(
+        service.runtime.storage, service.runtime.keys, workspace_id=workspace_id, requirements=[requirement]
+    )
+    assert values["TOKEN"].get_secret_value() == "destination"

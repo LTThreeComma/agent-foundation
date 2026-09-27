@@ -2079,7 +2079,7 @@
           "secret_requirements": {
             "default": [],
             "items": {
-              "$ref": "#/components/schemas/SecretRequirementInput"
+              "$ref": "#/components/schemas/SecretRequirement"
             },
             "maxItems": 128,
             "title": "Secret Requirements",
@@ -9943,38 +9943,18 @@
       },
       "SecretRequirement": {
         "additionalProperties": false,
-        "description": "A fixed secret identity and its tool audience; values are read only when used.",
+        "description": "A tool audience resolved by key in the run's workspace whenever it is used.",
         "properties": {
           "key": {
             "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$",
             "title": "Key",
             "type": "string"
-          },
-          "secret_id": {
-            "maxLength": 41,
-            "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
-            "title": "Secret Id",
-            "type": "string"
           }
         },
         "required": [
-          "secret_id",
           "key"
         ],
         "title": "SecretRequirement",
-        "type": "object"
-      },
-      "SecretRequirementInput": {
-        "additionalProperties": false,
-        "properties": {
-          "secret": {
-            "$ref": "#/components/schemas/Reference"
-          }
-        },
-        "required": [
-          "secret"
-        ],
-        "title": "SecretRequirementInput",
         "type": "object"
       },
       "SecretUpdate": {

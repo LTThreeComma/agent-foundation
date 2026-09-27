@@ -37,9 +37,7 @@ const config = {
     settings: { temperature: 0.4 },
   },
   plugins: [{ instance_name: "memory", plugin_key: "memory", config: {} }],
-  secret_requirements: [
-    { key: "token", secret_id: "sec_0123456789abcdef0123" },
-  ],
+  secret_requirements: [{ key: "token" }],
 };
 const source = serializeAgentFile(
   agentFile({ name: "Research", description: "Keep me" }, config),
@@ -48,7 +46,7 @@ const source = serializeAgentFile(
 function setup() {
   http.GET.mockImplementation(async (url: string) => ({
     data: url.endsWith("/secrets")
-      ? { items: [{ id: "sec_0123456789abcdef0123", key: "token" }] }
+      ? { items: [{ id: "sec_target", key: "token" }] }
       : {
           items: [
             {
@@ -95,6 +93,9 @@ it("previews before creation and retries the same request without losing advance
     ).toBe(false),
   );
   expect(http.POST).not.toHaveBeenCalled();
+  expect(
+    screen.queryByRole("combobox", { name: "secret_requirements.0.key" }),
+  ).toBeNull();
   await user.click(screen.getByRole("button", { name: "Create agent" }));
   await screen.findByText("Network interrupted");
   expect(http.POST.mock.calls[0]?.[1].body).toEqual({
@@ -108,6 +109,25 @@ it("previews before creation and retries the same request without losing advance
   expect(http.POST.mock.calls[1]?.[1].body).toEqual(
     http.POST.mock.calls[0]?.[1].body,
   );
+});
+
+it("blocks a missing secret key without offering a different secret as a replacement", async () => {
+  const { user } = setup();
+  await user.click(screen.getByLabelText("Agent YAML"));
+  await user.paste(source.replace("key: token", "key: REQUIRED_TOKEN"));
+  await user.click(screen.getByRole("button", { name: "Review" }));
+  await screen.findByText(
+    "Required secret is missing. Create a secret with this key in this workspace.",
+  );
+  expect(screen.getByText("REQUIRED_TOKEN")).toBeTruthy();
+  expect(
+    screen.queryByRole("combobox", { name: "secret_requirements.0.key" }),
+  ).toBeNull();
+  expect(
+    (screen.getByRole("button", { name: "Create agent" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(http.POST).not.toHaveBeenCalled();
 });
 
 it("blocks missing dependencies and requires an explicit replacement", async () => {
