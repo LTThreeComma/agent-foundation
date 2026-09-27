@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import secrets
 from collections import OrderedDict
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field
 from pydantic_ai import BinaryContent, ToolReturn
@@ -197,12 +197,20 @@ class ComputerToolset:
         *,
         delta_x: Annotated[int, Field(ge=-10000, le=10000)] = 0,
         delta_y: Annotated[int, Field(ge=-10000, le=10000)] = 0,
+        unit: Literal["pixels", "steps"] = "pixels",
     ) -> Any:
-        """Scroll at an image-pixel position. Positive deltas scroll right/down."""
+        """Scroll right/down for positive deltas. Use a unit advertised by computer_describe.
+
+        X11 requires steps (at most 100 per axis); pixels remain the default (at most 10000 per axis).
+        """
         try:
             return await self._execute(
                 ComputerScroll(
-                    observation=self._observation(observation_id), point=point, delta_x=delta_x, delta_y=delta_y
+                    observation=self._observation(observation_id),
+                    point=point,
+                    delta_x=delta_x,
+                    delta_y=delta_y,
+                    unit=unit,
                 )
             )
         except EnvironmentError as error:
@@ -227,6 +235,8 @@ class ComputerToolset:
         """Type 1-16384 UTF-8 bytes into the selected mount's foreground focus, without focusing a window.
 
         Pass alias explicitly to keep typing on the intended desktop; a preceding click does not select this mount.
+        Availability is mount-specific: native X11 does not support literal text entry. Physical key chords
+        are not a literal-text substitute.
         """
         return await self._execute(ComputerTypeText(text=text), alias=alias)
 
@@ -238,7 +248,7 @@ class ComputerToolset:
     ) -> Any:
         """Press keys in the selected mount's foreground focus, then release them. Prefer an explicit alias.
 
-        Keys include lowercase letters, digits, meta (Command), control, alt (Option), shift, enter,
+        Keys include lowercase letters, digits, meta (Command/Super), control, alt (Option/Alt), shift, enter,
         tab, escape, space, backspace, delete, left, right, up, down, home, end, page_up, page_down,
         and f1 through f12.
         """
@@ -288,6 +298,28 @@ class ComputerToolset:
                             "Check the intended mount in the latest Environment context, then use computer_observe "
                             "with its alias and reassess the GUI. Do not reuse this observation_id or blindly replay "
                             "the input."
+                        ),
+                    },
+                )
+            elif (
+                isinstance(request, ComputerTypeText)
+                and error.code == "environment_denied"
+                and error.details.get("reason") == "mount_action_denied"
+            ):
+                error = EnvironmentError(
+                    "Literal text entry is unavailable on the selected mount.",
+                    code=error.code,
+                    retry_hint=error.retry_hint,
+                    details={
+                        **error.details,
+                        "field": "alias",
+                        "dispatch_stage": "pre_dispatch",
+                        "hint": (
+                            f"{error.details.get('hint', '')} "
+                            "No text input was dispatched. computer_type_text being visible does not mean it is "
+                            "available on this alias. Do not retry unchanged or automatically switch desktops. "
+                            "computer_press_keys sends physical key chords, not literal text. If text entry is "
+                            "needed on this desktop, explain the limitation to the user."
                         ),
                     },
                 )

@@ -138,3 +138,139 @@ async def test_pointer_reference_is_bound_to_mount_and_tool_cache_is_bounded():
             await tools.computer_observe()
         expired = await tools.computer_click(reference, ComputerPoint(x=0, y=0))
         assert expired["ok"] is False and len(computer.inputs) == 1
+
+
+async def test_step_scroll_is_explicit_and_bounded_before_dispatch():
+    runtime, computer = mount(COMPUTER_ACTIONS)
+    async with runtime.bind(
+        thread_id="thread-one", run_id="run-one", instance=_instance(), host_refs={}
+    ) as environment:
+        tools = ComputerToolset(environment)
+        image = await tools.computer_observe()
+        reference = image.return_value["observation_id"]
+        rejected = await tools.computer_scroll(reference, ComputerPoint(x=0, y=0), delta_y=101, unit="steps")
+        assert not rejected["ok"] and not computer.inputs
+        accepted = await tools.computer_scroll(reference, ComputerPoint(x=0, y=0), delta_y=100, unit="steps")
+        assert accepted["ok"] and computer.inputs[-1].unit == "steps"
+        accepted = await tools.computer_scroll(reference, ComputerPoint(x=0, y=0), delta_y=10000)
+        assert accepted["ok"] and computer.inputs[-1].unit == "pixels"
+
+
+async def test_eip_scroll_preserves_legacy_pixels_and_requires_step_advertisement(monkeypatch):
+    from a13n_envd_client.eip import v1 as eip
+    from a13n_harness.providers.environment.computer import ComputerScroll
+    from a13n_harness.providers.environment.eip import computer as adapter
+
+    units = ()
+    sent = []
+
+    class Client:
+        async def computer_describe(self, request):
+            return eip.ComputerDescribeResult(targets=(), observe_ready=True, input_ready=True, scroll_units=units)
+
+        async def computer_scroll(self, request):
+            sent.append(request.model_dump(mode="json", exclude_none=True))
+            raise RuntimeError("sent")
+
+    monkeypatch.setattr(adapter, "session_client", lambda _: Client())
+    provider = adapter.EIPComputerOperations(None, mount_id="desktop", generation="one")
+    observation = ComputerObservation(
+        mount_id="desktop",
+        observed_generation="one",
+        observation_id="obs-one",
+        target_id="display-one",
+        width=100,
+        height=100,
+        mime_type="image/jpeg",
+        captured_at=datetime.now(UTC),
+    )
+    assert (await provider.describe()).scroll_units == ("pixels",)
+    with pytest.raises(EnvironmentError, match="does not support"):
+        await provider.execute(ComputerScroll(observation=observation, point=ComputerPoint(x=0, y=0), unit="steps"))
+    assert sent == []
+    with pytest.raises(EnvironmentError, match="EIP provider operation failed"):
+        await provider.execute(ComputerScroll(observation=observation, point=ComputerPoint(x=0, y=0)))
+    assert "unit" not in sent[-1]
+    units = (eip.ComputerScrollUnit.STEPS,)
+    with pytest.raises(EnvironmentError, match="EIP provider operation failed"):
+        await provider.execute(ComputerScroll(observation=observation, point=ComputerPoint(x=0, y=0), unit="steps"))
+    assert sent[-1]["unit"] == "steps"
+
+
+@pytest.mark.parametrize("alias", [None, "linux-desktop"])
+@pytest.mark.parametrize("provider_supports_text", [False, True])
+async def test_text_input_denial_explains_selected_alias_without_switching_desktops(alias, provider_supports_text):
+    text_action = EnvironmentAction.COMPUTER_TYPE_TEXT
+    no_text = COMPUTER_ACTIONS - {text_action}
+    computers = {}
+    mounts = {}
+    for name, permissions, ceiling in (
+        (
+            "linux-desktop",
+            COMPUTER_ACTIONS if provider_supports_text else no_text,
+            no_text if provider_supports_text else COMPUTER_ACTIONS,
+        ),
+        ("mac-desktop", COMPUTER_ACTIONS, COMPUTER_ACTIONS),
+    ):
+        computer = Computer()
+        binding = _Binding(
+            name,
+            families=frozenset({"computer"}),
+            operations=EnvironmentOperations(computer=computer),
+            permissions=permissions,
+        )
+        computer.binding = binding
+        computers[name] = computer
+        mounts[name] = EnvironmentRuntimeMount(
+            binding=binding, permission_ceiling=EnvironmentPermissionSet(operations=ceiling)
+        )
+    runtime = create_environment_runtime(mounts=mounts, default_mount="linux-desktop")
+    async with runtime.bind(
+        thread_id="thread-one", run_id="run-one", instance=_instance(), host_refs={}
+    ) as environment:
+        tools = ComputerToolset(environment)
+        assert "computer_type_text" in tools.get_toolset().tools
+        assert (await tools.computer_type_text("allowed", alias="mac-desktop"))["ok"]
+
+        # An omitted alias uses the default, not the last successful desktop.
+        rejected = await tools.computer_type_text("private text must not appear in errors", alias=alias)
+        assert rejected["ok"] is False
+        error = rejected["error"]
+        assert error["code"] == "environment_denied"
+        assert error["details"]["reason"] == "mount_action_denied"
+        assert error["details"]["field"] == "alias"
+        assert error["details"]["dispatch_stage"] == "pre_dispatch"
+        hint = error["details"]["hint"]
+        assert "Mount 'linux-desktop'" in hint
+        assert "No text input was dispatched" in hint
+        assert "Do not retry unchanged or automatically switch desktops" in hint
+        assert "physical key chords, not literal text" in hint
+        assert "do not change tools or mounts to bypass a denial" in hint
+        assert "private text" not in str(rejected)
+        assert not computers["linux-desktop"].inputs
+        assert [request.text for request in computers["mac-desktop"].inputs] == ["allowed"]
+
+
+async def test_text_input_provider_failure_does_not_claim_pre_dispatch_or_replace_evidence(monkeypatch):
+    runtime, computer = mount(COMPUTER_ACTIONS)
+
+    async def fail(request):
+        computer.inputs.append(request)
+        raise EnvironmentError(
+            "private provider failure",
+            code="environment_provider_failure",
+            retry_hint="reconcile_first",
+            details={"dispatch_stage": "unknown", "hint": "Reconcile possible effects before retrying."},
+        )
+
+    monkeypatch.setattr(computer, "execute", fail)
+    async with runtime.bind(
+        thread_id="thread-one", run_id="run-one", instance=_instance(), host_refs={}
+    ) as environment:
+        result = await ComputerToolset(environment).computer_type_text("private text")
+        assert result["error"]["code"] == "environment_provider_failure"
+        assert result["error"]["details"]["dispatch_stage"] == "unknown"
+        assert result["error"]["details"]["hint"] == "Reconcile possible effects before retrying."
+        assert result["error"]["retry_hint"] == "reconcile_first"
+        assert "private" not in str(result)
+        assert len(computer.inputs) == 1
