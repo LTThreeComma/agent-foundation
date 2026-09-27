@@ -99,7 +99,7 @@ Selection lists inside pickers use the same row anatomy with a checkbox in place
 
 ## Forms and Fields
 
-Labels sit above controls at 13.5px medium; descriptions sit below the control at 12.5px secondary; validation replaces the description in the danger color and names the fix. Optional fields say "(optional)" in the label; required fields carry no asterisk. Inputs are 36px tall with a 10px radius and a hairline border; compact inputs in toolbars are 32px. Textareas for long content (instructions, prompts, JSON) use a soft surface with no border, grow to a bounded height, and scroll internally. Selects and pickers show the current value with one trailing chevron. Read-only values use `ReadOnlyField` with no box.
+Labels sit above controls at 13.5px medium; descriptions sit below the control at 12.5px secondary; validation replaces the description in the danger color and names the fix. Optional fields say "(optional)" in the label; required fields carry no asterisk. Inputs are 36px tall with a 10px radius and a hairline border; compact inputs in toolbars are 32px. Textareas for long content (instructions, prompts, JSON) use a soft surface with no border, grow to a bounded height, and scroll internally. Selects and pickers show the current value with one trailing chevron. Read-only values use `ReadOnlyField`; long-form text retains the soft surface and padding, while short values have no box.
 
 Buttons: primary (filled), outline (secondary), ghost (tertiary and inline), and destructive (only inside confirmations and menus). Icon-only buttons always have a tooltip and an accessible name. Loading preserves size and disables activation. Menu items pair an icon with a label; destructive items sit last after a separator. A form whose submit is not the screen's primary action uses the outline button for it, so the one filled primary per screen still holds.
 
@@ -111,7 +111,7 @@ The session view keeps a compact header (agent identity, session identifier, sta
 
 ## Navigation
 
-The sidebar is a tinted column without a border: workspace switcher at the top, navigation rows at 32px with an 8px radius, active rows on the selected fill with a duotone icon, 11px medium sentence-case group labels, and the account menu at the bottom. Hover is lighter than the active fill, so pointing at a row never reads as being on it. It collapses to an icon rail with tooltips. Settings open in the contextual layout with a clear way back. Internal links never open new tabs. Every route names itself in the document title, settings sections included.
+The sidebar is a tinted column without a border: workspace switcher at the top, navigation rows at 32px with an 8px radius, active rows on the selected fill with a duotone icon, 11px medium sentence-case group labels, and the account menu at the bottom. Hover is lighter than the active fill, so pointing at a row never reads as being on it. It collapses to an icon rail with tooltips. Below the shared `md` breakpoint (768px), navigation opens in a drawer from an always-visible menu button whose icon aligns with the page content gutter while retaining its full click target. Named JavaScript media queries match Tailwind's breakpoints and use exclusive upper bounds so resizing never leaves a gap between mobile and desktop navigation. Settings open in the contextual layout with a clear way back. Internal links never open new tabs. Every route names itself in the document title, settings sections included.
 
 ## Overlays and Feedback
 
