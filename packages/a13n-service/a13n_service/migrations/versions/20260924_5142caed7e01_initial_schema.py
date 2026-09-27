@@ -131,7 +131,6 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
         sa.Column("workspace_id", sa.String(), nullable=False),
-        sa.Column("key", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("description", sa.String(), nullable=False),
         sa.Column("default_revision_id", sa.String(length=72), nullable=True),
@@ -157,7 +156,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["updated_by_id"], ["principals.id"], name=op.f("fk_agents_updated_by_id_principals")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_agents")),
         sa.UniqueConstraint("workspace_id", "id", name=op.f("uq_agents_workspace_id_id")),
-        sa.UniqueConstraint("workspace_id", "key", name=op.f("uq_agents_workspace_id_key")),
+    )
+    op.create_index(
+        "uq_agents_builtin", "agents", ["workspace_id"], unique=True, postgresql_where=sa.text("source = 'builtin'")
     )
     op.create_table(
         "api_keys",
@@ -258,7 +259,7 @@ def upgrade() -> None:
         "connector_providers",
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
-        sa.Column("workspace_id", sa.String(), nullable=True),
+        sa.Column("workspace_id", sa.String(), nullable=False),
         sa.Column("type", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("config", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -290,13 +291,13 @@ def upgrade() -> None:
             ["updated_by_id"], ["principals.id"], name=op.f("fk_connector_providers_updated_by_id_principals")
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_connector_providers")),
-        sa.UniqueConstraint("organization_id", "id", name=op.f("uq_connector_providers_organization_id_id")),
+        sa.UniqueConstraint("workspace_id", "id", name=op.f("uq_connector_providers_workspace_id_id")),
     )
     op.create_table(
         "environment_providers",
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
-        sa.Column("workspace_id", sa.String(), nullable=True),
+        sa.Column("workspace_id", sa.String(), nullable=False),
         sa.Column("type", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("config", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -330,7 +331,7 @@ def upgrade() -> None:
             ["updated_by_id"], ["principals.id"], name=op.f("fk_environment_providers_updated_by_id_principals")
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_environment_providers")),
-        sa.UniqueConstraint("organization_id", "id", name=op.f("uq_environment_providers_organization_id_id")),
+        sa.UniqueConstraint("workspace_id", "id", name=op.f("uq_environment_providers_workspace_id_id")),
     )
     op.create_table(
         "grants",
@@ -407,7 +408,7 @@ def upgrade() -> None:
         "model_providers",
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
-        sa.Column("workspace_id", sa.String(), nullable=True),
+        sa.Column("workspace_id", sa.String(), nullable=False),
         sa.Column("type", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("config", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -439,7 +440,7 @@ def upgrade() -> None:
             ["updated_by_id"], ["principals.id"], name=op.f("fk_model_providers_updated_by_id_principals")
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_model_providers")),
-        sa.UniqueConstraint("organization_id", "id", name=op.f("uq_model_providers_organization_id_id")),
+        sa.UniqueConstraint("workspace_id", "id", name=op.f("uq_model_providers_workspace_id_id")),
     )
     op.create_table(
         "passwords",
@@ -448,38 +449,6 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["principal_id"], ["principals.id"], name=op.f("fk_passwords_principal_id_principals")),
         sa.PrimaryKeyConstraint("principal_id", name=op.f("pk_passwords")),
-    )
-    op.create_table(
-        "secrets",
-        sa.Column("id", sa.String(length=72), nullable=False),
-        sa.Column("organization_id", sa.String(length=72), nullable=False),
-        sa.Column("workspace_id", sa.String(), nullable=False),
-        sa.Column("principal_id", sa.String(length=72), nullable=True),
-        sa.Column("key", sa.String(), nullable=False),
-        sa.Column("ciphertext", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("created_by_id", sa.String(length=72), nullable=False),
-        sa.Column("updated_by_id", sa.String(length=72), nullable=False),
-        sa.Column("version", sa.BigInteger(), server_default=sa.text("1"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.ForeignKeyConstraint(["created_by_id"], ["principals.id"], name=op.f("fk_secrets_created_by_id_principals")),
-        sa.ForeignKeyConstraint(
-            ["organization_id", "workspace_id"],
-            ["workspaces.organization_id", "workspaces.id"],
-            name=op.f("fk_secrets_organization_id_workspaces"),
-        ),
-        sa.ForeignKeyConstraint(
-            ["organization_id"], ["organizations.id"], name=op.f("fk_secrets_organization_id_organizations")
-        ),
-        sa.ForeignKeyConstraint(["principal_id"], ["principals.id"], name=op.f("fk_secrets_principal_id_principals")),
-        sa.ForeignKeyConstraint(["updated_by_id"], ["principals.id"], name=op.f("fk_secrets_updated_by_id_principals")),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_secrets")),
-    )
-    op.create_index(
-        "uq_secrets_owner_key",
-        "secrets",
-        ["workspace_id", sa.literal_column("COALESCE(principal_id, '')"), "key"],
-        unique=True,
     )
     op.create_table(
         "sessions",
@@ -595,7 +564,7 @@ def upgrade() -> None:
         "web_providers",
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
-        sa.Column("workspace_id", sa.String(), nullable=True),
+        sa.Column("workspace_id", sa.String(), nullable=False),
         sa.Column("type", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("config", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -627,7 +596,7 @@ def upgrade() -> None:
             ["updated_by_id"], ["principals.id"], name=op.f("fk_web_providers_updated_by_id_principals")
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_web_providers")),
-        sa.UniqueConstraint("organization_id", "id", name=op.f("uq_web_providers_organization_id_id")),
+        sa.UniqueConstraint("workspace_id", "id", name=op.f("uq_web_providers_workspace_id_id")),
     )
     op.create_table(
         "agent_revisions",
@@ -726,9 +695,9 @@ def upgrade() -> None:
             ["created_by_id"], ["principals.id"], name=op.f("fk_connections_created_by_id_principals")
         ),
         sa.ForeignKeyConstraint(
-            ["organization_id", "connector_provider_id"],
-            ["connector_providers.organization_id", "connector_providers.id"],
-            name=op.f("fk_connections_organization_id_connector_providers"),
+            ["workspace_id", "connector_provider_id"],
+            ["connector_providers.workspace_id", "connector_providers.id"],
+            name=op.f("fk_connections_workspace_id_connector_providers"),
         ),
         sa.ForeignKeyConstraint(
             ["organization_id", "workspace_id"],
@@ -773,7 +742,6 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
         sa.Column("workspace_id", sa.String(), nullable=False),
-        sa.Column("key", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("description", sa.String(), nullable=True),
         sa.Column("provider_id", sa.String(), nullable=False),
@@ -789,9 +757,9 @@ def upgrade() -> None:
             ["created_by_id"], ["principals.id"], name=op.f("fk_environment_templates_created_by_id_principals")
         ),
         sa.ForeignKeyConstraint(
-            ["organization_id", "provider_id"],
-            ["environment_providers.organization_id", "environment_providers.id"],
-            name=op.f("fk_environment_templates_organization_id_environment_providers"),
+            ["workspace_id", "provider_id"],
+            ["environment_providers.workspace_id", "environment_providers.id"],
+            name=op.f("fk_environment_templates_workspace_id_environment_providers"),
         ),
         sa.ForeignKeyConstraint(
             ["organization_id", "workspace_id"],
@@ -808,13 +776,12 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_environment_templates")),
         sa.UniqueConstraint("workspace_id", "id", name=op.f("uq_environment_templates_workspace_id_id")),
-        sa.UniqueConstraint("workspace_id", "key", name=op.f("uq_environment_templates_workspace_id_key")),
     )
     op.create_table(
         "models",
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
-        sa.Column("workspace_id", sa.String(), nullable=True),
+        sa.Column("workspace_id", sa.String(), nullable=False),
         sa.Column("provider_id", sa.String(), nullable=False),
         sa.Column("key", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
@@ -830,9 +797,9 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["created_by_id"], ["principals.id"], name=op.f("fk_models_created_by_id_principals")),
         sa.ForeignKeyConstraint(
-            ["organization_id", "provider_id"],
-            ["model_providers.organization_id", "model_providers.id"],
-            name=op.f("fk_models_organization_id_model_providers"),
+            ["workspace_id", "provider_id"],
+            ["model_providers.workspace_id", "model_providers.id"],
+            name=op.f("fk_models_workspace_id_model_providers"),
         ),
         sa.ForeignKeyConstraint(
             ["organization_id", "workspace_id"],
@@ -844,8 +811,7 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(["updated_by_id"], ["principals.id"], name=op.f("fk_models_updated_by_id_principals")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_models")),
-        sa.UniqueConstraint("organization_id", "id", name=op.f("uq_models_organization_id_id")),
-        sa.UniqueConstraint("provider_id", "key", name=op.f("uq_models_provider_id_key")),
+        sa.UniqueConstraint("workspace_id", "key", name=op.f("uq_models_workspace_id_key")),
     )
     op.create_table(
         "skill_revisions",
@@ -1027,9 +993,9 @@ def upgrade() -> None:
             ["created_by_id"], ["principals.id"], name=op.f("fk_environments_created_by_id_principals")
         ),
         sa.ForeignKeyConstraint(
-            ["organization_id", "provider_id"],
-            ["environment_providers.organization_id", "environment_providers.id"],
-            name=op.f("fk_environments_organization_id_environment_providers"),
+            ["workspace_id", "provider_id"],
+            ["environment_providers.workspace_id", "environment_providers.id"],
+            name=op.f("fk_environments_workspace_id_environment_providers"),
         ),
         sa.ForeignKeyConstraint(
             ["organization_id", "workspace_id"],
@@ -1725,16 +1691,6 @@ def upgrade() -> None:
     )
     op.execute(
         """
-    CREATE TRIGGER stamp_resource BEFORE UPDATE ON secrets FOR EACH ROW EXECUTE FUNCTION stamp_resource()
-    """
-    )
-    op.execute(
-        """
-    CREATE TRIGGER guard_identity BEFORE UPDATE ON secrets FOR EACH ROW EXECUTE FUNCTION guard_identity()
-    """
-    )
-    op.execute(
-        """
     CREATE TRIGGER stamp_resource BEFORE UPDATE ON sessions FOR EACH ROW WHEN ((to_jsonb(OLD) - '{last_run_id,updated_at}'::text[]) IS DISTINCT FROM (to_jsonb(NEW) - '{last_run_id,updated_at}'::text[])) EXECUTE FUNCTION stamp_resource()
     """
     )
@@ -1785,27 +1741,6 @@ def upgrade() -> None:
     )
     op.execute(
         """
-    CREATE FUNCTION connections_connector_provider_id_in_scope() RETURNS trigger LANGUAGE plpgsql AS $$
-    BEGIN
-        IF NEW.connector_provider_id IS NOT NULL AND NOT EXISTS (
-            SELECT FROM connector_providers
-            WHERE id = NEW.connector_provider_id AND organization_id = NEW.organization_id
-                AND (workspace_id IS NULL OR workspace_id = NEW.workspace_id)
-        ) THEN
-            RAISE EXCEPTION 'connector_providers % is not shared with workspace %', NEW.connector_provider_id, NEW.workspace_id
-                USING ERRCODE = 'foreign_key_violation', CONSTRAINT = 'connections_connector_provider_id_in_scope';
-        END IF;
-        RETURN NULL;
-    END $$
-    """
-    )
-    op.execute(
-        """
-    CREATE CONSTRAINT TRIGGER connections_connector_provider_id_in_scope AFTER INSERT OR UPDATE OF connector_provider_id ON connections FOR EACH ROW EXECUTE FUNCTION connections_connector_provider_id_in_scope()
-    """
-    )
-    op.execute(
-        """
     CREATE TRIGGER stamp_resource BEFORE UPDATE ON environment_templates FOR EACH ROW EXECUTE FUNCTION stamp_resource()
     """
     )
@@ -1816,54 +1751,12 @@ def upgrade() -> None:
     )
     op.execute(
         """
-    CREATE FUNCTION environment_templates_provider_id_in_scope() RETURNS trigger LANGUAGE plpgsql AS $$
-    BEGIN
-        IF NEW.provider_id IS NOT NULL AND NOT EXISTS (
-            SELECT FROM environment_providers
-            WHERE id = NEW.provider_id AND organization_id = NEW.organization_id
-                AND (workspace_id IS NULL OR workspace_id = NEW.workspace_id)
-        ) THEN
-            RAISE EXCEPTION 'environment_providers % is not shared with workspace %', NEW.provider_id, NEW.workspace_id
-                USING ERRCODE = 'foreign_key_violation', CONSTRAINT = 'environment_templates_provider_id_in_scope';
-        END IF;
-        RETURN NULL;
-    END $$
-    """
-    )
-    op.execute(
-        """
-    CREATE CONSTRAINT TRIGGER environment_templates_provider_id_in_scope AFTER INSERT OR UPDATE OF provider_id ON environment_templates FOR EACH ROW EXECUTE FUNCTION environment_templates_provider_id_in_scope()
-    """
-    )
-    op.execute(
-        """
     CREATE TRIGGER stamp_resource BEFORE UPDATE ON models FOR EACH ROW EXECUTE FUNCTION stamp_resource()
     """
     )
     op.execute(
         """
     CREATE TRIGGER guard_identity BEFORE UPDATE ON models FOR EACH ROW EXECUTE FUNCTION guard_identity()
-    """
-    )
-    op.execute(
-        """
-    CREATE FUNCTION models_provider_id_in_scope() RETURNS trigger LANGUAGE plpgsql AS $$
-    BEGIN
-        IF NEW.provider_id IS NOT NULL AND NOT EXISTS (
-            SELECT FROM model_providers
-            WHERE id = NEW.provider_id AND organization_id = NEW.organization_id
-                AND (workspace_id IS NULL OR workspace_id = NEW.workspace_id)
-        ) THEN
-            RAISE EXCEPTION 'model_providers % is not shared with workspace %', NEW.provider_id, NEW.workspace_id
-                USING ERRCODE = 'foreign_key_violation', CONSTRAINT = 'models_provider_id_in_scope';
-        END IF;
-        RETURN NULL;
-    END $$
-    """
-    )
-    op.execute(
-        """
-    CREATE CONSTRAINT TRIGGER models_provider_id_in_scope AFTER INSERT OR UPDATE OF provider_id ON models FOR EACH ROW EXECUTE FUNCTION models_provider_id_in_scope()
     """
     )
     op.execute(
@@ -1917,27 +1810,6 @@ def upgrade() -> None:
     op.execute(
         """
     CREATE TRIGGER guard_identity BEFORE UPDATE ON environments FOR EACH ROW EXECUTE FUNCTION guard_identity()
-    """
-    )
-    op.execute(
-        """
-    CREATE FUNCTION environments_provider_id_in_scope() RETURNS trigger LANGUAGE plpgsql AS $$
-    BEGIN
-        IF NEW.provider_id IS NOT NULL AND NOT EXISTS (
-            SELECT FROM environment_providers
-            WHERE id = NEW.provider_id AND organization_id = NEW.organization_id
-                AND (workspace_id IS NULL OR workspace_id = NEW.workspace_id)
-        ) THEN
-            RAISE EXCEPTION 'environment_providers % is not shared with workspace %', NEW.provider_id, NEW.workspace_id
-                USING ERRCODE = 'foreign_key_violation', CONSTRAINT = 'environments_provider_id_in_scope';
-        END IF;
-        RETURN NULL;
-    END $$
-    """
-    )
-    op.execute(
-        """
-    CREATE CONSTRAINT TRIGGER environments_provider_id_in_scope AFTER INSERT OR UPDATE OF provider_id ON environments FOR EACH ROW EXECUTE FUNCTION environments_provider_id_in_scope()
     """
     )
     op.execute(
@@ -2188,8 +2060,6 @@ def downgrade() -> None:
     op.drop_table("skills")
     op.drop_index("ix_sessions_workspace_updated", table_name="sessions")
     op.drop_table("sessions")
-    op.drop_index("uq_secrets_owner_key", table_name="secrets")
-    op.drop_table("secrets")
     op.drop_table("passwords")
     op.drop_table("model_providers")
     op.drop_index(
@@ -2211,6 +2081,7 @@ def downgrade() -> None:
     op.drop_index("ix_api_keys_workspace_id", table_name="api_keys")
     op.drop_index(op.f("ix_api_keys_principal_id"), table_name="api_keys")
     op.drop_table("api_keys")
+    op.drop_index("uq_agents_builtin", table_name="agents", postgresql_where=sa.text("source = 'builtin'"))
     op.drop_table("agents")
     op.drop_index("ix_principals_home_workspace_id", table_name="principals")
     op.drop_table("principals")
@@ -2242,32 +2113,12 @@ def downgrade() -> None:
     )
     op.execute(
         """
-    DROP FUNCTION environments_provider_id_in_scope() CASCADE
-    """
-    )
-    op.execute(
-        """
     DROP FUNCTION touch_threads() CASCADE
     """
     )
     op.execute(
         """
     DROP FUNCTION check_thread_pointers() CASCADE
-    """
-    )
-    op.execute(
-        """
-    DROP FUNCTION models_provider_id_in_scope() CASCADE
-    """
-    )
-    op.execute(
-        """
-    DROP FUNCTION environment_templates_provider_id_in_scope() CASCADE
-    """
-    )
-    op.execute(
-        """
-    DROP FUNCTION connections_connector_provider_id_in_scope() CASCADE
     """
     )
     op.execute(

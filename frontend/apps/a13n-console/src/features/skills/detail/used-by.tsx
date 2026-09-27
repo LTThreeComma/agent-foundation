@@ -24,17 +24,17 @@ import { SkillIcon } from "../source";
  */
 export function usedByQuery(
   client: Client,
-  skill: Pick<Schema["Skill"], "id" | "workspace_id">,
+  skill: Pick<Schema["Skill"], "key" | "workspace_id">,
   cursor?: string,
 ) {
   return queryOptions({
-    queryKey: ["skills", skill.workspace_id, skill.id, "used-by", cursor],
+    queryKey: ["skills", skill.workspace_id, skill.key, "used-by", cursor],
     queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/agents", {
+      client
+        .workspace(skill.workspace_id)
+        .GET("/api/v1/agents", {
           params: {
-            path: { workspace_id: skill.workspace_id },
-            query: { skill_id: skill.id, archived: false, cursor },
+            query: { skill: skill.key, archived: false, cursor },
           },
           signal,
         })
@@ -77,9 +77,9 @@ export function UsedByAgents({ skill }: { skill: Schema["Skill"] }) {
               />
             }
             name={
-              <Link to={`${basePath}/agents/${agent.key}`}>{agent.name}</Link>
+              <Link to={`${basePath}/agents/${agent.id}`}>{agent.name}</Link>
             }
-            secondary={agent.key}
+            secondary={agent.id}
           />
         ))}
       </ListRows>

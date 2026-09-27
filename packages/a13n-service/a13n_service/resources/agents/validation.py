@@ -72,9 +72,9 @@ async def validate_config(
             ),
         }
     )
-    with at_field("model.model_id"):
-        model = await resolve_model(session, actor, scope, config.model.model_id, verb=verb, authority=authority)
-    registry.check_model_settings(model.config.model_api, config.model.settings, field="model.settings")
+    with at_field("model"):
+        model = await resolve_model(session, actor, scope, config.model, verb=verb, authority=authority)
+    registry.check_model_settings(model.config.model_api, config.model_settings, field="model_settings")
     if config.reviewer is not None:
         with at_field("reviewer.model"):
             reviewer = await resolve_model(session, actor, scope, config.reviewer.model, verb=verb, authority=authority)
@@ -82,9 +82,9 @@ async def validate_config(
             registry.check_model_settings(
                 reviewer.config.model_api, config.reviewer.model_settings, field="reviewer.model_settings"
             )
-    for kind, model_id in config.media_understanding.selections().items():
+    for kind, key in config.media_understanding.selections().items():
         with at_field(f"media_understanding.{kind}"):
-            await resolve_media_model(session, actor, scope, kind, model_id, verb=verb, authority=authority)
+            await resolve_media_model(session, actor, scope, kind, key, verb=verb, authority=authority)
     types: dict[str, str] = {}
     for index, selection in enumerate(config.connection_tools):
         with at_field(f"connection_tools.{index}"):
@@ -177,12 +177,12 @@ async def _pin_skills(
 ) -> tuple[SkillSelection, ...]:
     """Each skill at its selected revision, by default the skill's default revision; archived skills refuse a pin
     that is not `held` already."""
-    unpinned = {skill.skill_id for skill in skills if skill.revision_id is None}
+    unpinned = {skill.skill for skill in skills if skill.revision_id is None}
     defaults = dict(
         (
             await session.execute(
-                select(SkillRow.id, SkillRow.default_revision_id).where(
-                    SkillRow.workspace_id == workspace_id, SkillRow.id.in_(unpinned)
+                select(SkillRow.key, SkillRow.default_revision_id).where(
+                    SkillRow.workspace_id == workspace_id, SkillRow.key.in_(unpinned)
                 )
             )
         )
@@ -192,13 +192,13 @@ async def _pin_skills(
     pinned: list[SkillSelection] = []
     checked: dict[str, SkillPin] = {}
     for index, skill in enumerate(skills):
-        revision_id = skill.revision_id or defaults.get(skill.skill_id)
+        revision_id = skill.revision_id or defaults.get(skill.skill)
         if revision_id is None:
             with at_field(f"skills.{index}"):
-                raise not_found(SkillRow.KIND, skill.skill_id)
+                raise not_found(SkillRow.KIND, skill.skill)
         selection = skill.model_copy(update={"revision_id": revision_id})
         if selection not in held:
-            checked[f"skills.{index}"] = SkillPin(skill_id=skill.skill_id, revision_id=revision_id)
+            checked[f"skills.{index}"] = SkillPin(skill=skill.skill, revision_id=revision_id)
         pinned.append(selection)
     await require_pins(session, workspace_id, checked)
     return tuple(pinned)

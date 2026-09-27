@@ -102,7 +102,7 @@ function ImportForm({
     [receipt, setReceipt] = useState<Schema["SkillManifest"]>();
   // A new version follows the latest one, which leads the first revision page.
   const latest = useQuery({
-    ...revisionsQuery(client, workspace.id, basis?.id ?? ""),
+    ...revisionsQuery(client, workspace.id, basis?.key ?? ""),
     enabled: !!basis,
   }).data?.items[0]?.number;
   const version = !basis ? 1 : latest === undefined ? undefined : latest + 1;
@@ -116,9 +116,9 @@ function ImportForm({
         upload.key,
       );
       // The Service checks the package exactly as publishing will, storing nothing.
-      return client.http
-        .POST("/api/v1/workspaces/{workspace_id}/skills/validate", {
-          params: { path: { workspace_id: workspace.id } },
+      return client
+        .workspace(workspace.id)
+        .POST("/api/v1/skills/validate", {
           body: { source: { kind: "upload", upload_id: staged.upload_id } },
         })
         .then(data);
@@ -141,22 +141,21 @@ function ImportForm({
         throw new Error(t("Validate your ZIP file before publishing."));
       if (basis) {
         data(
-          await client.http.POST(
-            "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/revisions",
-            {
+          await client
+            .workspace(workspace.id)
+            .POST("/api/v1/skills/{key}/revisions", {
               params: {
-                path: { workspace_id: workspace.id, skill_id: basis.id },
+                path: { key: basis.key },
               },
               headers: ifMatch(rowTag(basis)),
               body: { source },
-            },
-          ),
+            }),
         );
         return basis;
       }
-      return client.http
-        .POST("/api/v1/workspaces/{workspace_id}/skills", {
-          params: { path: { workspace_id: workspace.id } },
+      return client
+        .workspace(workspace.id)
+        .POST("/api/v1/skills", {
           body: { source, ...(name && { name }) },
         })
         .then(data);

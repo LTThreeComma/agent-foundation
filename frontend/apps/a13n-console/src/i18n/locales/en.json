@@ -927,7 +927,6 @@
   "Dependency unavailable. Choose a resource in this workspace.": "Dependency unavailable. Choose a resource in this workspace.",
   "Pinned version unavailable. Edit the YAML version or choose another resource.": "Pinned version unavailable. Edit the YAML version or choose another resource.",
   "Configuration preview": "Configuration preview",
-  "Creates a new agent. Service validates the configuration on creation; plugin availability and secret access also depend on the execution environment.": "Creates a new agent. Service validates the configuration on creation; plugin availability and secret access also depend on the execution environment.",
   "The Agent YAML file is too deeply nested.": "The Agent YAML file is too deeply nested.",
   "The Agent YAML file is too complex.": "The Agent YAML file is too complex.",
   "YAML aliases are not supported in Agent files.": "YAML aliases are not supported in Agent files.",
@@ -1532,7 +1531,6 @@
   "Manage Web Providers": "Manage Web Providers",
   "deleted": "deleted",
   "deleting": "deleting",
-  "Help me change the agent {{name}} (key {{key}}, ID {{id}}), starting from its version {{version}} (revision ID {{revision}}).": "Help me change the agent {{name}} (key {{key}}, ID {{id}}), starting from its version {{version}} (revision ID {{revision}}).",
   "Unsupported Agent file version. Expected schema_version: 2.": "Unsupported Agent file version. Expected schema_version: 2.",
   "Create from template allocates a new environment. Reuse existing keeps the same environment and its retained files, including across sessions. A stopped environment starts again when the run needs it.": "Create from template allocates a new environment. Reuse existing keeps the same environment and its retained files, including across sessions. A stopped environment starts again when the run needs it.",
   "Resubmit": "Resubmit",
@@ -1725,5 +1723,8 @@
   "The records of this namespace are still being deleted with a deleted memory. Try again once that finishes.": "The records of this namespace are still being deleted with a deleted memory. Try again once that finishes.",
   "No matching memories": "No matching memories",
   "Create administrator": "Create administrator",
-  "The first account administers this Service.": "The first account administers this Service."
+  "The first account administers this Service.": "The first account administers this Service.",
+  "Creates a new agent. Service validates the configuration on creation; plugin availability also depends on the execution environment.": "Creates a new agent. Service validates the configuration on creation; plugin availability also depends on the execution environment.",
+  "Help me change the agent {{name}} (ID {{id}}), starting from its version {{version}} (revision ID {{revision}}).": "Help me change the agent {{name}} (ID {{id}}), starting from its version {{version}} (revision ID {{revision}}).",
+  "How agents refer to this model. Lowercase letters, numbers, hyphens and dots; it cannot change later.": "How agents refer to this model. Lowercase letters, numbers, hyphens and dots; it cannot change later."
 }

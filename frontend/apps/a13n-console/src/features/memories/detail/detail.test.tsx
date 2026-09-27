@@ -81,7 +81,6 @@ function setup(search = "", allowed = ["read", "run", "write"]) {
     id: "mem_1",
     organization_id: "org_1",
     workspace_id: "ws_1",
-    key: "handbook",
     name: "Team handbook",
     description: "How the team works",
     kind: "file",
@@ -125,7 +124,7 @@ function setup(search = "", allowed = ["read", "run", "write"]) {
     `"${row.id}:${row.version}"`;
   const failed = (status: number, code: string) =>
     Response.json({ error: { code, message: code } }, { status });
-  const base = "/api/v1/workspaces/ws_1/memories/mem_1";
+  const base = "/api/v1/memories/mem_1";
   const fetcher: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
@@ -217,7 +216,7 @@ function setup(search = "", allowed = ["read", "run", "write"]) {
         hunks: ["@@ -1 +1 @@\n-old line\n+new line"],
       });
     }
-    if (route === "GET /api/v1/workspaces/ws_1/runs/run_edit")
+    if (route === "GET /api/v1/runs/run_edit")
       return Response.json({
         id: "run_edit",
         session_id: "ses_1",
@@ -396,7 +395,7 @@ it("creates, renames and deletes files", async () => {
   );
   await waitFor(() => expect(sent("DELETE", "/files/")).toHaveLength(1));
   expect(sent("DELETE", "/files/")[0]).toMatchObject({
-    path: "/api/v1/workspaces/ws_1/memories/mem_1/files/terms.md",
+    path: "/api/v1/memories/mem_1/files/terms.md",
     ifMatch: '"memf_glossary:8"',
   });
 });
@@ -567,7 +566,7 @@ it("deletes the memory and returns to the collection", async () => {
   );
   await screen.findByText("Memory collection");
   expect(sent("DELETE")[0]).toMatchObject({
-    path: "/api/v1/workspaces/ws_1/memories/mem_1",
+    path: "/api/v1/memories/mem_1",
     ifMatch: '"mem_1:3"',
   });
 });

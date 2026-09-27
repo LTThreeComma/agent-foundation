@@ -299,7 +299,7 @@ function SourceDirectory({
         }
         footer={
           <>
-            <Link to={providersPath("connectors", "workspace", workspace.key)}>
+            <Link to={providersPath("connectors", workspace.key)}>
               {t("Manage providers")}
             </Link>
             {!!directory.providers.length && (

@@ -20,7 +20,7 @@ interface WorkspaceContextValue {
   workspaces: Schema["Workspace"][];
   /** The caller's verb in the current workspace. */
   can: (verb: Verb) => boolean;
-  /** The caller's verb at organization scope: shared resources and administration. */
+  /** The caller's verb at organization scope for administration. */
   organizationCan: (verb: Verb) => boolean;
 }
 const Context = createContext<WorkspaceContextValue | null>(null);
@@ -191,14 +191,9 @@ function NoWorkspace({
             <>
               <Link to="/settings/profile">{t("Personal settings")}</Link>
               {admin && (
-                <>
-                  <Link to="/organization/settings">
-                    {t("Organization settings")}
-                  </Link>
-                  <Link to="/organization/settings/providers">
-                    {t("Providers")}
-                  </Link>
-                </>
+                <Link to="/organization/settings">
+                  {t("Organization settings")}
+                </Link>
               )}
               <Button
                 variant="outline"

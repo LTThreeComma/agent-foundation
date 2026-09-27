@@ -4,13 +4,13 @@ import { initialConfig } from "../configuration";
 import { buildDraftConfig, thinkingEfforts, useAgentDraft } from "./draft";
 
 const asIs = (value: string) => value;
-const vision = "mdl_00000000000000000001",
-  motion = "mdl_00000000000000000002";
+const vision = "model-00000000000000000001",
+  motion = "model-00000000000000000002";
 
 function draftFor(config: Partial<ReturnType<typeof initialConfig>> = {}) {
   const initial = {
     ...initialConfig(),
-    model: { model_id: "mdl_0123456789abcdef0123" },
+    model: "model-0123456789abcdef0123",
     ...config,
   };
   return renderHook(() => useAgentDraft(initial)).result;
@@ -99,7 +99,7 @@ it("checks model settings against the calling API's schema before publishing", (
     draft.current.setSettings('{"temperature": 0.2}');
   });
   const built = buildDraftConfig(draft.current, settingsSchema, asIs);
-  expect(built.ok && built.config.model.settings).toEqual({
+  expect(built.ok && built.config.model_settings).toEqual({
     temperature: 0.2,
     thinking: "high",
   });

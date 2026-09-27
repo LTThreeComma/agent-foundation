@@ -97,12 +97,10 @@ async def test_login_is_rate_limited(service) -> None:  # type: ignore[no-untype
 async def test_every_authenticated_answer_is_uncached_and_renews_the_session(service) -> None:  # type: ignore[no-untyped-def]
     """What authentication sets reaches a route's own response and an error too, not only a serialized result."""
     client = service.client
-    created = await client.post(f"{service.workspace}/secrets", json={"key": "TOKEN", "value": "secret-value"})
-    secret = created.json()
-    deleted = await client.delete(
-        f"{service.workspace}/secrets/{secret['id']}", headers={"if-match": etag(secret["id"], secret["version"])}
-    )
-    missing = await client.get(f"{service.workspace}/connections/conn_missing")
+    created = await client.post(f"{service.api}/memories", json={"name": "notes"})
+    memory = created.json()
+    deleted = await client.delete(f"{service.api}/memories/{memory['id']}", headers=if_match(memory))
+    missing = await client.get(f"{service.api}/connections/conn_missing")
     for response, status in ((created, 201), (deleted, 204), (missing, 404)):
         assert response.status_code == status, response.text
         assert response.headers["cache-control"] == "no-store"
@@ -147,7 +145,7 @@ async def test_workspace_key_confinement(service) -> None:  # type: ignore[no-un
             minted.status_code == 403 and minted.json()["error"]["message"] == "This operation requires a login session"
         )
     organizations = (await client.get("/api/v1/organizations", headers=bearer)).json()["items"]
-    assert [(item["id"], item["permissions"]) for item in organizations] == [(tenant.organization_id, ["read", "run"])]
+    assert [(item["id"], item["permissions"]) for item in organizations] == [(tenant.organization_id, ["read"])]
     organization = (await client.get(service.organization)).json()
     assert organization["permissions"] == ["admin", "read", "run", "write"]
     renamed = await client.patch(service.organization, headers={**bearer, **if_match(organization)}, json={"name": "x"})
@@ -190,6 +188,39 @@ async def test_workspace_key_confinement(service) -> None:  # type: ignore[no-un
     assert revoked.status_code == 200 and revoked.json()["revoked_at"] is not None
     assert (await client.delete(path, headers=if_match(revoked.json()))).status_code == 409
     assert (await client.get(service.workspace, headers=bearer)).status_code == 401
+
+
+async def test_business_requests_act_in_the_credential_workspace(service) -> None:  # type: ignore[no-untyped-def]
+    """A login session names the workspace of each business request; an API key acts in its own."""
+    tenant, agents = service.tenant, f"{service.api}/agents"
+    other = await service.client.post(f"{service.organization}/workspaces", json={"key": "other", "name": "Other"})
+    assert other.status_code == 201, other.text
+    foreign_org, foreign_ws = new_object_id("org"), new_object_id("ws")
+    async with transaction(service.runtime.storage) as session:
+        session.add(OrganizationRow(id=foreign_org, key="foreign", name="Foreign"))
+        await session.flush()
+        session.add(WorkspaceRow(id=foreign_ws, organization_id=foreign_org, key="foreign", name="Foreign"))
+    key = await service.client.post("/api/v1/users/me/keys", json={"workspace_id": tenant.workspace_id, "name": "k"})
+    assert key.status_code == 201, key.text
+
+    async with new_client(service) as client:
+        login = await client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
+        client.headers["x-csrf-token"] = login.json()["csrf_token"]
+        missing = await client.get(agents)
+        assert missing.status_code == 400 and missing.json()["error"]["details"]["field"] == "X-Workspace-ID"
+        # Management routes name their workspace in the path instead.
+        assert (await client.get(service.workspace)).status_code == 200
+        assert (await client.get(agents, headers={"x-workspace-id": other.json()["id"]})).status_code == 200
+        # The header takes a workspace ID, never its key.
+        assert (await client.get(agents, headers={"x-workspace-id": "default"})).status_code == 400
+        # A workspace outside the caller's organizations is not found, revealing nothing.
+        assert (await client.get(agents, headers={"x-workspace-id": foreign_ws})).status_code == 404
+
+    async with new_client(service, authorization="Bearer " + key.json()["secret"]) as client:
+        assert (await client.get(agents)).status_code == 200
+        assert (await client.get(agents, headers={"x-workspace-id": tenant.workspace_id})).status_code == 200
+        crossed = await client.get(agents, headers={"x-workspace-id": other.json()["id"]})
+        assert crossed.status_code == 403 and crossed.json()["error"]["code"] == "forbidden"
 
 
 async def test_reauthenticate_rechecks_without_touching_credentials(runtime, tenant) -> None:  # type: ignore[no-untyped-def]

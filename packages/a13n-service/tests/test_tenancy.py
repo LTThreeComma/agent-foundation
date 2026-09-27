@@ -190,13 +190,17 @@ async def test_grants_expand_principals_and_keep_an_organization_admin(service) 
         assert [(m["principal"]["email"], m["role"]) for m in members] == [("viewer@example.com", "viewer")]
         viewer_id = members[0]["principal"]["id"]
         assert (await viewer.get(service.workspace)).json()["permissions"] == ["read"]
-        await client.post(f"{service.organization}/workspaces", json={"key": "private", "name": "Private"})
+        private = await client.post(f"{service.organization}/workspaces", json={"key": "private", "name": "Private"})
         visible = (await viewer.get("/api/v1/workspaces")).json()["items"]
         assert [item["id"] for item in visible] == [service.tenant.workspace_id]
         # A viewer cannot administer: the denial is recorded after the rejected read.
         assert (await viewer.get(f"{service.workspace}/grants")).status_code == 403
         denied = await audit_actions(service, outcome="denied")
         assert denied == ["grant.list"]
+        # A business request acts only in a workspace the member's grants reach.
+        agents = f"{service.api}/agents"
+        assert (await viewer.get(agents, headers={"x-workspace-id": service.tenant.workspace_id})).status_code == 200
+        assert (await viewer.get(agents, headers={"x-workspace-id": private.json()["id"]})).status_code == 403
         body = {"principal_id": viewer_id, "role": "admin"}
         promoted = await client.post(f"{service.organization}/grants", json=body)
         assert promoted.status_code == 201 and promoted.json()["principal"]["name"] == "viewer"

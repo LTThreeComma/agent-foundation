@@ -217,6 +217,8 @@ async def stack(stores: Stores, tmp_path: Path, request: pytest.FixtureRequest) 
                 ),
                 201,
             )
+            # A login session names the workspace its business requests act in.
+            client.headers["x-workspace-id"] = workspace["id"]
             model = ScriptedModel(model_url)
             try:
                 yield Stack(

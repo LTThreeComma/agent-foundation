@@ -17,7 +17,7 @@ async def require_pins(session: AsyncSession, workspace_id: str, pins: Mapping[s
         return
     rows = (
         await session.execute(
-            select(SkillRevisionRow.id, SkillRevisionRow.skill_id, SkillRow.archived_at)
+            select(SkillRevisionRow.id, SkillRow.key, SkillRow.archived_at)
             .join(SkillRow, SkillRow.id == SkillRevisionRow.skill_id)
             .where(
                 SkillRevisionRow.workspace_id == workspace_id,
@@ -29,7 +29,7 @@ async def require_pins(session: AsyncSession, workspace_id: str, pins: Mapping[s
     for path, pin in pins.items():
         with at_field(path):
             row = found.get(pin.revision_id)
-            if row is None or row.skill_id != pin.skill_id:
+            if row is None or row.key != pin.skill:
                 raise not_found(SkillRevisionRow.KIND, pin.revision_id)
             if row.archived_at is not None:
-                raise conflict(SkillRow.KIND, pin.skill_id, "archived")
+                raise conflict(SkillRow.KIND, pin.skill, "archived")

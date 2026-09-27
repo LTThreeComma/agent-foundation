@@ -55,7 +55,7 @@ class Organization(_View):
     version: int
     created_at: datetime
     updated_at: datetime
-    # The caller's verbs at organization scope: `admin` administers it, `write` edits shared resources.
+    # The caller's verbs at organization scope; `admin` administers it.
     permissions: list[Verb]
 
 

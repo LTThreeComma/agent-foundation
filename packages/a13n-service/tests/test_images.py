@@ -153,7 +153,7 @@ async def test_images_are_bounded_like_uploads(serve, settings: Settings) -> Non
         assert (await client.put(AVATAR, content=PNG, headers=changing(profile))).status_code == 200
         # Images and workspace uploads share one per-principal budget.
         upload = await client.post(
-            f"{service.workspace}/uploads",
+            f"{service.api}/uploads",
             files={"file": ("a.txt", b"a", "text/plain")},
             headers={"idempotency-key": "one"},
         )

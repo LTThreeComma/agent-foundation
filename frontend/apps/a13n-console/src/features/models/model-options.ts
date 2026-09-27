@@ -1,9 +1,11 @@
-/** A model key the Service accepts: lowercase letters, digits, `_` and `-`. */
-export function suggestedKey(value: string) {
-  return value
-    .normalize("NFC")
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .slice(0, 128)
-    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
+/** A model key: lowercase letters, digits, `-` and `.`. */
+export const keyPattern = "[a-z0-9][a-z0-9.\\-]{0,127}";
+
+/**
+ * The key the Service gives a model created without one: its upstream name
+ * after the last `/`, lowercased, when that is a valid key.
+ */
+export function defaultModelKey(modelName: string): string | undefined {
+  const key = modelName.trim().split("/").at(-1)!.toLowerCase();
+  return new RegExp(`^${keyPattern}$`).test(key) ? key : undefined;
 }

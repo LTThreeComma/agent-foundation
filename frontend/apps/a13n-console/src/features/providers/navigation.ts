@@ -1,11 +1,3 @@
-export function providersPath(
-  category: string,
-  scope = "workspace",
-  workspaceKey?: string,
-) {
-  const path =
-    scope === "organization"
-      ? "/organization/settings"
-      : `/workspace/${encodeURIComponent(workspaceKey!)}/settings`;
-  return `${path}/providers?${new URLSearchParams({ category })}`;
+export function providersPath(category: string, workspaceKey: string) {
+  return `/workspace/${encodeURIComponent(workspaceKey)}/settings/providers?${new URLSearchParams({ category })}`;
 }

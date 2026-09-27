@@ -128,7 +128,9 @@ The public boundary validates and normalizes input once. Internal code consumes 
 
 ### Readable Resource Keys
 
-Service organizations, workspaces, agents, skills, models and environment templates expose a mutable `key` beside their immutable `id` and display `name`. A key matches `^[a-z0-9][a-z0-9_-]{0,127}$` and is unique in its owning scope; a duplicate is `already_exists`. [Tenancy](a13n-service/03-tenancy.md) and [resources](a13n-service/04-resources.md) own each kind's scope, default and changes, and the [API](a13n-service/10-api.md#paths-and-scope) owns path resolution. Changing a key keeps the resource ID, references, revisions and authorization; links that name the previous key stop resolving.
+Service organizations and workspaces expose a mutable `key` beside their immutable `id` and display `name`. A key matches `^[a-z0-9][a-z0-9_-]{0,127}$` and is unique in its owning scope; a duplicate is `already_exists`. [Tenancy](a13n-service/03-tenancy.md) owns each scope, default and change, and the [API](a13n-service/10-api.md#paths-and-scope) owns path resolution. Changing a key keeps the ID, references and authorization; links that name the previous key stop resolving.
+
+Service models and skills are instead identified by an immutable workspace-unique key and expose no ID ([resources](a13n-service/04-resources.md#keys)). Every other Service resource is identified by its ID alone.
 
 ## Ownership and Authority
 

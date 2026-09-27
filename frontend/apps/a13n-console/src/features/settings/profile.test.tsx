@@ -6,7 +6,9 @@ import { MemoryRouter, useLocation } from "react-router";
 import { Profile } from "./profile";
 
 const http = vi.hoisted(() => ({ GET: vi.fn(), PUT: vi.fn(), PATCH: vi.fn() }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));

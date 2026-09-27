@@ -1,4 +1,4 @@
-"""Skills with revisions, secrets, environment templates and a webhook subscription."""
+"""Skills with revisions, environment templates and a webhook subscription."""
 
 from __future__ import annotations
 
@@ -55,63 +55,55 @@ SKILLS = (
 ARCHIVED_SKILL = "legacy-style-guide"
 
 
-def seed_skills(api: Api, ws: str) -> dict[str, Json]:
-    """Every skill by key. `accessibility-review` gains a newer revision that is not its default."""
+def seed_skills(api: Api) -> None:
+    """Every skill, keyed by its SKILL.md name. `accessibility-review` gains a newer revision that is not its
+    default."""
     skills = {
-        skill.key: api.post(
-            f"{ws}/skills",
-            {"source": publish(api, ws, skill, revision=1), "labels": skill.labels},
-        )
+        skill.key: api.post("/api/v1/skills", {"source": publish(api, skill, revision=1), "labels": skill.labels})
         for skill in SKILLS
     }
     draft = next(skill for skill in SKILLS if skill.key == "accessibility-review")
-    current = skills[draft.key]
     api.post(
-        f"{ws}/skills/{current['id']}/revisions",
-        {"source": publish(api, ws, draft, revision=2), "make_default": False, "note": "Draft: adds motion checks"},
-        current=current,
+        f"/api/v1/skills/{draft.key}/revisions",
+        {"source": publish(api, draft, revision=2), "make_default": False, "note": "Draft: adds motion checks"},
+        current=skills[draft.key],
     )
-    archived = skills[ARCHIVED_SKILL]
-    skills[ARCHIVED_SKILL] = api.post(f"{ws}/skills/{archived['id']}/archive", current=archived)
-    return skills
+    api.post(f"/api/v1/skills/{ARCHIVED_SKILL}/archive", current=skills[ARCHIVED_SKILL])
 
 
-def publish(api: Api, ws: str, skill: Skill, *, revision: int) -> Json:
-    """An upload source holding the skill's package at `revision`."""
+def publish(api: Api, skill: Skill, *, revision: int) -> Json:
+    """An upload source holding the skill's package at `revision`; the manifest's name is the skill's key."""
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
         manifest = f"---\nname: {skill.key}\ndescription: {skill.description}\n---\n"
         archive.writestr(f"{skill.key}/SKILL.md", f"{manifest}# {skill.key}\n\n{skill.body}\n\nRevision {revision}.\n")
         if skill.references or revision > 1:
             archive.writestr(f"{skill.key}/references/checklist.md", "# Checklist\n\n- Navigation\n- Empty states\n")
-    upload_id = upload(api, ws, f"{skill.key}-{revision}.zip", "application/zip", package.getvalue())
+    upload_id = upload(api, f"{skill.key}-{revision}.zip", "application/zip", package.getvalue())
     return {"kind": "upload", "upload_id": upload_id}
 
 
-def seed_configuration(api: Api, ws: str, environment_providers: dict[str, Json], local_template: Json) -> None:
-    """Secrets of both scopes, a template per fictional environment account, a disabled template, and a webhook
-    subscription the scripted model's `/webhooks` route accepts."""
-    api.post(f"{ws}/secrets", {"key": "RELEASE_TOKEN", "value": "fictional-release-token"})
-    api.post(f"{ws}/secrets", {"key": "PERSONAL_NOTES_TOKEN", "value": "fictional-notes-token", "scope": "user"})
+def seed_templates(api: Api, environment_providers: dict[str, Json], local_template: Json) -> None:
+    """A template per fictional environment account and a disabled template."""
     for provider_type, provider in environment_providers.items():
-        body = {"key": f"{provider_type}-sandbox", "name": f"{provider['name']} sandbox", "provider_id": provider["id"]}
-        api.post(f"{ws}/environment-templates", {**body, "labels": {"runtime": provider_type}})
+        body = {"name": f"{provider['name']} sandbox", "provider_id": provider["id"]}
+        api.post("/api/v1/environment-templates", {**body, "labels": {"runtime": provider_type}})
     retired = api.post(
-        f"{ws}/environment-templates",
+        "/api/v1/environment-templates",
         {
-            "key": "retired-workspace",
             "name": "Retired workspace",
             "description": "Disabled: refuses new environments.",
             "provider_id": local_template["provider_id"],
             "config": local_template["config"],
         },
     )
-    api.patch(f"{ws}/environment-templates/{retired['id']}", retired, {"enabled": False})
+    api.patch(f"/api/v1/environment-templates/{retired['id']}", retired, {"enabled": False})
 
 
-def seed_subscription(api: Api, ws: str, model_url: str) -> Json:
+def seed_subscription(api: Api, model_url: str) -> Json:
+    """A webhook subscription the scripted model's `/webhooks` route accepts."""
     return api.post(
-        f"{ws}/subscriptions",
+        "/api/v1/subscriptions",
         {
             "name": "Release notifications",
             "url": model_url.removesuffix("/v1") + "/webhooks",

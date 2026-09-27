@@ -16,7 +16,9 @@ import type { AgentConfig } from "./configuration";
 import { AgentToolsets } from "./toolsets";
 
 const http = vi.hoisted(() => ({ GET: vi.fn(), POST: vi.fn() }));
-vi.mock("../../auth/context", () => ({ useClient: () => ({ http }) }));
+vi.mock("../../auth/context", () => ({
+  useClient: () => ({ http, workspace: () => http }),
+}));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: { id: "ws_test", key: "default" },
@@ -67,7 +69,7 @@ function renderDraft(starting: NonNullable<AgentConfig["toolsets"]>) {
         <AgentToolsets
           value={value}
           onChange={setValue}
-          config={{ model: { model_id: "mdl_test" }, toolsets: value }}
+          config={{ model: "model-test", toolsets: value }}
           agentId="ap_test"
         />
         <output data-testid="draft">{JSON.stringify(value)}</output>
@@ -196,11 +198,10 @@ it("keeps disabled child settings, edits permissions, and validates the candidat
   expect(draft().web.tools.search.config.max_results).toBe(7);
   await waitFor(() =>
     expect(http.POST).toHaveBeenCalledWith(
-      "/api/v1/workspaces/{workspace_id}/agents/validate",
+      "/api/v1/agents/validate",
       expect.objectContaining({
-        params: { path: { workspace_id: "ws_test" } },
         body: {
-          config: { model: { model_id: "mdl_test" }, toolsets: draft() },
+          config: { model: "model-test", toolsets: draft() },
           agent_id: "ap_test",
         },
       }),

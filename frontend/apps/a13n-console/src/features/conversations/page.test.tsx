@@ -100,7 +100,7 @@ it("renders a full Session page from collection previews without per-row Thread 
   expect(screen.getAllByText("—")).toHaveLength(2);
   expect(screen.getByRole("searchbox")).toBeTruthy();
   expect(screen.queryByText("Session detail")).toBeNull();
-  expect(requests).toEqual(["/api/v1/workspaces/workspace/sessions"]);
+  expect(requests).toEqual(["/api/v1/sessions"]);
   const row = screen.getByText("Question 0").closest("tr")!;
   await user.click(
     within(row).getByRole("button", { name: "Show resource reference" }),
@@ -320,10 +320,10 @@ it("starts a Console session that mounts the chosen template, reusing both on a 
     ),
   ).toBeTruthy();
   expect(posts.map(({ path }) => path)).toEqual([
-    "/api/v1/workspaces/workspace/sessions",
-    "/api/v1/workspaces/workspace/environments",
-    "/api/v1/workspaces/workspace/threads",
-    "/api/v1/workspaces/workspace/threads",
+    "/api/v1/sessions",
+    "/api/v1/environments",
+    "/api/v1/threads",
+    "/api/v1/threads",
   ]);
   expect(posts[0]?.body).toEqual({ labels: { "a13n.console": "debug" } });
   expect(posts[1]?.body).toEqual({ template_id: "envt_research" });

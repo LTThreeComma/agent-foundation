@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Request, Response
 
-from a13n_service.infra.http import IfMatch, PageLimit, download_headers, tagged
+from a13n_service.infra.http import IfMatch, PageLimit, download_headers, key_tagged
 from a13n_service.resources.requests import CurrentRuntime
 from a13n_service.resources.revisions import Search
 from a13n_service.resources.runtime import Runtime
@@ -24,9 +24,9 @@ from a13n_service.resources.skills.schemas import (
     SourceKind,
     UploadSource,
 )
-from a13n_service.tenancy.requests import Actor, limit_uploads
+from a13n_service.tenancy.requests import Actor, WorkspaceId, limit_uploads
 
-router = APIRouter(prefix="/api/v1/workspaces/{workspace_id}/skills", tags=["skills"])
+router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
 
 
 async def _github(request: Request, actor: Actor, runtime: Runtime, source: UploadSource | GitHubSource) -> GitHub:
@@ -43,16 +43,21 @@ async def _github(request: Request, actor: Actor, runtime: Runtime, source: Uplo
 
 @router.post("", response_model=Skill, status_code=201)
 async def create_skill(
-    request: Request, response: Response, workspace_id: str, body: SkillCreate, actor: Actor, runtime: CurrentRuntime
+    request: Request,
+    response: Response,
+    workspace_id: WorkspaceId,
+    body: SkillCreate,
+    actor: Actor,
+    runtime: CurrentRuntime,
 ) -> Skill:
     github = await _github(request, actor, runtime, body.source)
     result = await service.create_skill(runtime.storage, runtime.objects, github, actor, workspace_id, body)
-    return tagged(response, result)
+    return key_tagged(response, result)
 
 
 @router.post("/validate", response_model=SkillManifest)
 async def validate_package(
-    request: Request, workspace_id: str, body: SkillValidate, actor: Actor, runtime: CurrentRuntime
+    request: Request, workspace_id: WorkspaceId, body: SkillValidate, actor: Actor, runtime: CurrentRuntime
 ) -> SkillManifest:
     """The manifest the package would give a new skill or revision, checked as creation checks it; nothing is
     stored."""
@@ -62,7 +67,7 @@ async def validate_package(
 
 @router.get("", response_model=SkillPage)
 async def list_skills(
-    workspace_id: str,
+    workspace_id: WorkspaceId,
     actor: Actor,
     runtime: CurrentRuntime,
     label: Annotated[list[str] | None, Query()] = None,
@@ -87,64 +92,60 @@ async def list_skills(
     )
 
 
-@router.get("/{skill_id}", response_model=Skill)
+@router.get("/{key}", response_model=Skill)
 async def get_skill(
-    response: Response, workspace_id: str, skill_id: str, actor: Actor, runtime: CurrentRuntime
+    response: Response, workspace_id: WorkspaceId, key: str, actor: Actor, runtime: CurrentRuntime
 ) -> Skill:
-    return tagged(response, await service.get_skill(runtime.storage, actor, workspace_id, skill_id))
+    return key_tagged(response, await service.get_skill(runtime.storage, actor, workspace_id, key))
 
 
-@router.patch("/{skill_id}", response_model=Skill)
+@router.patch("/{key}", response_model=Skill)
 async def update_skill(
     response: Response,
-    workspace_id: str,
-    skill_id: str,
+    workspace_id: WorkspaceId,
+    key: str,
     body: SkillUpdate,
     actor: Actor,
     runtime: CurrentRuntime,
     if_match: IfMatch = None,
 ) -> Skill:
     """Name, description and labels; an archived skill changes only by unarchiving."""
-    result = await service.update_skill(runtime.storage, actor, workspace_id, skill_id, body, if_match=if_match)
-    return tagged(response, result)
+    result = await service.update_skill(runtime.storage, actor, workspace_id, key, body, if_match=if_match)
+    return key_tagged(response, result)
 
 
-@router.post("/{skill_id}/archive", response_model=Skill)
+@router.post("/{key}/archive", response_model=Skill)
 async def archive_skill(
     response: Response,
-    workspace_id: str,
-    skill_id: str,
+    workspace_id: WorkspaceId,
+    key: str,
     actor: Actor,
     runtime: CurrentRuntime,
     if_match: IfMatch = None,
 ) -> Skill:
     """Archived skills keep their revisions readable and pinned; they refuse new revisions and new pins."""
-    result = await service.set_archived(
-        runtime.storage, actor, workspace_id, skill_id, archived=True, if_match=if_match
-    )
-    return tagged(response, result)
+    result = await service.set_archived(runtime.storage, actor, workspace_id, key, archived=True, if_match=if_match)
+    return key_tagged(response, result)
 
 
-@router.post("/{skill_id}/unarchive", response_model=Skill)
+@router.post("/{key}/unarchive", response_model=Skill)
 async def unarchive_skill(
     response: Response,
-    workspace_id: str,
-    skill_id: str,
+    workspace_id: WorkspaceId,
+    key: str,
     actor: Actor,
     runtime: CurrentRuntime,
     if_match: IfMatch = None,
 ) -> Skill:
-    result = await service.set_archived(
-        runtime.storage, actor, workspace_id, skill_id, archived=False, if_match=if_match
-    )
-    return tagged(response, result)
+    result = await service.set_archived(runtime.storage, actor, workspace_id, key, archived=False, if_match=if_match)
+    return key_tagged(response, result)
 
 
-@router.post("/{skill_id}/revisions", response_model=SkillRevision, status_code=201)
+@router.post("/{key}/revisions", response_model=SkillRevision, status_code=201)
 async def create_revision(
     request: Request,
-    workspace_id: str,
-    skill_id: str,
+    workspace_id: WorkspaceId,
+    key: str,
     body: SkillRevisionCreate,
     actor: Actor,
     runtime: CurrentRuntime,
@@ -153,47 +154,47 @@ async def create_revision(
     """A package whose manifest equals the default revision's creates nothing and returns that revision."""
     github = await _github(request, actor, runtime, body.source)
     return await service.create_revision(
-        runtime.storage, runtime.objects, github, actor, workspace_id, skill_id, body, if_match=if_match
+        runtime.storage, runtime.objects, github, actor, workspace_id, key, body, if_match=if_match
     )
 
 
-@router.get("/{skill_id}/revisions", response_model=SkillRevisionPage)
+@router.get("/{key}/revisions", response_model=SkillRevisionPage)
 async def list_revisions(
-    workspace_id: str,
-    skill_id: str,
+    workspace_id: WorkspaceId,
+    key: str,
     actor: Actor,
     runtime: CurrentRuntime,
     limit: PageLimit = 50,
     cursor: str | None = None,
 ) -> SkillRevisionPage:
-    return await service.list_revisions(runtime.storage, actor, workspace_id, skill_id, limit=limit, cursor=cursor)
+    return await service.list_revisions(runtime.storage, actor, workspace_id, key, limit=limit, cursor=cursor)
 
 
-@router.get("/{skill_id}/revisions/{revision_id}", response_model=SkillRevision)
+@router.get("/{key}/revisions/{revision_id}", response_model=SkillRevision)
 async def get_revision(
-    workspace_id: str, skill_id: str, revision_id: str, actor: Actor, runtime: CurrentRuntime
+    workspace_id: WorkspaceId, key: str, revision_id: str, actor: Actor, runtime: CurrentRuntime
 ) -> SkillRevision:
-    return await service.get_revision(runtime.storage, actor, workspace_id, skill_id, revision_id)
+    return await service.get_revision(runtime.storage, actor, workspace_id, key, revision_id)
 
 
-@router.post("/{skill_id}/revisions/{revision_id}/set-default", response_model=Skill)
+@router.post("/{key}/revisions/{revision_id}/set-default", response_model=Skill)
 async def set_default_revision(
     response: Response,
-    workspace_id: str,
-    skill_id: str,
+    workspace_id: WorkspaceId,
+    key: str,
     revision_id: str,
     actor: Actor,
     runtime: CurrentRuntime,
     if_match: IfMatch = None,
 ) -> Skill:
     result = await service.set_default_revision(
-        runtime.storage, actor, workspace_id, skill_id, revision_id, if_match=if_match
+        runtime.storage, actor, workspace_id, key, revision_id, if_match=if_match
     )
-    return tagged(response, result)
+    return key_tagged(response, result)
 
 
 @router.get(
-    "/{skill_id}/revisions/{revision_id}/content",
+    "/{key}/revisions/{revision_id}/content",
     response_class=Response,
     responses={
         200: {
@@ -203,12 +204,10 @@ async def set_default_revision(
     },
 )
 async def read_archive(
-    workspace_id: str, skill_id: str, revision_id: str, actor: Actor, runtime: CurrentRuntime
+    workspace_id: WorkspaceId, key: str, revision_id: str, actor: Actor, runtime: CurrentRuntime
 ) -> Response:
     """The revision's package as a zip archive."""
-    filename, data = await content.read_archive(
-        runtime.storage, runtime.objects, actor, workspace_id, skill_id, revision_id
-    )
+    filename, data = await content.read_archive(runtime.storage, runtime.objects, actor, workspace_id, key, revision_id)
     return Response(
         data,
         media_type="application/zip",
@@ -217,7 +216,7 @@ async def read_archive(
 
 
 @router.get(
-    "/{skill_id}/revisions/{revision_id}/files/{path:path}",
+    "/{key}/revisions/{revision_id}/files/{path:path}",
     response_class=Response,
     responses={
         200: {
@@ -227,8 +226,8 @@ async def read_archive(
     },
 )
 async def read_file(
-    workspace_id: str, skill_id: str, revision_id: str, path: str, actor: Actor, runtime: CurrentRuntime
+    workspace_id: WorkspaceId, key: str, revision_id: str, path: str, actor: Actor, runtime: CurrentRuntime
 ) -> Response:
     """One package file, by the path the revision's manifest lists."""
-    data = await content.read_file(runtime.storage, runtime.objects, actor, workspace_id, skill_id, revision_id, path)
+    data = await content.read_file(runtime.storage, runtime.objects, actor, workspace_id, key, revision_id, path)
     return Response(data, media_type="application/octet-stream", headers=download_headers(None))

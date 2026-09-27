@@ -22,7 +22,7 @@ from a13n_service.infra.errors import invalid, not_found
 from a13n_service.resources.agents.schemas import SkillSelection
 from a13n_service.resources.skills.content import load_packages
 from a13n_service.resources.skills.schemas import SkillManifest
-from a13n_service.resources.skills.tables import SkillRevisionRow
+from a13n_service.resources.skills.tables import SkillRevisionRow, SkillRow
 from a13n_service.runs import placement
 from a13n_service.runs.environments.mounts import has_primary
 from a13n_service.runs.runtime import Runtime
@@ -61,17 +61,17 @@ async def resolve_skills(
     if not has_primary(run.environment_mounts):
         raise invalid("skills", "skills need the run's primary environment")
     revision_ids = [selection.revision_id for selection in selections]
-    rows = await session.scalars(
-        select(SkillRevisionRow).where(
-            SkillRevisionRow.workspace_id == run.workspace_id, SkillRevisionRow.id.in_(revision_ids)
-        )
+    rows = await session.execute(
+        select(SkillRevisionRow, SkillRow.key)
+        .join(SkillRow, SkillRow.id == SkillRevisionRow.skill_id)
+        .where(SkillRevisionRow.workspace_id == run.workspace_id, SkillRevisionRow.id.in_(revision_ids))
     )
-    found = {row.id: row for row in rows}
+    found = {row.id: (row, key) for row, key in rows.tuples()}
     pinned: list[PinnedSkill] = []
     for selection in selections:
-        row = found.get(selection.revision_id or "")
-        if row is None or row.skill_id != selection.skill_id:
-            raise not_found("skill_revision", selection.revision_id or selection.skill_id)
+        row, key = found.get(selection.revision_id or "", (None, None))
+        if row is None or key != selection.skill:
+            raise not_found("skill_revision", selection.revision_id or selection.skill)
         manifest = SkillManifest.model_validate(row.config)
         pinned.append(PinnedSkill(row.id, row.digest, manifest.name, manifest.description))
     return tuple(pinned)

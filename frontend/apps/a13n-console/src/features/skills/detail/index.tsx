@@ -27,9 +27,10 @@ export function SkillDetail() {
   const query = useQuery({
     queryKey: ["skills", workspace.id, "key", skillKey],
     queryFn: ({ signal }) =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/skills/{skill_id}", {
-          params: { path: { workspace_id: workspace.id, skill_id: skillKey } },
+      client
+        .workspace(workspace.id)
+        .GET("/api/v1/skills/{key}", {
+          params: { path: { key: skillKey } },
           signal,
         })
         .then(representation),
@@ -41,14 +42,14 @@ export function SkillDetail() {
   const revision = useQuery({
     ...revisionQuery(client, {
       id: revisionId,
-      skill_id: skill?.id ?? "",
+      skill: skill?.key ?? "",
       workspace_id: workspace.id,
     }),
     enabled: !!skill && !!revisionId,
   });
   // The first page of the Versions tab leads with the latest version.
   const latest = useQuery({
-    ...revisionsQuery(client, workspace.id, skill?.id ?? ""),
+    ...revisionsQuery(client, workspace.id, skill?.key ?? ""),
     enabled: !!skill,
   }).data?.items[0]?.number;
   if (query.isPending) return <Loading variant="detail" page />;

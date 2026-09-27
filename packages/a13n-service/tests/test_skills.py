@@ -28,11 +28,13 @@ from a13n_service.resources.skills.schemas import (
     UploadSource,
 )
 from a13n_service.resources.skills.service import create_revision, create_skill, validate_package
+from a13n_service.resources.skills.tables import SkillRow
 from a13n_service.runs import host
 from a13n_service.runs import skills as run_skills
 from a13n_service.runs.attempts import LeaseLost
 from a13n_service.settings import Settings
 from a13n_service.tenancy.authorize import BUILT_IN_ROLES, Grant, Principal
+from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
 
@@ -41,7 +43,7 @@ COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
 
 def etag(resource: dict) -> str:
-    return f'"{resource["id"]}:{resource["version"]}"'
+    return f'"{resource["key"]}:{resource["version"]}"'
 
 
 def archive(files: dict[str, bytes], *, links: tuple[str, ...] = ()) -> bytes:
@@ -59,7 +61,7 @@ def archive(files: dict[str, bytes], *, links: tuple[str, ...] = ()) -> bytes:
 
 async def stage(service, data: bytes, request_key: str) -> str:  # type: ignore[no-untyped-def]
     response = await service.client.post(
-        f"{service.workspace}/uploads",
+        f"{service.api}/uploads",
         files={"file": ("skill.zip", data, "application/zip")},
         headers={"idempotency-key": request_key},
     )
@@ -70,7 +72,7 @@ async def stage(service, data: bytes, request_key: str) -> str:  # type: ignore[
 async def create(service, data: bytes, request_key: str, **body: object) -> dict:  # type: ignore[no-untyped-def]
     upload_id = await stage(service, data, request_key)
     response = await service.client.post(
-        f"{service.workspace}/skills", json={"source": {"kind": "upload", "upload_id": upload_id}, **body}
+        f"{service.api}/skills", json={"source": {"kind": "upload", "upload_id": upload_id}, **body}
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -80,17 +82,17 @@ async def test_skill_revisions_and_package_content(service) -> None:  # type: ig
     # Packages zipped as a folder keep SKILL.md under one top-level directory.
     first = archive({"review/SKILL.md": DOCUMENT, "review/scripts/check.py": b"print('ok')\n"})
     skill = await create(service, first, "first", labels={"team": "platform"})
-    assert (skill["key"], skill["name"]) == ("code-review", "code-review")
+    assert (skill["key"], skill["name"]) == ("code-review", "code-review") and "id" not in skill
     assert skill["description"] == "Review a change for correctness."
-    base = f"{service.workspace}/skills"
-    by_key = await service.client.get(f"{base}/code-review")
-    assert by_key.json()["id"] == skill["id"] and by_key.headers["etag"] == etag(skill)
+    base = f"{service.api}/skills"
+    item = f"{base}/code-review"
+    by_key = await service.client.get(item)
+    assert by_key.json() == skill and by_key.headers["etag"] == f'"code-review:{skill["version"]}"'
 
-    item = f"{base}/{skill['id']}"
     revisions = (await service.client.get(f"{item}/revisions")).json()["items"]
     assert [revision["number"] for revision in revisions] == [1]
     first_revision = revisions[0]
-    assert first_revision["id"] == skill["default_revision_id"]
+    assert (first_revision["id"], first_revision["skill"]) == (skill["default_revision_id"], "code-review")
     manifest = first_revision["config"]
     assert manifest["root"] == "review/" and manifest["source"]["kind"] == "upload"
     assert [file["path"] for file in manifest["files"]] == ["SKILL.md", "scripts/check.py"]
@@ -123,7 +125,9 @@ async def test_skill_revisions_and_package_content(service) -> None:  # type: ig
     rest = await service.client.get(f"{item}/revisions", params={"limit": 1, "cursor": page["next_cursor"]})
     assert [revision["number"] for revision in rest.json()["items"]] == [1]
     # A position past any revision number is refused before it reaches the database.
-    beyond = cursors.encode("skill_revisions", skill["id"], 2**31)
+    async with short_session(service.runtime.storage) as session:
+        skill_id = await session.scalar(select(SkillRow.id).where(SkillRow.key == "code-review"))
+    beyond = cursors.encode("skill_revisions", skill_id, 2**31)
     refused = await service.client.get(f"{item}/revisions", params={"cursor": beyond})
     assert refused.status_code == 400 and refused.json()["error"]["code"] == "invalid_cursor"
 
@@ -145,8 +149,8 @@ async def test_skill_revisions_and_package_content(service) -> None:  # type: ig
     assert same.status_code == 200 and same.json()["version"] == renamed.json()["version"]
     stale = await service.client.patch(item, json={"name": "x"}, headers={"if-match": promoted.headers["etag"]})
     assert stale.status_code == 412
-    assert [s["id"] for s in (await service.client.get(base, params={"label": "team:tools"})).json()["items"]] == [
-        skill["id"]
+    assert [s["key"] for s in (await service.client.get(base, params={"label": "team:tools"})).json()["items"]] == [
+        "code-review"
     ]
     assert (await service.client.get(base, params={"label": "team:platform"})).json()["items"] == []
 
@@ -189,7 +193,7 @@ async def test_unsafe_or_invalid_packages_are_refused(service) -> None:  # type:
     for index, (files, links, reason) in enumerate(refused):
         upload_id = await stage(service, archive(files, links=links), f"bad-{index}")
         response = await service.client.post(
-            f"{service.workspace}/skills", json={"source": {"kind": "upload", "upload_id": upload_id}}
+            f"{service.api}/skills", json={"source": {"kind": "upload", "upload_id": upload_id}}
         )
         assert response.status_code == 400, response.text
         assert reason in response.json()["error"]["message"], files
@@ -199,18 +203,22 @@ async def test_package_limits_keys_and_authorization(service) -> None:  # type: 
     crowded = {"SKILL.md": DOCUMENT, **{f"f/{index}.txt": b"" for index in range(1000)}}
     upload_id = await stage(service, archive(crowded), "crowded")
     too_many = await service.client.post(
-        f"{service.workspace}/skills", json={"source": {"kind": "upload", "upload_id": upload_id}}
+        f"{service.api}/skills", json={"source": {"kind": "upload", "upload_id": upload_id}}
     )
     assert too_many.status_code == 413 and too_many.json()["error"]["details"] == {"limit": 1000}
 
+    # The key is the SKILL.md name, which must make a valid key; a create names no other.
     unnamed = archive({"SKILL.md": b"---\nname: Code Review\ndescription: d\n---\n"})
-    upload_id = await stage(service, unnamed, "unnamed")
-    source = {"kind": "upload", "upload_id": upload_id}
-    keyless = await service.client.post(f"{service.workspace}/skills", json={"source": source})
-    assert keyless.status_code == 400 and keyless.json()["error"]["details"]["field"] == "key"
-    keyed = await service.client.post(f"{service.workspace}/skills", json={"source": source, "key": "review"})
-    assert keyed.status_code == 201 and keyed.json()["name"] == "Code Review"
-    duplicate = await service.client.post(f"{service.workspace}/skills", json={"source": source, "key": "review"})
+    unkeyed = {"kind": "upload", "upload_id": await stage(service, unnamed, "unnamed")}
+    for path in ("/skills", "/skills/validate"):
+        refused = await service.client.post(f"{service.api}{path}", json={"source": unkeyed})
+        assert refused.status_code == 400 and refused.json()["error"]["details"]["field"] == "source", path
+    source = {"kind": "upload", "upload_id": await stage(service, archive({"SKILL.md": DOCUMENT}), "named")}
+    keyed = await service.client.post(f"{service.api}/skills", json={"source": source, "key": "review"})
+    assert keyed.status_code == 400
+    named = await service.client.post(f"{service.api}/skills", json={"source": source, "name": "Code Review"})
+    assert named.status_code == 201 and (named.json()["key"], named.json()["name"]) == ("code-review", "Code Review")
+    duplicate = await service.client.post(f"{service.api}/skills", json={"source": source})
     assert duplicate.status_code == 409 and duplicate.json()["error"]["code"] == "already_exists"
 
     viewer = Principal(
@@ -226,7 +234,7 @@ async def test_package_limits_keys_and_authorization(service) -> None:  # type: 
             GitHub(runtime.endpoint_policy, timeout=5, max_bytes=1024),
             viewer,
             service.tenant.workspace_id,
-            SkillCreate.model_validate({"source": source, "key": "viewer"}),
+            SkillCreate.model_validate({"source": source}),
         )
     assert denied.value.code == "forbidden"
 
@@ -293,7 +301,7 @@ async def import_skill(service, github: GitHub, source: dict) -> Skill:  # type:
     )
 
 
-async def import_revision(service, github: GitHub, skill_id: str, source: dict, *, if_match: str):  # type: ignore[no-untyped-def]
+async def import_revision(service, github: GitHub, key: str, source: dict, *, if_match: str):  # type: ignore[no-untyped-def]
     runtime, body = service.runtime, SkillRevisionCreate.model_validate({"source": source})
     return await create_revision(
         runtime.storage,
@@ -301,7 +309,7 @@ async def import_revision(service, github: GitHub, skill_id: str, source: dict, 
         github,
         admin(service),
         service.tenant.workspace_id,
-        skill_id,
+        key,
         body,
         if_match=if_match,
     )
@@ -326,7 +334,7 @@ async def test_github_import_records_the_resolved_commit(service) -> None:  # ty
     with github_server(archive(REPOSITORY)) as (url, requests):
         github = importer(service, url)
         skill = await import_skill(service, github, SOURCE)
-        item = f"{service.workspace}/skills/{skill.id}"
+        item = f"{service.api}/skills/{skill.key}"
         revision = (await service.client.get(f"{item}/revisions")).json()["items"][0]
         assert revision["config"]["source"] == {**SOURCE, "commit": COMMIT}
         assert [file["path"] for file in revision["config"]["files"]] == ["SKILL.md", "notes.md"]
@@ -337,7 +345,7 @@ async def test_github_import_records_the_resolved_commit(service) -> None:  # ty
         ]
 
         # Importing the same commit again reuses the staged package.
-        again = await import_revision(service, github, skill.id, SOURCE, if_match=f'"{skill.id}:{skill.version}"')
+        again = await import_revision(service, github, skill.key, SOURCE, if_match=f'"{skill.key}:{skill.version}"')
         assert again.config.package_digest == revision["config"]["package_digest"]
 
         mismatch = await refused(import_skill(service, github, {**SOURCE, "commit": "f" * 40}))
@@ -346,7 +354,7 @@ async def test_github_import_records_the_resolved_commit(service) -> None:  # ty
         empty = await refused(import_skill(service, github, {**SOURCE, "path": "skills/absent"}))
         assert unknown.code == empty.code == "invalid_argument"
     traversal = await service.client.post(
-        f"{service.workspace}/skills", json={"source": {**SOURCE, "path": "skills/../secrets"}}
+        f"{service.api}/skills", json={"source": {**SOURCE, "path": "skills/../secrets"}}
     )
     assert traversal.status_code == 400
 
@@ -367,11 +375,13 @@ async def test_github_imports_are_bounded_and_preconditions_come_first(service) 
     skill = await create(service, archive({"SKILL.md": DOCUMENT}), "uploaded")
     with github_server(archive(REPOSITORY)) as (url, requests):
         github = importer(service, url)
-        stale = await refused(import_revision(service, github, skill["id"], SOURCE, if_match=f'"{skill["id"]}:0"'))
+        stale = await refused(import_revision(service, github, skill["key"], SOURCE, if_match=f'"{skill["key"]}:0"'))
         archived = await service.client.post(
-            f"{service.workspace}/skills/{skill['id']}/archive", headers={"if-match": etag(skill)}
+            f"{service.api}/skills/{skill['key']}/archive", headers={"if-match": etag(skill)}
         )
-        closed = await refused(import_revision(service, github, skill["id"], SOURCE, if_match=archived.headers["etag"]))
+        closed = await refused(
+            import_revision(service, github, skill["key"], SOURCE, if_match=archived.headers["etag"])
+        )
     assert (stale.code, closed.details["reason"]) == ("precondition_failed", "archived")
     assert requests == []
 
@@ -391,15 +401,15 @@ async def test_github_imports_spend_the_upload_budget(  # type: ignore[no-untype
     objects = settings.objects.model_copy(update={"upload_limit": 1})
     async with serve(settings=settings.model_copy(update={"objects": objects})) as service:
         skill = await create(service, archive({"SKILL.md": DOCUMENT}), "only")
-        skills = f"{service.workspace}/skills"
-        for path in (skills, f"{skills}/validate", f"{skills}/{skill['id']}/revisions"):
+        skills = f"{service.api}/skills"
+        for path in (skills, f"{skills}/validate", f"{skills}/{skill['key']}/revisions"):
             imported = await service.client.post(path, json={"source": SOURCE}, headers={"if-match": etag(skill)})
             assert imported.status_code == 429, (path, imported.text)
     assert fetched == []
 
 
 async def test_package_validation_reads_the_manifest_and_stores_nothing(service, settings: Settings) -> None:  # type: ignore[no-untyped-def]
-    validate = f"{service.workspace}/skills/validate"
+    validate = f"{service.api}/skills/validate"
     source = {"kind": "upload", "upload_id": await stage(service, archive({"review/SKILL.md": DOCUMENT}), "checked")}
     checked = await service.client.post(validate, json={"source": source})
     assert checked.status_code == 200, checked.text
@@ -409,10 +419,10 @@ async def test_package_validation_reads_the_manifest_and_stores_nothing(service,
         "Review a change for correctness.",
         "review/",
     )
-    assert (await service.client.get(f"{service.workspace}/skills")).json()["items"] == []
+    assert (await service.client.get(f"{service.api}/skills")).json()["items"] == []
     # Creation freezes exactly the manifest validation showed.
-    skill = await service.client.post(f"{service.workspace}/skills", json={"source": source})
-    revision = f"{service.workspace}/skills/{skill.json()['id']}/revisions/{skill.json()['default_revision_id']}"
+    skill = await service.client.post(f"{service.api}/skills", json={"source": source})
+    revision = f"{service.api}/skills/{skill.json()['key']}/revisions/{skill.json()['default_revision_id']}"
     assert (await service.client.get(revision)).json()["config"] == manifest
 
     invalid = {"kind": "upload", "upload_id": await stage(service, archive({"README.md": b"x"}), "invalid")}
@@ -452,11 +462,11 @@ async def test_package_validation_reads_the_manifest_and_stores_nothing(service,
 
 async def test_skill_lists_filter_and_summarize_the_default_revision(service) -> None:  # type: ignore[no-untyped-def]
     review = await create(service, archive({"SKILL.md": DOCUMENT}), "review")
-    lint = b"---\nname: lint_all\ndescription: Report 100% of style issues.\n---\n"
+    lint = b"---\nname: lint-all\ndescription: Report 100% of style issues in snake_case.\n---\n"
     linter = await create(service, archive({"SKILL.md": lint}), "lint")
     with github_server(archive(REPOSITORY)) as (url, _):
         other = await import_skill(service, importer(service, url), {**SOURCE, "path": "skills/other"})
-    base = f"{service.workspace}/skills"
+    base = f"{service.api}/skills"
 
     async def keys(**params: str) -> set[str]:
         response = await service.client.get(base, params=params)
@@ -465,24 +475,24 @@ async def test_skill_lists_filter_and_summarize_the_default_revision(service) ->
 
     # Text matches the key, name or description, ignoring case; wildcards are literal.
     assert await keys(q="REVIEW") == {"code-review"}
-    assert await keys(q="style") == await keys(q="%") == await keys(q="_") == {"lint_all"}
+    assert await keys(q="style") == await keys(q="%") == await keys(q="_") == {"lint-all"}
     assert await keys(source="github") == {"other"}
-    assert await keys(source="upload") == {"code-review", "lint_all"}
-    await service.client.post(f"{base}/{linter['id']}/archive", headers={"if-match": etag(linter)})
-    assert await keys(archived="true") == {"lint_all"}
+    assert await keys(source="upload") == {"code-review", "lint-all"}
+    await service.client.post(f"{base}/{linter['key']}/archive", headers={"if-match": etag(linter)})
+    assert await keys(archived="true") == {"lint-all"}
     assert await keys(archived="false") == {"code-review", "other"}
-    assert await keys() == {"code-review", "lint_all", "other"}
+    assert await keys() == {"code-review", "lint-all", "other"}
     for params in ({"source": "zip"}, {"q": ""}, {"q": "x" * 257}):
         assert (await service.client.get(base, params=params)).status_code == 400, params
 
-    [listed] = [item for item in (await service.client.get(base)).json()["items"] if item["id"] == other.id]
+    [listed] = [item for item in (await service.client.get(base)).json()["items"] if item["key"] == other.key]
     assert listed["default_revision"] == {
         "id": other.default_revision_id,
         "number": 1,
         "source": {**SOURCE, "path": "skills/other", "commit": COMMIT},
     }
     upload_id = await stage(service, archive({"SKILL.md": DOCUMENT + b"More.\n"}), "second")
-    item = f"{base}/{review['id']}"
+    item = f"{base}/{review['key']}"
     second = await service.client.post(
         f"{item}/revisions",
         json={"source": {"kind": "upload", "upload_id": upload_id}},
@@ -497,13 +507,18 @@ async def test_skill_lists_filter_and_summarize_the_default_revision(service) ->
     }
 
 
-async def test_skill_ids_take_precedence_over_keys(service) -> None:  # type: ignore[no-untyped-def]
-    first = await create(service, archive({"SKILL.md": DOCUMENT}), "first")
-    # A key may look like an ID; a reference naming an existing ID still resolves to that skill.
-    shadow = await create(service, archive({"SKILL.md": DOCUMENT}), "shadow", key=first["id"])
-    base = f"{service.workspace}/skills"
-    assert (await service.client.get(f"{base}/{first['id']}")).json()["id"] == first["id"]
-    assert (await service.client.get(f"{base}/{shadow['id']}")).json()["key"] == first["id"]
+async def test_every_revision_declares_the_skill_key_as_its_name(service) -> None:  # type: ignore[no-untyped-def]
+    """The model sees a skill by its SKILL.md name, so a revision declaring another name is refused."""
+    skill = await create(service, archive({"SKILL.md": DOCUMENT}), "first")
+    renamed = archive({"SKILL.md": b"---\nname: review\ndescription: Review.\n---\n"})
+    source = {"kind": "upload", "upload_id": await stage(service, renamed, "renamed")}
+    item = f"{service.api}/skills/code-review"
+    refused = await service.client.post(f"{item}/revisions", json={"source": source}, headers={"if-match": etag(skill)})
+    assert refused.status_code == 400 and refused.json()["error"]["details"]["field"] == "source", refused.text
+    assert [revision["number"] for revision in (await service.client.get(f"{item}/revisions")).json()["items"]] == [1]
+    # The package makes a skill of its own under the name it declares.
+    other = await service.client.post(f"{service.api}/skills", json={"source": source})
+    assert other.status_code == 201 and other.json()["key"] == "review", other.text
 
 
 def with_declared(files: dict[str, bytes], change: str) -> bytes:
@@ -560,7 +575,6 @@ async def test_pins_and_the_agents_pinning_a_skill(service) -> None:  # type: ig
                 id=agent_id,
                 organization_id=service.tenant.organization_id,
                 workspace_id=workspace_id,
-                key="reviewer",
                 name="Reviewer",
                 description="",
                 labels={},
@@ -577,35 +591,35 @@ async def test_pins_and_the_agents_pinning_a_skill(service) -> None:  # type: ig
                 workspace_id=workspace_id,
                 agent_id=agent_id,
                 number=1,
-                config={"skills": [{"skill_id": skill["id"], "revision_id": revision_id}]},
+                config={"skills": [{"skill": "code-review", "revision_id": revision_id}]},
                 digest="0" * 64,
                 created_by_id=service.tenant.principal_id,
             )
         )
 
-    # The agents listing answers which agents pin a skill, or one revision of it.
-    agents = f"{service.workspace}/agents"
+    # The agents listing answers which agents pin a skill, by key, or one revision of it.
+    agents = f"{service.api}/agents"
 
     async def pinning(**params: str) -> list[str]:
         response = await service.client.get(agents, params=params)
         assert response.status_code == 200, response.text
         return [item["id"] for item in response.json()["items"]]
 
-    assert await pinning(skill_id=skill["id"]) == [agent_id]
-    assert await pinning(skill_id=skill["id"], skill_revision_id=revision_id) == [agent_id]
+    assert await pinning(skill="code-review") == [agent_id]
+    assert await pinning(skill="code-review", skill_revision_id=revision_id) == [agent_id]
     assert await pinning(skill_revision_id="skr_" + "0" * 24) == []
-    assert await pinning(skill_id="sk_" + "0" * 20) == []
+    assert await pinning(skill="other") == []
 
     # A new pin is refused at its field path.
-    pin = SkillPin(skill_id=skill["id"], revision_id=revision_id)
+    pin = SkillPin(skill="code-review", revision_id=revision_id)
     async with short_session(storage) as session:
         await pins.require_pins(session, workspace_id, {"skills.0": pin})
         with pytest.raises(ServiceError) as foreign:
             await pins.require_pins(
-                session, workspace_id, {"skills.1": SkillPin(skill_id="sk_" + "0" * 20, revision_id=revision_id)}
+                session, workspace_id, {"skills.1": SkillPin(skill="other", revision_id=revision_id)}
             )
     assert (foreign.value.details["field"], foreign.value.details["kind"]) == ("skills.1", "skill_revision")
-    await service.client.post(f"{service.workspace}/skills/{skill['id']}/archive", headers={"if-match": etag(skill)})
+    await service.client.post(f"{service.api}/skills/code-review/archive", headers={"if-match": etag(skill)})
     async with short_session(storage) as session:
         with pytest.raises(ServiceError) as archived:
             await pins.require_pins(session, workspace_id, {"skills.0": pin})
@@ -616,14 +630,12 @@ async def _skilled_run(service, runs_kit, scripted_model, tmp_path) -> tuple[dic
     """A run of an agent with a pinned skill in a local primary environment, and where its skills materialize."""
     await runs_kit.pause_sweeps(service)
     provider = await service.client.post(
-        f"{service.organization}/environment-providers",
-        json={"workspace_id": None, "type": "local", "name": "Local"},
+        f"{service.api}/environment-providers", json={"type": "local", "name": "Local"}
     )
     assert provider.status_code == 201, provider.text
     template = await service.client.post(
-        f"{service.workspace}/environment-templates",
+        f"{service.api}/environment-templates",
         json={
-            "key": "local",
             "name": "Local",
             "provider_id": provider.json()["id"],
             "config": {"recipe": {"root": {"path": str(tmp_path)}}},
@@ -634,7 +646,7 @@ async def _skilled_run(service, runs_kit, scripted_model, tmp_path) -> tuple[dic
     agent = await runs_kit.create_agent(
         service,
         scripted_model,
-        skills=[{"skill_id": skill["id"]}],
+        skills=[{"skill": skill["key"]}],
         default_environment_template_id=template.json()["id"],
     )
     run = (await runs_kit.start_thread(service, agent, "review it"))["run"]
@@ -661,7 +673,7 @@ async def test_a_skill_package_the_object_store_cannot_serve_is_materialized_by_
         await (await runs_kit.attempt(service))
         released = await runs_kit.get_run(service, run["id"])
         assert released["status"] == "accepted", released
-        attempts = (await service.client.get(f"{service.workspace}/runs/{run['id']}/attempts")).json()["items"]
+        attempts = (await service.client.get(f"{service.api}/runs/{run['id']}/attempts")).json()["items"]
         assert [(item["status"], item["failure"]["code"]) for item in attempts] == [("failed", "attempt_failed")]
         assert not list(skills_root.glob("*.complete")) and scripted_model.requests.empty()
 

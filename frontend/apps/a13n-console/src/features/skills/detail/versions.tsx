@@ -34,7 +34,7 @@ export function Revisions({
     cache = useQueryClient(),
     page = useCursor();
   const query = useQuery(
-    revisionsQuery(client, skill.workspace_id, skill.id, page.cursor),
+    revisionsQuery(client, skill.workspace_id, skill.key, page.cursor),
   );
   if (query.isPending) return <Loading variant="list" rows={4} />;
   if (!query.data)
@@ -92,14 +92,14 @@ export function Revisions({
                               "Version information is unavailable. Reload this page.",
                             ),
                           );
-                        await client.http
+                        await client
+                          .workspace(skill.workspace_id)
                           .POST(
-                            "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/revisions/{revision_id}/set-default",
+                            "/api/v1/skills/{key}/revisions/{revision_id}/set-default",
                             {
                               params: {
                                 path: {
-                                  workspace_id: skill.workspace_id,
-                                  skill_id: skill.id,
+                                  key: skill.key,
                                   revision_id: revision.id,
                                 },
                               },

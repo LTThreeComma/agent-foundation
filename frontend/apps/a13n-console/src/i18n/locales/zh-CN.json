@@ -927,7 +927,6 @@
   "Dependency unavailable. Choose a resource in this workspace.": "依赖不可用，请选择当前工作区中的资源。",
   "Pinned version unavailable. Edit the YAML version or choose another resource.": "固定版本不可用，请修改 YAML 中的版本或选择其他资源。",
   "Configuration preview": "配置预览",
-  "Creates a new agent. Service validates the configuration on creation; plugin availability and secret access also depend on the execution environment.": "将创建新 Agent。Service 会在创建时校验配置；插件可用性和密钥访问权限还取决于执行环境。",
   "The Agent YAML file is too deeply nested.": "Agent YAML 文件的嵌套层级过深。",
   "The Agent YAML file is too complex.": "Agent YAML 文件过于复杂。",
   "YAML aliases are not supported in Agent files.": "Agent 文件不支持 YAML 别名。",
@@ -1532,7 +1531,6 @@
   "Manage Web Providers": "管理网页服务商",
   "deleted": "已删除",
   "deleting": "删除中",
-  "Help me change the agent {{name}} (key {{key}}, ID {{id}}), starting from its version {{version}} (revision ID {{revision}}).": "请帮我修改 Agent {{name}}（Key {{key}}，ID {{id}}），以它的版本 {{version}}（修订版本 ID {{revision}}）为起点。",
   "Unsupported Agent file version. Expected schema_version: 2.": "不支持此 Agent 文件版本，需要 schema_version: 2。",
   "Create from template allocates a new environment. Reuse existing keeps the same environment and its retained files, including across sessions. A stopped environment starts again when the run needs it.": "从模板创建会分配新环境。复用已有环境会继续使用同一环境及其保留的文件，也可跨会话复用。已停止的环境会在运行需要时重新启动。",
   "Resubmit": "重新提交",
@@ -1725,5 +1723,8 @@
   "The records of this namespace are still being deleted with a deleted memory. Try again once that finishes.": "此命名空间的记录仍在随已删除的记忆一起删除。请在完成后重试。",
   "No matching memories": "没有匹配的记忆",
   "Create administrator": "创建管理员",
-  "The first account administers this Service.": "第一个账号将管理此服务。"
+  "The first account administers this Service.": "第一个账号将管理此服务。",
+  "Creates a new agent. Service validates the configuration on creation; plugin availability also depends on the execution environment.": "将创建新 Agent。Service 会在创建时校验配置；插件可用性还取决于执行环境。",
+  "Help me change the agent {{name}} (ID {{id}}), starting from its version {{version}} (revision ID {{revision}}).": "帮我修改 Agent {{name}}（ID {{id}}），从其版本 {{version}}（修订 ID {{revision}}）开始。",
+  "How agents refer to this model. Lowercase letters, numbers, hyphens and dots; it cannot change later.": "Agent 引用此模型时使用的标识。仅限小写字母、数字、连字符和点，创建后不可更改。"
 }

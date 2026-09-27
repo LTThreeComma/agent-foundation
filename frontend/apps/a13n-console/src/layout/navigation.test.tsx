@@ -205,7 +205,7 @@ it("searches the settings navigation without changing the selected page", async 
   const navigation = within(
     screen.getByRole("navigation", { name: "Settings navigation" }),
   );
-  expect(navigation.getByRole("link", { name: "Models" })).toBeTruthy();
+  expect(navigation.getByRole("link", { name: "Providers" })).toBeTruthy();
   await user.type(
     screen.getByRole("searchbox", { name: "Search settings" }),
     "password",

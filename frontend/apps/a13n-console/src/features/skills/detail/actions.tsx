@@ -55,7 +55,7 @@ export function SkillMenu({
   const skill = resource.value;
   const [renaming, setRenaming] = useState(false);
   const download = useArchiveDownload(
-    { id: revisionId, skill_id: skill.id, workspace_id: skill.workspace_id },
+    { id: revisionId, skill: skill.key, workspace_id: skill.workspace_id },
     `${skill.key}-v${version}.zip`,
   );
   return (
@@ -116,16 +116,16 @@ export function SkillMenu({
                         "Version information is unavailable. Reload this page.",
                       ),
                     );
-                  await client.http
+                  await client
+                    .workspace(skill.workspace_id)
                     .POST(
                       skill.archived_at
-                        ? "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/unarchive"
-                        : "/api/v1/workspaces/{workspace_id}/skills/{skill_id}/archive",
+                        ? "/api/v1/skills/{key}/unarchive"
+                        : "/api/v1/skills/{key}/archive",
                       {
                         params: {
                           path: {
-                            workspace_id: skill.workspace_id,
-                            skill_id: skill.id,
+                            key: skill.key,
                           },
                         },
                         headers: ifMatch(resource.etag),
@@ -175,12 +175,12 @@ function RenameForm({
         throw new Error(
           t("Version information is unavailable. Reload this page."),
         );
-      return client.http
-        .PATCH("/api/v1/workspaces/{workspace_id}/skills/{skill_id}", {
+      return client
+        .workspace(basis.value.workspace_id)
+        .PATCH("/api/v1/skills/{key}", {
           params: {
             path: {
-              workspace_id: basis.value.workspace_id,
-              skill_id: basis.value.id,
+              key: basis.value.key,
             },
           },
           headers: ifMatch(basis.etag),
@@ -195,12 +195,12 @@ function RenameForm({
   });
   const reload = useMutation({
     mutationFn: () =>
-      client.http
-        .GET("/api/v1/workspaces/{workspace_id}/skills/{skill_id}", {
+      client
+        .workspace(basis.value.workspace_id)
+        .GET("/api/v1/skills/{key}", {
           params: {
             path: {
-              workspace_id: basis.value.workspace_id,
-              skill_id: basis.value.id,
+              key: basis.value.key,
             },
           },
         })

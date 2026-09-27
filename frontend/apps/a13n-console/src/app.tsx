@@ -196,10 +196,7 @@ function AppContent() {
                       <Route index element={<Navigate to="agents" replace />} />
                       <Route path="agents" element={<Agents />} />
                       <Route path="agents/new" element={<CreateAgent />} />
-                      <Route
-                        path="agents/:agentKey"
-                        element={<AgentDetail />}
-                      />
+                      <Route path="agents/:agentId" element={<AgentDetail />} />
                       <Route path="sessions" element={<ConversationsPage />}>
                         <Route path="new" element={<NewConversation />} />
                         <Route path=":sessionId" element={<SessionLayout />}>

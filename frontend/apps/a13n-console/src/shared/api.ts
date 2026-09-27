@@ -17,10 +17,13 @@ export function isUnauthorized(error: unknown) {
 }
 /**
  * The Service's strong ETag of a row as the reader saw it, for rows read from a
- * collection, whose response carries no per-item ETag.
+ * collection, whose response carries no per-item ETag. Models and skills are
+ * identified by key.
  */
-export function rowTag(row: { id: string; version: number }) {
-  return `"${row.id}:${row.version}"`;
+export function rowTag(
+  row: ({ id: string } | { key: string }) & { version: number },
+) {
+  return `"${"id" in row ? row.id : row.key}:${row.version}"`;
 }
 export function ifMatch(etag: string | undefined) {
   return etag ? { "If-Match": etag } : {};
@@ -37,9 +40,8 @@ export async function uploadFile(
   key: string,
 ): Promise<Schema["Upload"]> {
   return data(
-    await client.http.POST("/api/v1/workspaces/{workspace_id}/uploads", {
+    await client.workspace(workspaceId).POST("/api/v1/uploads", {
       params: {
-        path: { workspace_id: workspaceId },
         header: commandHeaders(key),
       },
       body: { file },

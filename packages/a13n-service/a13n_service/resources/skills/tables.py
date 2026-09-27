@@ -14,6 +14,7 @@ from a13n_service.resources.revisions import RevisionColumns
 class SkillRow(Stamped, Base):
     __tablename__ = "skills"
     KIND: ClassVar[str] = "skill"
+    REFERENCE: ClassVar[str] = "key"
     __table_args__ = (
         UniqueConstraint("workspace_id", "key"),
         UniqueConstraint("workspace_id", "id"),
@@ -31,6 +32,7 @@ class SkillRow(Stamped, Base):
     id: Mapped[str] = mapped_column(String(72), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"))
     workspace_id: Mapped[str]
+    # The SKILL.md name every revision's package declares.
     key: Mapped[str]
     name: Mapped[str]
     description: Mapped[str]
