@@ -17,7 +17,7 @@ vi.mock("../../auth/context", () => ({
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     organization: { id: "org_test" },
-    workspace: { id: "ws_test", key: "research" },
+    workspace: { id: "ws_test" },
     can: () => true,
   }),
 }));

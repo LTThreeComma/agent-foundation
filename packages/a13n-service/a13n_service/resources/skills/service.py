@@ -9,14 +9,13 @@ import json
 from collections.abc import Sequence
 
 from anyio import to_thread
-from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from a13n_service.infra import cursors
 from a13n_service.infra.db import Storage, short_session, transaction, unique_key
 from a13n_service.infra.errors import invalid
-from a13n_service.infra.ids import Key, new_object_id
+from a13n_service.infra.ids import KEY_MAX_LENGTH, is_key, new_object_id
 from a13n_service.infra.labels import label_filter
 from a13n_service.infra.objects.interface import ObjectStore
 from a13n_service.resources import revisions
@@ -43,15 +42,14 @@ from a13n_service.resources.uploads import service as uploads
 from a13n_service.tenancy.access import workspace_scope
 from a13n_service.tenancy.authorize import Principal, WorkspaceScope
 
-_KEY = TypeAdapter(Key)
 
-
-def _key(manifest: SkillManifest) -> str:
-    """The key a skill created from `manifest` takes: its SKILL.md name."""
-    try:
-        return _KEY.validate_python(manifest.name)
-    except ValidationError:
-        raise invalid("source", "the SKILL.md name is not a valid skill key") from None
+def _check_name(name: str, key: str | None) -> None:
+    """A new skill (`key` None) takes its SKILL.md name as its key; every later revision declares that key."""
+    if key is None:
+        if not is_key(name):
+            raise invalid("source", "the SKILL.md name is not a valid skill key")
+    elif name != key:
+        raise invalid("source", f"the SKILL.md name must stay {key}")
 
 
 async def resolve_skill(session: AsyncSession, workspace_id: str, reference: str, *, lock: bool = False) -> SkillRow:
@@ -63,9 +61,10 @@ async def resolve_revision(session: AsyncSession, head: SkillRow, revision_id: s
 
 
 async def _read(
-    objects: ObjectStore, github: GitHub, scope: WorkspaceScope, source: UploadSource | GitHubSource
+    objects: ObjectStore, github: GitHub, scope: WorkspaceScope, source: UploadSource | GitHubSource, key: str | None
 ) -> tuple[SkillManifest, bytes]:
-    """Read and validate a package outside any transaction: the manifest its revision freezes, and its archive."""
+    """Read and validate a package outside any transaction, before anything is stored: the manifest its revision
+    freezes, and its archive. `key` is the skill's when the package is a new revision of one."""
     if isinstance(source, UploadSource):
         _, archive = await uploads.load(objects, scope, source.upload_id)
         recorded: UploadSource | GitHubSource = source
@@ -74,6 +73,7 @@ async def _read(
         archive = await to_thread.run_sync(package.pack, files)
         recorded = source.model_copy(update={"commit": commit})
     contents = await to_thread.run_sync(package.read_package, archive)
+    _check_name(contents.name, key)
     manifest = SkillManifest(
         name=contents.name,
         description=contents.description,
@@ -88,11 +88,16 @@ async def _read(
 
 
 async def _prepare(
-    objects: ObjectStore, github: GitHub, scope: WorkspaceScope, actor: Principal, source: UploadSource | GitHubSource
+    objects: ObjectStore,
+    github: GitHub,
+    scope: WorkspaceScope,
+    actor: Principal,
+    source: UploadSource | GitHubSource,
+    key: str | None,
 ) -> tuple[SkillManifest, str]:
     """A package's manifest and the object its revision references: an upload in place, GitHub content staged as
     the actor's upload."""
-    manifest, archive = await _read(objects, github, scope, source)
+    manifest, archive = await _read(objects, github, scope, source, key)
     if isinstance(source, UploadSource):
         return manifest, uploads.object_key(scope.organization_id, source.upload_id)
     # Derived from what was read, so importing the same content again reuses the staged archive.
@@ -148,8 +153,8 @@ async def create_skill(
 ) -> Skill:
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
-    manifest, package_ref = await _prepare(objects, github, scope, actor, body.source)
-    key = _key(manifest)
+    manifest, package_ref = await _prepare(objects, github, scope, actor, body.source, None)
+    key = manifest.name
     async with transaction(storage) as session:
         await workspace_scope(session, actor, scope.workspace_id, "write")
         head = SkillRow(
@@ -191,8 +196,7 @@ async def validate_package(
     """The manifest a skill read from `source` would freeze, checked as creating one checks it; storing nothing."""
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
-    manifest, _ = await _read(objects, github, scope, source)
-    _key(manifest)
+    manifest, _ = await _read(objects, github, scope, source, None)
     return manifest
 
 
@@ -231,6 +235,7 @@ async def list_skills(
             owner=cursors.query_owner(scope.workspace_id, labels, q, source, archived),
             cursor=cursor,
             limit=limit,
+            max_length=KEY_MAX_LENGTH,
         )
         return SkillPage(items=await _views(session, rows), next_cursor=next_cursor)
 
@@ -270,12 +275,10 @@ async def create_revision(
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "write")
         revisions.require_open(await resolve_skill(session, scope.workspace_id, key), if_match)
-    manifest, package_ref = await _prepare(objects, github, scope, actor, body.source)
+    manifest, package_ref = await _prepare(objects, github, scope, actor, body.source, key)
     async with transaction(storage) as session:
         await workspace_scope(session, actor, scope.workspace_id, "write")
         head = await revisions.open_head(session, SkillRow, scope.workspace_id, key, if_match)
-        if manifest.name != head.key:
-            raise invalid("source", f"the SKILL.md name must stay {head.key}")
         revision, created = await revisions.publish(
             session,
             head,

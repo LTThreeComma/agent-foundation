@@ -13,7 +13,7 @@ Follow either guide until the Service reports ready at `/readyz`.
 
 ## Create the first administrator
 
-Open Console at the Service's public URL. Until the Service is initialized, Console asks for the first administrator's email and a password of at least 12 characters instead of a sign-in; creating it signs you in. This creates the first organization and workspace, both with the key `default`, and the administrator, once: afterwards Console shows the sign-in, and further people join through [invitations](identity.md#invitations).
+Open Console at the Service's public URL. Until the Service is initialized, Console asks for the first administrator's email and a password of at least 12 characters instead of a sign-in; creating it signs you in. This creates the first organization, its workspace and the administrator, once: afterwards Console shows the sign-in, and further people join through [invitations](identity.md#invitations).
 
 Whoever reaches an uninitialized Service first becomes its administrator. When a new deployment is reachable by others before you open it, create the administrator with the operator command `bootstrap` instead, run where the Service's configuration is available (inside the Service container for the deployments above):
 

@@ -11,7 +11,7 @@ import { MemoryDetail } from "../page";
 vi.mock("../../../auth/context", () => ({ useClient: () => client }));
 vi.mock("../../../layout/workspace", () => ({
   useWorkspace: () => ({
-    basePath: "/workspace/design",
+    basePath: "/workspace/ws_design",
     organization: { id: "org_1" },
     workspace: { id: "ws_1" },
     can: (verb: string) => permissions.includes(verb),
@@ -239,16 +239,16 @@ function setup(search = "", allowed = ["read", "run", "write"]) {
   render(
     <QueryClientProvider client={cache}>
       <MemoryRouter
-        initialEntries={[`/workspace/design/memories/mem_1${search}`]}
+        initialEntries={[`/workspace/ws_design/memories/mem_1${search}`]}
       >
         <Routes>
           <Route element={<Located />}>
             <Route
-              path="/workspace/:workspaceKey/memories/:memoryId"
+              path="/workspace/:workspaceId/memories/:memoryId"
               element={<MemoryDetail />}
             />
             <Route
-              path="/workspace/:workspaceKey/memories"
+              path="/workspace/:workspaceId/memories"
               element={<p>Memory collection</p>}
             />
           </Route>
@@ -405,7 +405,7 @@ it("filters history by run from the URL, opens a diff and restores under the cur
   const run = await screen.findAllByRole("link", { name: "run_edit" });
   await waitFor(() =>
     expect(run[0]?.getAttribute("href")).toBe(
-      "/workspace/design/sessions/ses_1/threads/thr_1/runs/run_edit?view=debug",
+      "/workspace/ws_design/sessions/ses_1/threads/thr_1/runs/run_edit?view=debug",
     ),
   );
   expect(sent("GET", "/revisions")[0]?.query.get("run_id")).toBe("run_edit");

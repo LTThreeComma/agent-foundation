@@ -81,7 +81,7 @@ const sections: Record<SettingsScope, SettingsSectionDefinition[]> = {
       value: "general",
       layout: "form",
       label: "General",
-      description: "Name this workspace and control its address.",
+      description: "Manage this workspace's name and icon.",
       icon: GearSixIcon,
     },
     {
@@ -146,7 +146,7 @@ const sections: Record<SettingsScope, SettingsSectionDefinition[]> = {
       value: "general",
       layout: "form",
       label: "General",
-      description: "Name this organization and control its address.",
+      description: "Manage this organization's name and icon.",
       icon: GearSixIcon,
     },
     {

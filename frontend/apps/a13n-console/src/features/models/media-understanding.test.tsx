@@ -18,8 +18,8 @@ vi.mock("../../auth/context", () => ({
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     organization: { id: "org_test" },
-    workspace: { id: "ws_test", key: "design" },
-    basePath: "/workspace/design",
+    workspace: { id: "ws_test" },
+    basePath: "/workspace/ws_test",
     can: (verb: string) => verb !== "admin" || state.admin,
   }),
 }));
@@ -197,7 +197,7 @@ it("explains a kind that no enabled model declares", async () => {
     screen
       .getAllByRole("link", { name: "Manage models" })[0]
       .getAttribute("href"),
-  ).toBe("/workspace/design/models");
+  ).toBe("/workspace/ws_test/models");
   expect(
     screen.queryByText(/No enabled model declares image understanding\./),
   ).toBeNull();

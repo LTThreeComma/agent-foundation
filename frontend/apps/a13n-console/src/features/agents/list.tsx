@@ -116,7 +116,7 @@ export function Agents() {
           description={
             searching
               ? t(
-                  "No agent in this workspace matches that name, key, or description.",
+                  "No agent in this workspace matches that name or description.",
                 )
               : archived
                 ? t("Change or clear the search and filters.")

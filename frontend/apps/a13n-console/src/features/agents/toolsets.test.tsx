@@ -21,7 +21,8 @@ vi.mock("../../auth/context", () => ({
 }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
-    workspace: { id: "ws_test", key: "default" },
+    workspace: { id: "ws_test" },
+    basePath: "/workspace/ws_test",
     organization: { id: "org_test" },
     can: () => true,
   }),
@@ -235,7 +236,7 @@ it("shows why the Service would refuse the configuration, with its setup link", 
     within(alert)
       .getByRole("link", { name: "Manage Web Providers" })
       .getAttribute("href"),
-  ).toBe("/workspace/default/settings/providers?category=web");
+  ).toBe("/workspace/ws_test/settings/providers?category=web");
   expect(http.POST).toHaveBeenCalledOnce();
 });
 

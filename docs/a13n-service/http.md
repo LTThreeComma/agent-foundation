@@ -30,7 +30,7 @@ Everything a workspace holds, such as agents, threads, runs, providers, models, 
 - An API key acts in its own workspace and needs no header. An `X-Workspace-ID` naming another workspace is refused with `403 forbidden`.
 - A login session names the workspace by ID in `X-Workspace-ID: ws_…`. Without the header the request fails with `400 invalid_argument` and `details.field` `X-Workspace-ID`.
 
-Administration and deployment-wide reads take no header. Administration names its scope in the path: `/api/v1/auth/…`, `/api/v1/users/…`, `/api/v1/organizations/…`, `/api/v1/workspaces`, and `/api/v1/workspaces/{workspace_id}` with its `icon`, `archive`, `audit-events`, `grants`, `invitations`, `service-accounts` and `keys`; these paths accept a workspace's key in place of its ID. The deployment-wide reads are `/api/v1/model-catalog`, `/api/v1/provider-types/{kind}`, `/api/v1/mcp-servers` and `/api/v1/connections/redirect-uri`.
+Administration and deployment-wide reads take no header. Administration names its scope in the path: `/api/v1/auth/…`, `/api/v1/users/…`, `/api/v1/organizations/…`, `/api/v1/workspaces`, and `/api/v1/workspaces/{workspace_id}` with its `icon`, `archive`, `audit-events`, `grants`, `invitations`, `service-accounts` and `keys`. The deployment-wide reads are `/api/v1/model-catalog`, `/api/v1/provider-types/{kind}`, `/api/v1/mcp-servers` and `/api/v1/connections/redirect-uri`.
 
 ## Errors
 

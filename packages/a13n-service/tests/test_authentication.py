@@ -72,7 +72,7 @@ async def test_login_session_cookie_csrf_origin_and_logout(service) -> None:  # 
         assert len(sessions) == 2 and "Max-Age=0" in sessions[-1]
         assert (await client.get("/api/v1/users/me")).status_code == 401
         assert (await client.get("/api/v1/auth/session")).status_code == 401
-        # Logout ends only the login session, not a separately issued workspace key.
+        # Logout ends only the login session, not a separately issued API key.
         assert (await client.get("/api/v1/users/me", headers=bearer)).status_code == 200
     async with short_session(service.runtime.storage) as session:
         events = (await session.scalars(select(AuditEventRow).where(AuditEventRow.organization_id.is_(None)))).all()
@@ -112,14 +112,14 @@ async def test_every_authenticated_answer_is_uncached_and_renews_the_session(ser
 
 async def test_workspace_key_confinement(service) -> None:  # type: ignore[no-untyped-def]
     client, tenant = service.client, service.tenant
-    other = await client.post(f"{service.organization}/workspaces", json={"key": "other", "name": "Other"})
+    other = await client.post(f"{service.organization}/workspaces", json={"name": "Other"})
     assert other.status_code == 201, other.text
     other_id = other.json()["id"]
     foreign_org, foreign_ws = new_object_id("org"), new_object_id("ws")
     async with transaction(service.runtime.storage) as session:
-        session.add(OrganizationRow(id=foreign_org, key="foreign", name="Foreign"))
+        session.add(OrganizationRow(id=foreign_org, name="Foreign"))
         await session.flush()
-        session.add(WorkspaceRow(id=foreign_ws, organization_id=foreign_org, key="foreign", name="Foreign"))
+        session.add(WorkspaceRow(id=foreign_ws, organization_id=foreign_org, name="Foreign"))
         await session.flush()
         session.add(
             GrantRow(
@@ -163,7 +163,7 @@ async def test_workspace_key_confinement(service) -> None:  # type: ignore[no-un
     )
     assert regranted.status_code == 403
     assert (
-        await client.post(f"{service.organization}/workspaces", headers=bearer, json={"key": "k", "name": "k"})
+        await client.post(f"{service.organization}/workspaces", headers=bearer, json={"name": "k"})
     ).status_code == 403
     listed = (await client.get("/api/v1/users/me/keys", headers=bearer)).json()["items"]
     assert {item["workspace_id"] for item in listed} == {tenant.workspace_id}
@@ -193,13 +193,13 @@ async def test_workspace_key_confinement(service) -> None:  # type: ignore[no-un
 async def test_business_requests_act_in_the_credential_workspace(service) -> None:  # type: ignore[no-untyped-def]
     """A login session names the workspace of each business request; an API key acts in its own."""
     tenant, agents = service.tenant, f"{service.api}/agents"
-    other = await service.client.post(f"{service.organization}/workspaces", json={"key": "other", "name": "Other"})
+    other = await service.client.post(f"{service.organization}/workspaces", json={"name": "Other"})
     assert other.status_code == 201, other.text
     foreign_org, foreign_ws = new_object_id("org"), new_object_id("ws")
     async with transaction(service.runtime.storage) as session:
-        session.add(OrganizationRow(id=foreign_org, key="foreign", name="Foreign"))
+        session.add(OrganizationRow(id=foreign_org, name="Foreign"))
         await session.flush()
-        session.add(WorkspaceRow(id=foreign_ws, organization_id=foreign_org, key="foreign", name="Foreign"))
+        session.add(WorkspaceRow(id=foreign_ws, organization_id=foreign_org, name="Foreign"))
     key = await service.client.post("/api/v1/users/me/keys", json={"workspace_id": tenant.workspace_id, "name": "k"})
     assert key.status_code == 201, key.text
 
@@ -211,7 +211,7 @@ async def test_business_requests_act_in_the_credential_workspace(service) -> Non
         # Management routes name their workspace in the path instead.
         assert (await client.get(service.workspace)).status_code == 200
         assert (await client.get(agents, headers={"x-workspace-id": other.json()["id"]})).status_code == 200
-        # The header takes a workspace ID, never its key.
+        # The header takes a workspace ID.
         assert (await client.get(agents, headers={"x-workspace-id": "default"})).status_code == 400
         # A workspace outside the caller's organizations is not found, revealing nothing.
         assert (await client.get(agents, headers={"x-workspace-id": foreign_ws})).status_code == 404
@@ -303,7 +303,7 @@ async def test_replacement_authenticator_keeps_management(serve) -> None:  # typ
         principal_id = service.tenant.principal_id
         async with new_client(service, **{"x-test-principal": principal_id}) as client:
             assert (await client.get("/api/v1/users/me")).json()["id"] == principal_id
-            created = await client.post(f"{service.organization}/workspaces", json={"key": "sso", "name": "SSO"})
+            created = await client.post(f"{service.organization}/workspaces", json={"name": "SSO"})
             assert created.status_code == 201, created.text
             grants = await client.get(f"/api/v1/workspaces/{created.json()['id']}/grants")
             assert grants.status_code == 200
@@ -393,7 +393,7 @@ async def test_the_first_visitor_creates_the_administrator_once(settings: Settin
         restored = await client.get("/api/v1/auth/session")
         assert restored.json()["csrf_token"] == created.json()["csrf_token"]
         [organization] = (await client.get("/api/v1/organizations")).json()["items"]
-        assert organization["key"] == "default"
+        assert organization["name"] == "Default organization"
         assert (await client.get("/api/v1/auth/configuration")).json()["initialized"] is True
         again = await client.post("/api/v1/auth/bootstrap", json={"email": "other@example.com", "password": PASSWORD})
         assert again.status_code == 409 and again.json()["error"]["code"] == "already_exists"

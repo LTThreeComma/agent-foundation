@@ -62,9 +62,7 @@ def price(model: str, provider: str = "openai", input_mtok: str = "5") -> dict:
 async def add_workspace(service) -> str:  # type: ignore[no-untyped-def]
     workspace_id = new_object_id("ws")
     async with transaction(service.runtime.storage) as session:
-        session.add(
-            WorkspaceRow(id=workspace_id, organization_id=service.tenant.organization_id, key="second", name="Second")
-        )
+        session.add(WorkspaceRow(id=workspace_id, organization_id=service.tenant.organization_id, name="Second"))
     return workspace_id
 
 
@@ -137,6 +135,22 @@ async def test_a_model_key_defaults_to_the_upstream_name_and_addresses_the_model
     assert (await service.client.get(f"{service.api}/models/opus")).status_code == 404
 
 
+async def test_model_lists_page_through_keys_of_every_valid_length(service) -> None:  # type: ignore[no-untyped-def]
+    account = await provider(service)
+    keys = ["a" * 128, "b" * 128, "c"]
+    for key in keys:
+        await post(service, "/models", manual(account["id"], key))
+    listed, cursor = [], None
+    while True:
+        params = {"limit": 1, **({"cursor": cursor} if cursor else {})}
+        page = await service.client.get(f"{service.api}/models", params=params)
+        assert page.status_code == 200, page.text
+        listed += [item["key"] for item in page.json()["items"]]
+        if not (cursor := page.json()["next_cursor"]):
+            break
+    assert listed == keys
+
+
 async def test_a_model_is_served_by_a_provider_of_its_workspace(service) -> None:  # type: ignore[no-untyped-def]
     first, second = service.tenant.workspace_id, await add_workspace(service)
     own = await provider(service)
@@ -144,8 +158,17 @@ async def test_a_model_is_served_by_a_provider_of_its_workspace(service) -> None
     hidden = await post(service, "/models", manual(elsewhere["id"], "model"), status=404)
     assert hidden["error"]["details"] == {"kind": "model_provider", "id": elsewhere["id"]}
     await post(service, "/models", manual(own["id"], "model"))
-    # Keys are unique per workspace only.
+    # Keys are unique per workspace only, and a key names the model of the request's workspace.
     assert (await post(service, "/models", manual(elsewhere["id"], "model"), workspace_id=second))["key"] == "model"
+    item, in_second = f"{service.api}/models/model", {"x-workspace-id": second}
+    theirs = await service.client.get(item, headers=in_second)
+    assert theirs.json()["provider_id"] == elsewhere["id"]
+    renamed = await service.client.patch(
+        item, json={"name": "Theirs"}, headers={"if-match": theirs.headers["etag"], **in_second}
+    )
+    assert renamed.status_code == 200, renamed.text
+    mine = (await service.client.get(item)).json()
+    assert (mine["provider_id"], mine["name"]) == (own["id"], "model")
 
     disabled = await provider(service, name="Disabled")
     patched = await service.client.patch(

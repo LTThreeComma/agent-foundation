@@ -11,7 +11,7 @@ import { MemoryDetail } from "../page";
 vi.mock("../../../auth/context", () => ({ useClient: () => client }));
 vi.mock("../../../layout/workspace", () => ({
   useWorkspace: () => ({
-    basePath: "/workspace/design",
+    basePath: "/workspace/ws_design",
     organization: { id: "org_1" },
     workspace: { id: "ws_1" },
     can: (verb: string) => permissions.includes(verb),
@@ -162,10 +162,12 @@ function setup({
   });
   render(
     <QueryClientProvider client={cache}>
-      <MemoryRouter initialEntries={[`/workspace/design/memories/mem_1${tab}`]}>
+      <MemoryRouter
+        initialEntries={[`/workspace/ws_design/memories/mem_1${tab}`]}
+      >
         <Routes>
           <Route
-            path="/workspace/:workspaceKey/memories/:memoryId"
+            path="/workspace/:workspaceId/memories/:memoryId"
             element={<MemoryDetail />}
           />
         </Routes>

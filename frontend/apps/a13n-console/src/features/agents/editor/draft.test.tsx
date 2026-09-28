@@ -112,6 +112,31 @@ it("checks model settings against the calling API's schema before publishing", (
   );
 });
 
+it("carries model characteristics through advanced JSON", () => {
+  const characteristics = {
+    context_window_tokens: 200_000,
+    compact_threshold: 0.8,
+  };
+  const draft = draftFor({ model_characteristics: characteristics });
+  expect(JSON.parse(draft.current.advanced).model_characteristics).toEqual(
+    characteristics,
+  );
+  const built = buildDraftConfig(draft.current, undefined, asIs);
+  expect(built.ok && built.config.model_characteristics).toEqual(
+    characteristics,
+  );
+  act(() =>
+    draft.current.setAdvanced(
+      '{"model_characteristics": {"context_window_tokens": 100000}}',
+    ),
+  );
+  expect(draft.current.dirty).toBe(true);
+  const edited = buildDraftConfig(draft.current, undefined, asIs);
+  expect(edited.ok && edited.config.model_characteristics).toEqual({
+    context_window_tokens: 100_000,
+  });
+});
+
 it("publishes default memory mounts and keeps them out of advanced JSON", () => {
   const handbook = {
     name: "handbook",

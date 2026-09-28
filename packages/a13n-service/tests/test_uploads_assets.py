@@ -112,7 +112,7 @@ async def test_upload_bounds_and_workspace_binding(service) -> None:  # type: ig
     # An upload staged in another workspace cannot become an asset here.
     other = new_object_id("ws")
     async with transaction(storage) as session:
-        session.add(WorkspaceRow(id=other, organization_id=organization_id, key="other", name="Other"))
+        session.add(WorkspaceRow(id=other, organization_id=organization_id, name="Other"))
     elsewhere = await service.client.post(
         f"{service.api}/uploads",
         files={"file": ("a.txt", b"a", "text/plain")},

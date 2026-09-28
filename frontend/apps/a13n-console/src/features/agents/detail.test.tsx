@@ -82,7 +82,6 @@ it("reloads the selected configuration and version after Set as default", async 
   HTMLElement.prototype.scrollIntoView = () => {};
   const agent = {
     id: "ap_1234567890abcdef1234",
-    key: "research",
     name: "Research",
     description: "",
     source: "custom",

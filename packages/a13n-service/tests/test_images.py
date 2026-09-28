@@ -71,7 +71,7 @@ async def test_profile_images(service, settings: Settings) -> None:  # type: ign
     async with AsyncExitStack() as stack:
         member = await join(service, stack, "member@example.com", "viewer")
         me = (await member.get("/api/v1/users/me")).json()
-        # Anyone sharing an organization with the user sees the image; a workspace key cannot change it.
+        # Anyone sharing an organization with the user sees the image; an API key cannot change it.
         assert (await member.get(stored.json()["image_url"])).content == PNG
         key = await member.post(
             "/api/v1/users/me/keys", json={"workspace_id": service.tenant.workspace_id, "name": "k"}

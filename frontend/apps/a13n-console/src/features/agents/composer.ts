@@ -98,7 +98,7 @@ export function useAgentComposer() {
             navigate(
               configured
                 ? `${basePath}/models`
-                : providersPath("models", workspace.key),
+                : providersPath("models", workspace),
             ),
         },
       });

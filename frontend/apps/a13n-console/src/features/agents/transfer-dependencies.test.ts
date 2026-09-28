@@ -116,7 +116,7 @@ it("checks dedicated child environments against the same template catalog", asyn
         items: [{ key: "model-local", name: "Research", enabled: true }],
       };
     if (url.pathname.endsWith("/agents"))
-      return { items: [{ id: "ap_child", key: "helper", name: "Helper" }] };
+      return { items: [{ id: "ap_child", name: "Helper" }] };
     return {
       items: [{ id: "et_local", name: "Sandbox", enabled: true }],
     };

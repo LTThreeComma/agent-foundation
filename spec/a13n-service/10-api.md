@@ -21,7 +21,7 @@ While the distribution keeps the local authenticator, the OpenAPI document decla
 
 ### Paths and scope
 
-- Only administration names its scope in the path: an organization path takes the organization ID, a workspace path the workspace ID or key. Every other route acts in one workspace, the API key's own or, for a login session, the one `X-Workspace-ID` names by ID; a login session without it is 400 `invalid_argument`, and an API key naming another workspace is 403 `forbidden` ([03](03-tenancy.md#authorization)).
+- Only administration names its scope in the path: an organization path takes the organization ID, a workspace path the workspace ID. Account and public routes and the deployment-wide reads marked in the [route index](#route-index) act in no workspace. Every other route acts in one workspace, the API key's own or, for a login session, the one `X-Workspace-ID` names by ID; a login session without it is 400 `invalid_argument`, and an API key naming another workspace is 403 `forbidden` ([03](03-tenancy.md#authorization)). The OpenAPI document declares `X-Workspace-ID` on every route that acts in a workspace, as optional because an API key need not send it.
 - A model or skill path segment is its key ([04](04-resources.md#keys)); every other segment is an ID.
 - Path resolution conceals other tenants, and every route authorizes its scope before it resolves a supplied ID, on replay and content routes too ([03](03-tenancy.md#authorization)).
 - A command that is not create, read, update or delete is `POST …/{id}/{verb}` with an imperative verb (`archive`, `interrupt`, `resume`, `set-default`, `test`, `redeliver`). A check that stores nothing is `POST …/{collection}/validate`.
@@ -99,7 +99,7 @@ Every failure, including a request no route answers, answers in one envelope; `/
 
 ## Route index
 
-Paths are relative to `/api/v1` unless they start at the root. `{org}` is an organization ID and `{ws}` a workspace ID or key; a path with neither acts in the request's workspace ([paths and scope](#paths-and-scope)). `{model}` and `{skill}` are keys.
+Paths are relative to `/api/v1` unless they start at the root. `{org}` is an organization ID and `{ws}` a workspace ID. Account, public and deployment-wide (marked) routes act in no workspace; any other path with neither acts in the request's workspace ([paths and scope](#paths-and-scope)). `{model}` and `{skill}` are keys.
 
 ### Health
 
@@ -116,6 +116,7 @@ Paths are relative to `/api/v1` unless they start at the root. `{org}` is an org
 | ------------------------------------ | ----------- | ----------------------------------------------- |
 | `/auth/configuration`                | GET         | [03](03-tenancy.md#identity-mail) (public)      |
 | `/auth/login`                        | POST        | [03](03-tenancy.md#authentication) (public)     |
+| `/auth/bootstrap`                    | POST        | [03](03-tenancy.md#bootstrap) (public)          |
 | `/auth/logout`                       | POST        | [03](03-tenancy.md#authentication)              |
 | `/auth/session`                      | GET         | [03](03-tenancy.md#authentication)              |
 | `/auth/password-reset`               | POST        | [03](03-tenancy.md#account-management) (public) |
@@ -168,16 +169,16 @@ Paths are relative to `/api/v1` unless they start at the root. `{org}` is an org
 
 `{kind}-providers` stands for each of `model-providers`, `environment-providers`, `web-providers`, `connector-providers` and `memory-providers`.
 
-| Path                                | Methods    | Owner                                            |
-| ----------------------------------- | ---------- | ------------------------------------------------ |
-| `/provider-types/{kind}`            | GET        | [08](08-providers.md#provider-type-descriptions) |
-| `/{kind}-providers`                 | GET, POST  | [04](04-resources.md#provider-resources)         |
-| `/{kind}-providers/{provider}`      | GET, PATCH | [04](04-resources.md#provider-resources)         |
-| `/{kind}-providers/{provider}/test` | POST       | [04](04-resources.md#provider-resources)         |
-| `/model-catalog`                    | GET        | [08](08-providers.md#model-catalog)              |
-| `/models`                           | GET, POST  | [04](04-resources.md#models)                     |
-| `/models/{model}`                   | GET, PATCH | [04](04-resources.md#models)                     |
-| `/media-understanding-defaults`     | GET, PUT   | [04](04-resources.md#models)                     |
+| Path                                | Methods    | Owner                                                         |
+| ----------------------------------- | ---------- | ------------------------------------------------------------- |
+| `/provider-types/{kind}`            | GET        | [08](08-providers.md#provider-type-descriptions) (deployment) |
+| `/{kind}-providers`                 | GET, POST  | [04](04-resources.md#provider-resources)                      |
+| `/{kind}-providers/{provider}`      | GET, PATCH | [04](04-resources.md#provider-resources)                      |
+| `/{kind}-providers/{provider}/test` | POST       | [04](04-resources.md#provider-resources)                      |
+| `/model-catalog`                    | GET        | [08](08-providers.md#model-catalog) (deployment)              |
+| `/models`                           | GET, POST  | [04](04-resources.md#models)                                  |
+| `/models/{model}`                   | GET, PATCH | [04](04-resources.md#models)                                  |
+| `/media-understanding-defaults`     | GET, PUT   | [04](04-resources.md#models)                                  |
 
 ### Agents, skills and toolsets
 
@@ -208,20 +209,20 @@ Paths are relative to `/api/v1` unless they start at the root. `{org}` is an org
 
 ### Connections
 
-| Path                                                 | Methods    | Owner                                      |
-| ---------------------------------------------------- | ---------- | ------------------------------------------ |
-| `/connections`                                       | GET, POST  | [04](04-resources.md#connections)          |
-| `/connections/{connection}`                          | GET, PATCH | [04](04-resources.md#connections)          |
-| `/connections/{connection}/authorize`                | POST       | [04](04-resources.md#connections)          |
-| `/connections/{connection}/revoke`                   | POST       | [04](04-resources.md#connections)          |
-| `/connections/{connection}/test`                     | POST       | [04](04-resources.md#connections)          |
-| `/connections/{connection}/tools`                    | GET        | [04](04-resources.md#connections)          |
-| `/connector-providers/{provider}/apps`               | GET        | [04](04-resources.md#provider-resources)   |
-| `/connector-providers/{provider}/apps/{app}`         | GET        | [04](04-resources.md#provider-resources)   |
-| `/connector-providers/{provider}/apps/{app}/actions` | GET        | [04](04-resources.md#provider-resources)   |
-| `/connections/callback`                              | GET        | [04](04-resources.md#connections) (public) |
-| `/connections/redirect-uri`                          | GET        | [04](04-resources.md#connections)          |
-| `/mcp-servers`                                       | GET        | [08](08-providers.md#mcp-server-catalogue) |
+| Path                                                 | Methods    | Owner                                                   |
+| ---------------------------------------------------- | ---------- | ------------------------------------------------------- |
+| `/connections`                                       | GET, POST  | [04](04-resources.md#connections)                       |
+| `/connections/{connection}`                          | GET, PATCH | [04](04-resources.md#connections)                       |
+| `/connections/{connection}/authorize`                | POST       | [04](04-resources.md#connections)                       |
+| `/connections/{connection}/revoke`                   | POST       | [04](04-resources.md#connections)                       |
+| `/connections/{connection}/test`                     | POST       | [04](04-resources.md#connections)                       |
+| `/connections/{connection}/tools`                    | GET        | [04](04-resources.md#connections)                       |
+| `/connector-providers/{provider}/apps`               | GET        | [04](04-resources.md#provider-resources)                |
+| `/connector-providers/{provider}/apps/{app}`         | GET        | [04](04-resources.md#provider-resources)                |
+| `/connector-providers/{provider}/apps/{app}/actions` | GET        | [04](04-resources.md#provider-resources)                |
+| `/connections/callback`                              | GET        | [04](04-resources.md#connections) (public)              |
+| `/connections/redirect-uri`                          | GET        | [04](04-resources.md#connections) (deployment)          |
+| `/mcp-servers`                                       | GET        | [08](08-providers.md#mcp-server-catalogue) (deployment) |
 
 ### Uploads and assets
 

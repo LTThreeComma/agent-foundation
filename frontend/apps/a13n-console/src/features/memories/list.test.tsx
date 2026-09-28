@@ -10,12 +10,12 @@ import { MemoriesPage } from "./page";
 vi.mock("../../auth/context", () => ({ useClient: () => client }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
-    basePath: "/workspace/design",
+    basePath: "/workspace/ws_1",
     organization: { id: "org_1" },
-    workspace: { id: "ws_1", key: "design" },
+    workspace: { id: "ws_1" },
     can: (verb: string) => permissions.includes(verb),
   }),
-  useAccess: () => ({ workspace: { id: "ws_1", key: "design" } }),
+  useAccess: () => ({ workspace: { id: "ws_1" } }),
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -113,14 +113,14 @@ function setup(
   });
   render(
     <QueryClientProvider client={cache}>
-      <MemoryRouter initialEntries={["/workspace/design/memories"]}>
+      <MemoryRouter initialEntries={["/workspace/ws_1/memories"]}>
         <Routes>
           <Route
-            path="/workspace/:workspaceKey/memories"
+            path="/workspace/:workspaceId/memories"
             element={<MemoriesPage />}
           />
           <Route
-            path="/workspace/:workspaceKey/memories/:memoryId"
+            path="/workspace/:workspaceId/memories/:memoryId"
             element={<p>Memory detail</p>}
           />
         </Routes>
@@ -276,7 +276,7 @@ it("points to provider settings when no memory provider is enabled", async () =>
     within(dialog)
       .getByRole("link", { name: "Manage providers" })
       .getAttribute("href"),
-  ).toBe("/workspace/design/settings/providers?category=memory");
+  ).toBe("/workspace/ws_1/settings/providers?category=memory");
   expect(
     (
       within(dialog).getByRole("button", {

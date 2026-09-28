@@ -32,7 +32,7 @@ vi.mock("react-i18next", () => ({
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     organization: { id: "org_test" },
-    workspace: { id: "ws_test", key: "workspace-test" },
+    workspace: { id: "ws_test" },
   }),
 }));
 const provider = {

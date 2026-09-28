@@ -19,7 +19,7 @@ vi.mock("../../shared/download", () => ({ downloadBlob: download }));
 vi.mock("../../auth/context", () => ({ useClient: () => client }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
-    basePath: "/workspace/design",
+    basePath: "/workspace/ws_design",
     workspace: { id: workspaceId },
     can: () => true,
   }),
@@ -129,7 +129,6 @@ function setup(workspace: string, search = "") {
           items: [
             {
               id: "ap_example",
-              key: "example-agent",
               name: "Example agent",
               image_url: null,
             },
@@ -161,15 +160,15 @@ function setup(workspace: string, search = "") {
   render(
     <QueryClientProvider client={cache}>
       <MemoryRouter
-        initialEntries={[`/workspace/design/skills/example${search}`]}
+        initialEntries={[`/workspace/ws_design/skills/example${search}`]}
       >
         <Routes>
           <Route
-            path="/workspace/:workspaceKey/skills/:skillKey"
+            path="/workspace/:workspaceId/skills/:skillKey"
             element={<SkillDetail />}
           />
           <Route
-            path="/workspace/:workspaceKey/skills"
+            path="/workspace/:workspaceId/skills"
             element={<p>Skill collection</p>}
           />
         </Routes>
@@ -203,7 +202,7 @@ it.each(["ws_first", "ws_second"])(
       (await screen.findByRole("link", { name: "Example agent" })).getAttribute(
         "href",
       ),
-    ).toBe("/workspace/design/agents/ap_example");
+    ).toBe("/workspace/ws_design/agents/ap_example");
     const skills = `/api/v1/skills`;
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
       `${skills}/example`,

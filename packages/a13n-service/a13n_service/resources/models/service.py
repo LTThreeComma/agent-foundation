@@ -11,7 +11,7 @@ from a13n_harness import ModelCapability
 from a13n_harness.pricing import ModelPricingEntry
 from a13n_harness.providers.model.definition import ModelProviderDefinition
 from a13n_harness.toolsets.file_media import NativeInputMediaKind
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +19,7 @@ from a13n_service.infra import cursors
 from a13n_service.infra.db import Storage, assign, short_session, transaction, unique_key
 from a13n_service.infra.errors import disabled, invalid, not_found
 from a13n_service.infra.http import require_match
-from a13n_service.infra.ids import Key, new_object_id
+from a13n_service.infra.ids import KEY_MAX_LENGTH, is_key, new_object_id
 from a13n_service.providers.registry import Registry
 from a13n_service.resources.models.schemas import Model, ModelConfig, ModelCreate, ModelPage, ModelUpdate
 from a13n_service.resources.models.tables import ModelRow
@@ -29,8 +29,6 @@ from a13n_service.resources.rows import audit_row, find_row, given, record_updat
 from a13n_service.tenancy.access import refuse_archived, workspace_scope
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Verb, WorkspaceScope, authorize
 from a13n_service.tenancy.tables import WorkspaceRow
-
-_KEY = TypeAdapter(Key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,10 +95,10 @@ def require_understanding(model: ResolvedModel, kind: NativeInputMediaKind) -> N
 
 def default_key(model_name: str) -> str:
     """The key a model created without one takes: its upstream name after the last `/`, lowercased."""
-    try:
-        return _KEY.validate_python(model_name.rsplit("/", 1)[-1].lower())
-    except ValidationError:
-        raise invalid("key", "required when the upstream model name does not make a valid key") from None
+    key = model_name.rsplit("/", 1)[-1].lower()
+    if not is_key(key):
+        raise invalid("key", "required when the upstream model name does not make a valid key")
+    return key
 
 
 async def create_model(
@@ -154,6 +152,7 @@ async def list_models(
             owner=scope.workspace_id,
             cursor=cursor,
             limit=limit,
+            max_length=KEY_MAX_LENGTH,
         )
     return ModelPage(items=[Model.model_validate(row) for row in rows], next_cursor=next_cursor)
 

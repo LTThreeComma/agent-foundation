@@ -10,7 +10,6 @@ const commonFields = new Set([
   "toolsets",
   "model",
   "model_settings",
-  "model_characteristics",
   "media_understanding",
   "instructions",
   "skills",
@@ -38,7 +37,6 @@ export function buildConfig(
     AgentConfig,
     | "model"
     | "model_settings"
-    | "model_characteristics"
     | "media_understanding"
     | "instructions"
     | "skills"

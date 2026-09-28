@@ -86,7 +86,7 @@ it("creates an agent and navigates to its ID", async () => {
 it("uploads a selected avatar after creation and retries without creating another agent", async () => {
   vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
   const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
-  const value = { id: "ap_new", key: "new-agent", name: "New agent" };
+  const value = { id: "ap_new", name: "New agent" };
   http.POST.mockResolvedValue({
     data: value,
     response: new Response(null, { headers: { ETag: '"ap_new:1"' } }),

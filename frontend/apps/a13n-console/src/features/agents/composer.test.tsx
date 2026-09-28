@@ -14,9 +14,9 @@ vi.mock("../../auth/context", () => ({
 }));
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
-    workspace: { id: "ws_test", key: "test" },
+    workspace: { id: "ws_test" },
     organization: { id: "org_test" },
-    basePath: "/workspace/test",
+    basePath: "/workspace/ws_test",
     can: (verb: string) => access.verbs.includes(verb),
   }),
 }));

@@ -19,7 +19,6 @@ def upgrade() -> None:
     op.create_table(
         "organizations",
         sa.Column("id", sa.String(length=72), nullable=False),
-        sa.Column("key", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column(
             "settings", postgresql.JSONB(astext_type=sa.Text()), server_default=sa.text("'{}'::jsonb"), nullable=False
@@ -29,13 +28,11 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_organizations")),
-        sa.UniqueConstraint("key", name=op.f("uq_organizations_key")),
     )
     op.create_table(
         "workspaces",
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
-        sa.Column("key", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column(
             "settings", postgresql.JSONB(astext_type=sa.Text()), server_default=sa.text("'{}'::jsonb"), nullable=False
@@ -50,9 +47,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_workspaces")),
         sa.UniqueConstraint("organization_id", "id", name=op.f("uq_workspaces_organization_id_id")),
-        sa.UniqueConstraint("organization_id", "key", name=op.f("uq_workspaces_organization_id_key")),
     )
-    op.create_index("ix_workspaces_key", "workspaces", ["key"], unique=False)
     op.create_table(
         "outbox",
         sa.Column("id", sa.String(length=72), nullable=False),
@@ -2088,7 +2083,6 @@ def downgrade() -> None:
     op.drop_index("ix_outbox_settled", table_name="outbox", postgresql_where=sa.text("status <> 'pending'"))
     op.drop_index("ix_outbox_due", table_name="outbox", postgresql_where=sa.text("status = 'pending'"))
     op.drop_table("outbox")
-    op.drop_index("ix_workspaces_key", table_name="workspaces")
     op.drop_table("workspaces")
     op.drop_table("organizations")
     op.execute(

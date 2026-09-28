@@ -39,7 +39,7 @@ class Seeded:
 
 def seed(api: Api, model_url: str, environments: Path) -> Seeded:
     """Seed the default workspace and its organization; `environments` holds the `local` environments."""
-    workspace = api.get("/api/v1/workspaces/default")
+    workspace = api.first_workspace()
     api.workspace_id = workspace["id"]
     org, ws = f"/api/v1/organizations/{workspace['organization_id']}", f"/api/v1/workspaces/{workspace['id']}"
     index = seed_identity(api, org, ws)

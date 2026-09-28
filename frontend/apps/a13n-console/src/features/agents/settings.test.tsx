@@ -113,7 +113,6 @@ it("renames an agent while keeping its ID address", async () => {
   const close = vi.fn(),
     reload = vi.fn();
   const { user } = renderDetails(close, reload);
-  expect(screen.queryByLabelText("URL key")).toBeNull();
   const name = screen.getByLabelText("Name");
   await user.clear(name);
   await user.type(name, "Deep research");

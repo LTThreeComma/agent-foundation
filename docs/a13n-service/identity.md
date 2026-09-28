@@ -6,9 +6,9 @@ Every request acts as a **principal**: a user, who signs in with an email addres
 
 An **organization** is the administration boundary. It holds its members and its workspaces. A **workspace** is the boundary for work: agents, sessions, providers, models, connections, environments and every other resource belong to exactly one workspace.
 
-[Bootstrap](get-started.md#create-the-first-administrator), in Console on a new Service or with the `bootstrap` command, creates the first organization (key `default`), its first workspace (key `default`) and an administrator. There is no API to create further organizations. Organization administrators create workspaces in Console under **Organization settings → Workspaces**, or with `POST /api/v1/organizations/{organization_id}/workspaces` and a `{key, name}` body.
+[Bootstrap](get-started.md#create-the-first-administrator), in Console on a new Service or with the `bootstrap` command, creates the first organization, its first workspace and an administrator. There is no API to create further organizations. Organization administrators create workspaces in Console under **Organization settings → Workspaces**, or with `POST /api/v1/organizations/{organization_id}/workspaces` and a `{name}` body.
 
-Administrators can rename an organization or workspace, change its key and set an icon (PNG, JPEG or WebP). Workspace keys are unique within their organization and organization keys are unique across the deployment; links that use an old key stop resolving. Workspace administration paths accept a workspace ID or, among the workspaces you can read, its key; every other request acts in the workspace its credential selects (see [HTTP conventions](http.md#workspace)).
+Administrators can rename an organization or workspace and set an icon (PNG, JPEG or WebP). Organizations and workspaces are identified by ID: workspace administration paths name the workspace ID, and every other request acts in the workspace its credential selects (see [HTTP conventions](http.md#workspace)).
 
 **Archiving** a workspace (`POST /api/v1/workspaces/{workspace_id}/archive`, organization administrators only) is permanent and revokes its pending invitations. An archived workspace stays readable, but every change is refused with `disabled`, except offboarding: deleting grants, retiring or disabling service accounts, and revoking API keys.
 

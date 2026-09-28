@@ -48,6 +48,10 @@ class Api:
     def workspace_id(self, workspace_id: str) -> None:
         self._http.headers["x-workspace-id"] = workspace_id
 
+    def first_workspace(self) -> Json:
+        """The workspace bootstrap created with the organization: the oldest one the caller can read."""
+        return min(self.items("/api/v1/workspaces"), key=lambda workspace: workspace["created_at"])
+
     def login(self, email: str, password: str) -> str:
         """Sign in; returns the principal ID."""
         return self._adopt(self._send("POST", "/api/v1/auth/login", json={"email": email, "password": password}))

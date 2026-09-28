@@ -17,12 +17,10 @@ Route paths and request/response shapes belong to [10: API](10-api.md); this cha
 
 ```
 organizations
-  id  key  name  settings  image NULL  version  created_at  updated_at
-  UNIQUE (key)
+  id  name  settings  image NULL  version  created_at  updated_at
 
 workspaces
-  id  organization_id  key  name  settings  image NULL  archived_at NULL  version  created_at  updated_at
-  UNIQUE (organization_id, key)
+  id  organization_id  name  settings  image NULL  archived_at NULL  version  created_at  updated_at
 
 principals
   id  kind  name  description NULL  email NULL  home_workspace_id NULL  status  image NULL
@@ -79,7 +77,6 @@ Notes on the shape:
 - `grants.workspace_id IS NULL` is an organization-scope grant; it applies to every workspace of the organization. `role` is validated text, not a database CHECK, because distributions add roles ([Roles and grant sources](#roles-and-grant-sources)). A role change replaces the row.
 - `workspaces.settings` holds workspace-wide defaults that are not resources; today only the media-understanding model defaults under `media`, owned by [04](04-resources.md). `organizations.settings` is reserved; no operation reads or writes it.
 - `image` holds the reference to an organization's or workspace's icon or a user's avatar ([Images](#images)); service accounts have none. `description` is a service account's free text (at most 2048 characters, default empty).
-- Organization and workspace keys match `^[a-z0-9][a-z0-9_-]{0,127}$`.
 - `api_keys`, `grants`, `invitations` and `audit_events` reference their workspace by the pair `(organization_id, workspace_id)` ([Tenant integrity](#tenant-integrity)).
 - `audit_events.organization_id` is NULL only for account-wide events (a user's own account and login sessions), which belong to no tenant.
 - Principals, passwords, API keys and accepted invitations are never deleted; disabling and revocation are status columns, so history keeps every identity it names. Grants are deleted when an administrator removes them, and the [expiry sweep](#expiry) deletes dead tokens and dead unaccepted invitations.
@@ -174,9 +171,9 @@ What each verb covers, by example (the owning chapters name the verb of each ope
 
 `admin` covers people, keys and delivery configuration. A builder can configure external models and tools; the roles do not promise data-loss prevention against a builder or against an authorized run, and deployment network policy constrains outbound destinations independently of roles ([08](08-providers.md)). Private environments add an owner check to the workspace verb ([06](06-environments.md)).
 
-**Path resolution conceals other tenants.** An organization path resolves only for a principal holding a grant in it. A workspace path resolves by ID to a workspace of one of the principal's organizations, or by key among the workspaces the principal can read (a confined principal: only its own); a key that matches readable workspaces in several organizations is `conflict` with reason `ambiguous_key`. Anything else is `not_found`, so a path never reveals another organization or its workspaces. Inside its own organization a principal can learn by ID that a workspace exists and be refused with `forbidden`. Globally unique IDs are never access control: lists, content reads, events, traces and replay lookups authorize their scope before resolving a supplied ID.
+**Path resolution conceals other tenants.** Organizations and workspaces are named by ID alone. An organization path resolves only for a principal holding a grant in it, and a workspace path only to a workspace of one of the principal's organizations. Anything else is `not_found`, so a path never reveals another organization or its workspaces. Inside its own organization a principal can learn by ID that a workspace exists and be refused with `forbidden`. Globally unique IDs are never access control: lists, content reads, events, traces and replay lookups authorize their scope before resolving a supplied ID.
 
-**The workspace of a business request.** Only administration names its organization or workspace in the path ([10](10-api.md#paths-and-scope)). Every other request acts in one workspace, taken from its credential: an API key acts in its own workspace, and a login session names one by ID in `X-Workspace-ID` (`invalid_argument` without it). An API key whose `X-Workspace-ID` names another workspace is `forbidden`. The named workspace then resolves and authorizes as a workspace path does, so a workspace of another organization is `not_found`.
+**The workspace of a business request.** Only administration names its organization or workspace in the path ([10](10-api.md#paths-and-scope)). Account, public and deployment-wide requests act in no workspace. Every other request acts in one workspace, taken from its credential: an API key acts in its own workspace, and a login session names one by ID in `X-Workspace-ID` (`invalid_argument` without it). An API key whose `X-Workspace-ID` names another workspace is `forbidden`. The named workspace then resolves and authorizes as a workspace path does, so a workspace of another organization is `not_found`.
 
 **Archived workspaces** refuse every verb but `read` with `disabled` (details: kind, id). Removing access is offboarding and stays allowed: administrators can still delete grants at an archived workspace, revoke its invitations, disable or retire its service accounts and revoke API keys confined to it, and a writer can revoke its connections' credentials ([04](04-resources.md#connections)). Resource rows of an archived workspace refuse every change the same way ([04](04-resources.md#rules-every-kind-follows)). Organization and workspace views carry `permissions`, the caller's verbs at that scope (only `read` on an archived workspace); clients shape their UI from it, and the server still authorizes every operation.
 
@@ -236,13 +233,13 @@ Scope never changes in place: triggers keep identity, scope and authorship of re
 
 ### Bootstrap
 
-`a13n-service bootstrap --email EMAIL [--password-stdin]` reads the password from the first line of standard input or prompts for it twice; the password is never a command-line argument. In one transaction under a transaction-level advisory lock, and only if no organization exists, it creates the organization and a workspace (both with key `default`), the first user with that password, and an organization-scope `admin` grant, audited as `organization.bootstrap` in the scope of the new organization and workspace. It prints `{organization_id, workspace_id, principal_id}` as JSON. It exits 3 and changes nothing when an organization already exists, and exits 1 for an invalid address or a password shorter than 12 characters. Like every operator command it requires the database schema at this build's head ([09](09-runtime.md#schema-migrations)).
+`a13n-service bootstrap --email EMAIL [--password-stdin]` reads the password from the first line of standard input or prompts for it twice; the password is never a command-line argument. In one transaction under a transaction-level advisory lock, and only if no organization exists, it creates the organization and a workspace, the first user with that password, and an organization-scope `admin` grant, audited as `organization.bootstrap` in the scope of the new organization and workspace. It prints `{organization_id, workspace_id, principal_id}` as JSON. It exits 3 and changes nothing when an organization already exists, and exits 1 for an invalid address or a password shorter than 12 characters. Like every operator command it requires the database schema at this build's head ([09](09-runtime.md#schema-migrations)).
 
 `POST /auth/bootstrap` with `{email, password}` does the same over HTTP and is public, so that Console can offer it to its first visitor: whoever reaches an uninitialized Service first becomes its administrator, and an operator exposing a new deployment to others runs the command first. It checks `Origin` and its rate limit, refuses with `already_exists` (kind `organization`) before hashing the password once an organization exists, and signs the new administrator in like login. `GET /auth/configuration` reports `initialized`, whether an organization exists.
 
 ### Organizations and workspaces
 
-An organization administrator renames the organization, changes its key, creates workspaces and archives them. A workspace administrator renames the workspace and changes its key. An organization key is unique in the deployment and a workspace key within its organization (`already_exists`). Links that name an old key stop resolving; everything else refers to organizations and workspaces by ID. Archiving is permanent and leaves the workspace listed with `archived_at`; archiving an archived workspace is `conflict` (reason `archived`). Archiving revokes the workspace's unaccepted invitations in the same transaction, under the organization lock that acceptance also takes, and its audit details carry `revoked_invitations`. The organization list contains the organizations in which the caller holds a grant (a confined principal: only its own). The workspace list contains the workspaces the caller can read, archived ones included, across its organizations or within one requested organization.
+An organization administrator renames the organization, creates workspaces and archives them. A workspace administrator renames the workspace. Names need not be unique; everything refers to organizations and workspaces by ID. Archiving is permanent and leaves the workspace listed with `archived_at`; archiving an archived workspace is `conflict` (reason `archived`). Archiving revokes the workspace's unaccepted invitations in the same transaction, under the organization lock that acceptance also takes, and its audit details carry `revoked_invitations`. The organization list contains the organizations in which the caller holds a grant (a confined principal: only its own). The workspace list contains the workspaces the caller can read, archived ones included, across its organizations or within one requested organization.
 
 ### Grants
 

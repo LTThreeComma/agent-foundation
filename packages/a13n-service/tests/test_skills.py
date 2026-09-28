@@ -34,6 +34,7 @@ from a13n_service.runs import skills as run_skills
 from a13n_service.runs.attempts import LeaseLost
 from a13n_service.settings import Settings
 from a13n_service.tenancy.authorize import BUILT_IN_ROLES, Grant, Principal
+from a13n_service.tenancy.tables import WorkspaceRow
 from sqlalchemy import select
 
 pytestmark = pytest.mark.anyio
@@ -519,6 +520,48 @@ async def test_every_revision_declares_the_skill_key_as_its_name(service) -> Non
     # The package makes a skill of its own under the name it declares.
     other = await service.client.post(f"{service.api}/skills", json={"source": source})
     assert other.status_code == 201 and other.json()["key"] == "review", other.text
+
+
+async def test_a_github_revision_declaring_another_name_is_refused_before_it_is_staged(
+    service, settings: Settings
+) -> None:  # type: ignore[no-untyped-def]
+    skill = await create(service, archive({"SKILL.md": DOCUMENT}), "uploaded")
+    uploads = settings.objects.root / f"orgs/{service.tenant.organization_id}/uploads"
+    staged = sorted(uploads.iterdir())
+    other = {**SOURCE, "path": "skills/other"}
+    with github_server(archive(REPOSITORY)) as (url, _):
+        renamed = await refused(
+            import_revision(service, importer(service, url), skill["key"], other, if_match=etag(skill))
+        )
+    assert (renamed.code, renamed.details["field"]) == ("invalid_argument", "source")
+    assert sorted(uploads.iterdir()) == staged
+
+
+async def test_a_skill_key_names_the_skill_of_the_request_workspace(service) -> None:  # type: ignore[no-untyped-def]
+    mine = await create(service, archive({"SKILL.md": DOCUMENT}), "mine")
+    second = new_object_id("ws")
+    async with transaction(service.runtime.storage) as session:
+        session.add(WorkspaceRow(id=second, organization_id=service.tenant.organization_id, name="Second"))
+    in_second = {"x-workspace-id": second}
+    upload = await service.client.post(
+        f"{service.api}/uploads",
+        files={"file": ("skill.zip", archive({"SKILL.md": DOCUMENT}), "application/zip")},
+        headers={"idempotency-key": "theirs", **in_second},
+    )
+    source = {"kind": "upload", "upload_id": upload.json()["upload_id"]}
+    theirs = await service.client.post(f"{service.api}/skills", json={"source": source}, headers=in_second)
+    assert theirs.status_code == 201 and theirs.json()["key"] == mine["key"], theirs.text
+    item = f"{service.api}/skills/{mine['key']}"
+    # Both heads carry the same ETag; only the header decides which one changes.
+    renamed = await service.client.patch(
+        item, json={"name": "Theirs"}, headers={"if-match": etag(theirs.json()), **in_second}
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert (await service.client.get(item)).json()["name"] == mine["name"]
+    assert (await service.client.get(item, headers=in_second)).json()["name"] == "Theirs"
+    # The key is immutable.
+    rekeyed = await service.client.patch(item, json={"key": "review"}, headers={"if-match": etag(mine)})
+    assert rekeyed.status_code == 400
 
 
 def with_declared(files: dict[str, bytes], change: str) -> bytes:

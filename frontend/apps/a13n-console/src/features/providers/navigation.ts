@@ -1,3 +1,5 @@
-export function providersPath(category: string, workspaceKey: string) {
-  return `/workspace/${encodeURIComponent(workspaceKey)}/settings/providers?${new URLSearchParams({ category })}`;
+import { workspacePath } from "../../shared/paths";
+
+export function providersPath(category: string, workspace: { id: string }) {
+  return `${workspacePath(workspace)}/settings/providers?${new URLSearchParams({ category })}`;
 }

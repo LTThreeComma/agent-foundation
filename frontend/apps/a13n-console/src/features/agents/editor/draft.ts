@@ -164,7 +164,6 @@ export function buildDraftConfig(
           reviewer: initial.reviewer,
           model: draft.model,
           model_settings: modelSettings,
-          model_characteristics: initial.model_characteristics,
           skills: draft.skills,
           // Absent, not empty, while every kind inherits: the saved configuration stays silent.
           ...(mediaSelected(draft.mediaUnderstanding).length

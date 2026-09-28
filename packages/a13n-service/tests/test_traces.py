@@ -192,9 +192,7 @@ async def started_attempt(service: SimpleNamespace) -> tuple[str, str]:
 async def add_workspace(service: SimpleNamespace) -> str:
     workspace_id = new_object_id("ws")
     async with transaction(service.runtime.storage) as session:
-        session.add(
-            WorkspaceRow(id=workspace_id, organization_id=service.tenant.organization_id, key="other", name="Other")
-        )
+        session.add(WorkspaceRow(id=workspace_id, organization_id=service.tenant.organization_id, name="Other"))
     return workspace_id
 
 

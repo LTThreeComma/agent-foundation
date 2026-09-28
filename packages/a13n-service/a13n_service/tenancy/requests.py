@@ -42,7 +42,15 @@ Actor = Annotated[Principal, Depends(current_principal)]
 
 
 async def current_workspace(
-    actor: Actor, selected: Annotated[ObjectId | None, Header(alias="X-Workspace-ID")] = None
+    actor: Actor,
+    selected: Annotated[
+        ObjectId | None,
+        Header(
+            alias="X-Workspace-ID",
+            description="The workspace ID a login session acts in; required with a login session. An API key acts "
+            "in its own workspace and needs none; naming another is forbidden.",
+        ),
+    ] = None,
 ) -> str:
     """The workspace a business request acts in: an API key's own, or the one a login session names in
     `X-Workspace-ID`. Authorization still checks the caller's grants there."""

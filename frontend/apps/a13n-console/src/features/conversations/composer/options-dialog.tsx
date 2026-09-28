@@ -65,7 +65,12 @@ type Options = Pick<
 };
 
 /** Overrides with their own controls; advanced JSON must not restate them. */
-const dedicatedOverrides = ["model", "instructions", "media_understanding"];
+const dedicatedOverrides = [
+  "model",
+  "model_settings",
+  "instructions",
+  "media_understanding",
+];
 
 /** The next run's overrides, held beside the message they will be sent with. */
 export function useRunOptions() {

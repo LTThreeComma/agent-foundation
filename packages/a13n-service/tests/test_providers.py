@@ -48,9 +48,7 @@ def etag(resource: dict) -> str:
 async def add_workspace(service) -> str:  # type: ignore[no-untyped-def]
     workspace_id = new_object_id("ws")
     async with transaction(service.runtime.storage) as session:
-        session.add(
-            WorkspaceRow(id=workspace_id, organization_id=service.tenant.organization_id, key="second", name="Second")
-        )
+        session.add(WorkspaceRow(id=workspace_id, organization_id=service.tenant.organization_id, name="Second"))
     return workspace_id
 
 

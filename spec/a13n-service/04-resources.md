@@ -111,7 +111,7 @@ An author's references need `read`. A run's override (`options.overrides`, [05](
 - Revisions: `POST`, list, get, and `POST …/revisions/{rev}/set-default`, which validates the configuration again.
 - `PUT`, `GET` and `DELETE /agents/{agent}/avatar` manage the head's image. Changing it needs `write` on an unarchived custom agent and `If-Match`; reading it needs `read`. The image follows the [image rules](03-tenancy.md#images).
 
-Export and import are Console features: the Console serializes one revision's configuration and imports by creating an agent. Models and skills travel by key, so a configuration imports into another workspace that has models and skills of those keys.
+Export and import are Console features: the Console serializes one revision's configuration and imports by creating an agent, whose configuration is [validated](#validation) like any other: every resource it names, pinned revisions included, must belong to the workspace.
 
 ### Agent Composer
 

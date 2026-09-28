@@ -31,7 +31,6 @@ afterEach(() => {
 
 const agent = (name: string, archived = false) => ({
   id: `ap_${name.toLowerCase()}`,
-  key: name.toLowerCase(),
   name,
   description: "",
   source: "custom",

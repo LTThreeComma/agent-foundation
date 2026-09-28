@@ -20,7 +20,7 @@ vi.mock("../../auth/context", () => ({
 vi.mock("../../layout/workspace", () => ({
   useWorkspace: () => ({
     workspace: state.hasWorkspace
-      ? { id: "ws_test", key: "research", name: "Research" }
+      ? { id: "ws_test", name: "Research" }
       : undefined,
     organization: { id: "org_test", name: "Acme" },
     organizationCan: () => state.organizationWrite,

@@ -190,7 +190,7 @@ function AppContent() {
                   ))}
                   <Route element={<Authenticated />}>
                     <Route
-                      path="/workspace/:workspaceKey"
+                      path="/workspace/:workspaceId"
                       element={<WorkspaceShell />}
                     >
                       <Route index element={<Navigate to="agents" replace />} />

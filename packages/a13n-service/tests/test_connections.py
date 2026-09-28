@@ -462,7 +462,7 @@ async def test_connections_follow_workspace_grants(service) -> None:  # type: ig
     created = await create(service, {"config": {"url": "http://127.0.0.1:9/mcp"}})
     other = new_object_id("ws")
     async with transaction(storage) as session:
-        session.add(WorkspaceRow(id=other, organization_id=organization_id, key="second", name="Second"))
+        session.add(WorkspaceRow(id=other, organization_id=organization_id, name="Second"))
 
     def member(workspace: str, role: str) -> Principal:
         return Principal(

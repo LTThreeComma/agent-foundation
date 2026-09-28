@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { expect, it, vi } from "vitest";
@@ -277,6 +283,25 @@ it("sends the chosen model and instructions as the run's overrides", async () =>
       },
     },
   });
+});
+
+it("takes model settings from their own field and rejects them in advanced JSON", () => {
+  const { result } = renderHook(() => useRunOptions());
+  act(() => {
+    result.current.setSettings('{"temperature": 0.2}');
+    result.current.setAdvanced('{"skills": []}');
+  });
+  expect(result.current.build()).toEqual({
+    options: {
+      overrides: { skills: [], model_settings: { temperature: 0.2 } },
+    },
+  });
+  act(() =>
+    result.current.setAdvanced('{"model_settings": {"temperature": 1}}'),
+  );
+  expect(() => result.current.build()).toThrow(
+    "The model_settings field cannot be edited in advanced run configuration.",
+  );
 });
 
 it("mounts initial memories on the new thread and changes their access before sending", async () => {

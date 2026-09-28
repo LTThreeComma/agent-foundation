@@ -5240,8 +5240,6 @@ export interface components {
       id: string;
       /** Image Url */
       image_url: string | null;
-      /** Key */
-      key: string;
       /** Name */
       name: string;
       /** Permissions */
@@ -5263,8 +5261,6 @@ export interface components {
     };
     /** OrganizationUpdate */
     OrganizationUpdate: {
-      /** Key */
-      key?: string | null;
       /** Name */
       name?: string | null;
     };
@@ -6982,8 +6978,6 @@ export interface components {
       id: string;
       /** Image Url */
       image_url: string | null;
-      /** Key */
-      key: string;
       /** Name */
       name: string;
       /** Organization Id */
@@ -7004,8 +6998,6 @@ export interface components {
     };
     /** WorkspaceCreate */
     WorkspaceCreate: {
-      /** Key */
-      key: string;
       /** Name */
       name: string;
     };
@@ -7018,8 +7010,6 @@ export interface components {
     };
     /** WorkspaceUpdate */
     WorkspaceUpdate: {
-      /** Key */
-      key?: string | null;
       /** Name */
       name?: string | null;
     };
@@ -7047,6 +7037,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -7080,6 +7071,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -7104,6 +7096,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -7132,6 +7125,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -7158,6 +7152,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7186,6 +7181,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7218,6 +7214,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7244,6 +7241,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7274,6 +7272,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7308,6 +7307,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7334,6 +7334,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7367,6 +7368,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7395,6 +7397,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7425,6 +7428,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7454,6 +7458,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7483,6 +7488,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7512,6 +7518,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -7536,6 +7543,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -7573,6 +7581,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7601,6 +7610,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7627,6 +7637,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7841,6 +7852,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -7865,6 +7877,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -7949,6 +7962,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -7977,6 +7991,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8009,6 +8024,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8041,6 +8057,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8067,6 +8084,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8093,6 +8111,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8122,6 +8141,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8146,6 +8166,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8174,6 +8195,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8202,6 +8224,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8237,6 +8260,7 @@ export interface operations {
         refresh?: boolean;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8263,6 +8287,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8290,6 +8315,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8317,6 +8343,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8346,6 +8373,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8370,6 +8398,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8398,6 +8427,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8426,6 +8456,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8456,6 +8487,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8486,6 +8518,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8510,6 +8543,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8538,6 +8572,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8566,6 +8601,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8600,6 +8636,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8624,6 +8661,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8654,6 +8692,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8682,6 +8721,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8710,6 +8750,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8742,6 +8783,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8822,6 +8864,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8848,6 +8891,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8882,6 +8926,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8906,6 +8951,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -8934,6 +8980,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8962,6 +9009,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -8988,6 +9036,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9023,6 +9072,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9049,6 +9099,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9081,6 +9132,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9111,6 +9163,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9140,6 +9193,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9173,6 +9227,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9202,6 +9257,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9228,6 +9284,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9258,6 +9315,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9288,6 +9346,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9319,6 +9378,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9349,6 +9409,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9377,6 +9438,7 @@ export interface operations {
         path: string;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9403,6 +9465,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9432,6 +9495,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9462,6 +9526,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -9486,6 +9551,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -9514,6 +9580,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9542,6 +9609,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9572,6 +9640,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9622,6 +9691,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -9646,6 +9716,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -9674,6 +9745,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9702,6 +9774,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9732,6 +9805,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9761,6 +9835,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -9785,6 +9860,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -9813,6 +9889,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -9841,6 +9918,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10389,6 +10467,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10417,6 +10496,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10447,6 +10527,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10476,6 +10557,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10504,6 +10586,7 @@ export interface operations {
       query?: never;
       header: {
         "Idempotency-Key": string;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10543,6 +10626,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10569,6 +10653,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10597,6 +10682,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10624,6 +10710,7 @@ export interface operations {
       query?: never;
       header: {
         "Idempotency-Key": string;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10674,6 +10761,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -10698,6 +10786,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -10726,6 +10815,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10754,6 +10844,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10791,6 +10882,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -10815,6 +10907,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -10843,6 +10936,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -10871,6 +10965,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10899,6 +10994,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10931,6 +11027,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10960,6 +11057,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -10988,6 +11086,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11018,6 +11117,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11045,6 +11145,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11072,6 +11173,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11102,6 +11204,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11131,6 +11234,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11160,6 +11264,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -11184,6 +11289,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -11212,6 +11318,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11240,6 +11347,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11266,6 +11374,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11299,6 +11408,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11325,6 +11435,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11357,6 +11468,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -11382,6 +11494,7 @@ export interface operations {
       query?: never;
       header: {
         "Idempotency-Key": string;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -11419,6 +11532,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11447,6 +11561,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11479,6 +11594,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11505,6 +11621,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11533,6 +11650,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11565,6 +11683,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11594,6 +11713,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11621,6 +11741,7 @@ export interface operations {
       query?: never;
       header: {
         "Idempotency-Key": string;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11662,6 +11783,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11692,6 +11814,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11721,6 +11844,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11750,6 +11874,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11781,6 +11906,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11809,6 +11935,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11841,6 +11968,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11868,6 +11996,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11902,6 +12031,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11929,6 +12059,7 @@ export interface operations {
       query?: never;
       header?: {
         "Last-Event-ID"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -11955,6 +12086,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -11979,6 +12111,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -12013,6 +12146,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -12037,6 +12171,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -12066,6 +12201,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -12093,6 +12229,7 @@ export interface operations {
       query?: never;
       header: {
         "Idempotency-Key": string;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -12127,6 +12264,7 @@ export interface operations {
         ingested_before?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -12485,6 +12623,7 @@ export interface operations {
         cursor?: string | null;
       };
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -12509,6 +12648,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path?: never;
@@ -12537,6 +12677,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -12565,6 +12706,7 @@ export interface operations {
       header?: {
         /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
         "If-Match"?: string | null;
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
@@ -12595,6 +12737,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
+        /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {

@@ -109,7 +109,7 @@ export function AgentToolsets({
 }) {
   const { t } = useTranslation();
   const client = useClient();
-  const { workspace } = useWorkspace();
+  const { workspace, basePath } = useWorkspace();
   const [selected, setSelected] = useState<Definition["key"] | null>(null);
   const catalog = useQuery({
     queryKey: ["toolset-catalog", workspace.id],
@@ -487,10 +487,7 @@ export function AgentToolsets({
             <>
               {" "}
               ·{" "}
-              <a
-                href={providersPath("web", workspace.key)}
-                className="underline"
-              >
+              <a href={providersPath("web", workspace)} className="underline">
                 {t("Manage Web Providers")}
               </a>
             </>
@@ -499,10 +496,7 @@ export function AgentToolsets({
             <>
               {" "}
               ·{" "}
-              <a
-                href={`/workspace/${encodeURIComponent(workspace.key)}/models`}
-                className="underline"
-              >
+              <a href={`${basePath}/models`} className="underline">
                 {t("Manage models")}
               </a>
             </>

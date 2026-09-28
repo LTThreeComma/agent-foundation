@@ -21,10 +21,10 @@ function Location() {
   return <output aria-label="Current path">{useLocation().pathname}</output>;
 }
 
-it("names a new workspace and derives its URL key from the name", async () => {
+it("creates a named workspace and opens its settings", async () => {
   const user = userEvent.setup();
   http.POST.mockResolvedValue({
-    data: { id: "ws_new", key: "product-design", name: "Product Design" },
+    data: { id: "ws_new", name: "Product Design" },
     response: new Response(),
   });
   render(
@@ -36,7 +36,6 @@ it("names a new workspace and derives its URL key from the name", async () => {
     </QueryClientProvider>,
   );
   await user.click(screen.getByRole("button", { name: "Create workspace" }));
-  expect(screen.queryByRole("textbox", { name: "URL key" })).toBeNull();
   await user.type(
     screen.getByRole("textbox", { name: "Workspace name" }),
     "Product Design",
@@ -46,14 +45,14 @@ it("names a new workspace and derives its URL key from the name", async () => {
   );
   await waitFor(() =>
     expect(screen.getByLabelText("Current path").textContent).toBe(
-      "/workspace/product-design/settings",
+      "/workspace/ws_new/settings",
     ),
   );
   expect(http.POST).toHaveBeenCalledWith(
     "/api/v1/organizations/{organization_id}/workspaces",
     {
       params: { path: { organization_id: "org_acme" } },
-      body: { name: "Product Design", key: "product-design" },
+      body: { name: "Product Design" },
     },
   );
 });

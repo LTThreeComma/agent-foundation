@@ -18,7 +18,7 @@ export function ManageProvidersLink({
     <Button
       variant={variant}
       size={variant === "ghost" ? "sm" : undefined}
-      render={<Link to={providersPath(category, workspace.key)} />}
+      render={<Link to={providersPath(category, workspace)} />}
     >
       {t("Manage providers")}
     </Button>
