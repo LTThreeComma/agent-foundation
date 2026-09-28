@@ -1,4 +1,4 @@
-import { Logo, Wordmark } from "../src";
+import { Logo, LogoAnimation, Wordmark } from "../src";
 import type { Translate } from "./showcase";
 const colors = [
   "background",
@@ -19,6 +19,7 @@ export function Foundations({ t }: { t: Translate }) {
         <div className="flex items-center gap-4 text-5xl">
           <Logo alt="" width={48} height={48} />
           <Wordmark />
+          <LogoAnimation size={48} />
         </div>
         <p className="text-sm text-muted-foreground">Space Grotesk Bold</p>
       </section>
