@@ -23,6 +23,7 @@ TEST_INPUTS: dict[str, tuple[str, ...]] = {
         "frontend/packages/a13n-ui/package.json",
     ),
     "test_observability_tooling.py": ("dev/observability/*",),
+    "test_mcp_apps_demo.py": ("dev/harness-ui/mcp_apps.py",),
     "test_service_e2e_tooling.py": ("e2e/service/*", "dev/fixtures/*"),
     "test_pr_change_breakdown.py": (
         ".github/scripts/pr-change-*.cjs",

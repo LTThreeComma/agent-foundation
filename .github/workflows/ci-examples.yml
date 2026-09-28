@@ -51,5 +51,12 @@ jobs:
           enable-cache: true
           cache-dependency-glob: examples/*/uv.lock
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: examples/mcp-apps/package-lock.json
+
       - name: Run complete examples gate
         run: make examples-check-all

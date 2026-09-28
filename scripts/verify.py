@@ -50,6 +50,7 @@ PASSED_RECORD = "a13n-verify-passed"
 class Plan:
     workflows: set[str] = field(default_factory=set)
     lint_all_workflows: bool = False
+    examples: bool = False
     python_tests: set[str] = field(default_factory=set)
     consumer_tests: set[str] = field(default_factory=set)
     python_files: set[str] = field(default_factory=set)
@@ -356,6 +357,9 @@ def plan(
                     project = "/".join(test.split("/")[1:3])
                     result.frontend_tests[project].add(test)
             result.notes.append(f"{posix}: declared file/command dependencies -> {', '.join(sorted(selected))}")
+        if posix == "Makefile" or (posix.startswith("examples/") and not posix.endswith(".md")):
+            # Examples own independent environments and build inputs, outside the workspace runner.
+            result.examples = True
         if posix == "uv.lock":
             documents = verify_inputs.documents(REPOSITORY_ROOT, posix, base)
             suites = verify_inputs.python_lock(*documents) if documents else None
@@ -793,6 +797,8 @@ def steps_for(result: Plan) -> list[Step]:
                 cwd=FRONTEND,
             )
         )
+    if result.examples:
+        steps.append(Step("examples", ["make", "examples-check-all"]))
     for project in sorted(result.frontend_build):
         steps.append(Step(f"build {project}", ["pnpm", "--filter", f"./{project}", "run", "build"], cwd=FRONTEND))
     for step in steps:
@@ -832,6 +838,7 @@ def full_steps() -> list[Step]:
         Step("frontend check", ["make", "frontend-check"]),
         Step("python tests (all)", ["make", "test"]),
         Step("frontend tests", ["make", "frontend-test"]),
+        Step("examples", ["make", "examples-check-all"]),
     ]
 
 
