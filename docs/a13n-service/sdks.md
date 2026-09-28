@@ -16,7 +16,7 @@ The SDK repositories own installation, language-specific methods, examples, comp
 
 ## Connect to your deployment
 
-Start with the Service URL and credentials for the intended workspace: an API key acts in its own workspace, and a login session names a workspace ID (see [HTTP conventions](http.md#workspace)). To submit a message, also select an existing Agent. [Get started](get-started.md) covers deployment and initial setup; [identity and access](identity.md) explains API keys versus login sessions.
+Start with the Service URL and credentials for the intended workspace: an API key acts in its own workspace, and a login session names a workspace ID (see [HTTP conventions](http.md#workspace)). To submit a message, also select an existing Agent. [Connect your application](connect-application.md) walks through credentials, agent selection, and a first request. [Get started](get-started.md) covers deployment; [identity and access](identity.md) explains API keys versus login sessions.
 
 ## Invoke an Agent
 
