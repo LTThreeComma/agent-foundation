@@ -409,8 +409,8 @@ async def test_references_are_checked_at_their_field_path(service) -> None:  # t
         ({"model": "missing"}, "model"),
         ({"reviewer": {"model": "missing"}}, "reviewer.model"),
         ({"model_settings": {"temperature": "warm"}}, "model_settings.temperature"),
-        # The model's provider resource owns the transport; settings cannot carry another request body or timeout.
-        ({"model_settings": {"extra_body": {"model": "other"}}}, "model_settings"),
+        # Raw inference cannot change upstream selection, and timeouts remain operator-owned.
+        ({"model_settings": {"extra_body": {"model": "other"}}}, "model_settings.extra_body"),
         ({"model_settings": {"timeout": 30}}, "model_settings"),
         ({"reviewer": {"model": model, "model_settings": {"unknown": 1}}}, "reviewer.model_settings"),
         ({"media_understanding": {"image": model}}, "media_understanding.image"),
@@ -900,7 +900,15 @@ async def test_workspace_media_defaults_fill_what_an_agent_leaves_unselected(ser
     async def media() -> dict[str, str]:
         async with short_session(service.runtime.storage) as session:
             revision = await select_revision(session, tenant.workspace_id, agent["id"], None)
-            resolved = await resolve(session, principal, scope, revision, authority=authority, override=None)
+            resolved = await resolve(
+                session,
+                principal,
+                scope,
+                revision,
+                authority=authority,
+                override=None,
+                registry=service.runtime.registry,
+            )
         return {kind: model.key for kind, model in resolved.media.items()}
 
     assert await media() == {"image": reader}

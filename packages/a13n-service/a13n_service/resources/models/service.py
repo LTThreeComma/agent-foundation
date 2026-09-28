@@ -6,13 +6,16 @@ names the same model.
 """
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 from a13n_harness import ModelCapability
 from a13n_harness.pricing import ModelPricingEntry
 from a13n_harness.providers.model.definition import ModelProviderDefinition
 from a13n_harness.toolsets.file_media import NativeInputMediaKind
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
+from pydantic_ai.settings import ModelSettings
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +24,7 @@ from a13n_service.infra.db import Storage, assign, short_session, transaction, u
 from a13n_service.infra.errors import disabled, invalid, not_found
 from a13n_service.infra.http import require_match
 from a13n_service.infra.ids import KEY_MAX_LENGTH, new_object_id
+from a13n_service.providers.model_settings import check_request_headers
 from a13n_service.providers.registry import Registry
 from a13n_service.resources.models.schemas import Model, ModelConfig, ModelCreate, ModelPage, ModelUpdate
 from a13n_service.resources.models.tables import ModelRow
@@ -112,7 +116,7 @@ async def create_model(
         provider = await find_row(session, actor, ModelProviderRow, scope, body.provider_id, "write")
         if not provider.enabled:
             raise disabled(provider.KIND, provider.id)
-        _check_api(registry.get("model", provider.type), body.config)
+        model_settings(body.config, provider, {}, registry=registry, field="config")
         key = body.key or default_key(provider.type, body.config.model_name)
         row = ModelRow(
             id=new_object_id("mdl"),
@@ -178,7 +182,7 @@ async def update_model(
         if body.config is not None and (config := body.config.model_dump(mode="json")) != row.config:
             # The model spends its provider's credential.
             provider = await find_row(session, actor, ModelProviderRow, scope, row.provider_id, "write")
-            _check_api(registry.get("model", provider.type), body.config)
+            model_settings(body.config, provider, {}, registry=registry, field="config")
             values["config"] = config
         for field in ("pricing", "catalog_ref"):
             if field in body.model_fields_set:
@@ -210,6 +214,30 @@ def _dump(value: BaseModel | None) -> dict | None:
 
 def _pricing(row: ModelRow) -> ModelPricingEntry | None:
     return None if row.pricing is None else ModelPricingEntry.model_validate(row.pricing)
+
+
+def model_settings(
+    config: ModelConfig,
+    provider: ResolvedProvider | ModelProviderRow,
+    settings: Mapping[str, JsonValue],
+    *,
+    registry: Registry,
+    field: str,
+) -> ModelSettings:
+    """Compose and check the settings of one live Model/Provider, without revealing any secrets."""
+    definition = registry.get("model", provider.type)
+    _check_api(definition, config)
+    effective = registry.check_model_settings(config.model_api, {**config.defaults(), **settings}, field=field)
+    if "extra_headers" in effective:
+        check_request_headers(
+            definition,
+            provider.config,
+            cast(dict[str, str], effective["extra_headers"]),
+            credential_configured=provider.credential is not None,
+            static_names=tuple(provider.extra_headers),
+            field=f"{field}.extra_headers",
+        )
+    return cast(ModelSettings, effective)
 
 
 def _check_api(definition: ModelProviderDefinition, config: ModelConfig) -> None:
