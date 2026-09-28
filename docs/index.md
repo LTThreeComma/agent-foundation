@@ -1,69 +1,66 @@
 # Agent Foundation
 
-Use an AI agent in your terminal, embed one in a Python application, or build the infrastructure around it. Agent Foundation provides a ready-to-use local product and focused SDKs built on Pydantic AI.
+**Build and operate your own agent platform.**
 
-## Start with what you want to do
+Deploy Agent Foundation on your infrastructure to manage agents, models, tools, and execution environments. Let teams use agents through the Console, or connect your applications through the API. The Service runs agents with the Python Harness SDK, built on Pydantic AI.
 
-| Goal                                                  | Start here                                                                                                  |
-| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Work on a repository with an AI agent                 | **[Harness UI](a13n-harness-ui/index.md)** — install, connect a model, and start chatting                   |
-| Find or change terminal configuration                 | **[Configuration recipes](a13n-harness-ui/configuration-recipes.md)** — exact files, settings, and examples |
-| Build an agent into a Python application              | **[Harness](a13n-harness/index.md)** — offline quickstart and feature guides                                |
-| Give software portable file and command access        | **[Environments](environments/index.md)** — Harness Providers usable without an Agent                       |
-| Run Environment operations through a daemon           | **[Envd](a13n-envd/index.md)** — installation, configuration, isolation, and EIP                            |
-| Convert agent observations for a UI or event consumer | **[Stream Protocol](a13n-stream-protocol/index.md)** — typed AG-UI projection                               |
+**[Deploy your platform](a13n-service/get-started.md)** · **[Connect your application](a13n-service/connect-application.md)**
 
-## Use Harness UI
+Already have a platform URL? [Use an existing platform](a13n-service/use-platform.md). New to the terminology? Read [Core concepts](core-concepts.md).
 
-```console
-uv tool install a13n-harness-ui
-cd your-repository
-a13n-harness-ui
-```
+## What you can build
 
-First-use setup connects a subscription or API-key Model and asks you to choose execution permissions. No SDK code or service deployment is required.
+- **A shared platform for your team:** configure agents and resources in workspaces, give members access, and keep conversations and results in one place.
+- **Agents inside your product:** submit work through the API, display streamed output, handle questions and approvals, and receive lifecycle webhooks.
+- **Agents that work with your systems:** connect tools through MCP or app connections, attach environments for files and commands, and share memory across conversations.
 
-The configuration root is normally `~/.a13n-harness-ui/a13n-harness-ui.yaml`. Run `a13n-harness-ui config path` or type `/config` in chat to find the selected tree.
+## Platform capabilities
 
-[Get started](a13n-harness-ui/index.md) · [Configure](a13n-harness-ui/configuration.md) · [Use the terminal](a13n-harness-ui/everyday-use.md)
+| Need                                  | What the platform provides                                                                                                  | Learn more                                                                           |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Configure and reuse agents            | Models, instructions, tools, skills, subagents, and versioned agent configurations                                          | [Agents](a13n-service/agents-and-runs.md#agents)                                     |
+| Keep work running                     | Work continues when you disconnect; the platform saves conversations and supports recovery after execution process failures | [Threads and runs](a13n-service/agents-and-runs.md)                                  |
+| Involve a person                      | Wait for approvals, questions, or client tool results, then continue the conversation                                       | [Waits and approvals](a13n-service/agents-and-runs.md#waits-approvals-and-questions) |
+| Access tools and files                | Credentialed tool connections and configurable execution environments                                                       | [Tools](a13n-service/tools.md) · [Environments](a13n-service/environments.md)        |
+| Retain knowledge across conversations | Shared file or record memories that agents can read and update                                                              | [Memory](a13n-service/memory.md)                                                     |
+| Control access                        | Organizations, workspaces, roles, API keys, and service accounts                                                            | [Identity and access](a13n-service/identity.md)                                      |
+| Inspect execution                     | Run results, traces, usage records, logs, and operational metrics                                                           | [Monitor and troubleshoot](a13n-service/monitoring.md)                               |
 
-## Build with the SDKs
+## How the platform works
 
 ```mermaid
 flowchart TB
-    UI["Harness UI: terminal product"] --> Harness["Harness: Agent SDK"]
-    App["Your Python application"] --> Harness
-    Harness --> PAI["Pydantic AI: Agent loop and Models"]
-    Harness --> Env["Environment: files and commands"]
-    Env --> Native["Native Providers"]
-    Env --> EIP["Envd: EIP daemon"]
-    Harness --> Stream["Stream Protocol: AG-UI events"]
-    Stream --> Consumer["Your renderer or transport"]
+    Client["Send a message in Console or through the API"] --> Agent["Your Agent works on the request"]
+    Agent --> Resources["Uses the model and configured tools"]
+    Resources --> Results["Follow the response and continue the conversation"]
 ```
 
-You do not need every component. Environment Providers work without an Agent; Harness works without an Environment; Stream Protocol is optional when you need AG-UI rather than native Harness observations.
+You configure an Agent, then send it a message through Console or the API. The Agent uses its model and tools to work on your request. You can follow the output, answer a question or approval request, and return to the saved conversation later.
 
-| Component       | Python distribution / import                          | Responsibility                                                                   |
-| --------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Harness UI      | `a13n-harness-ui` / `a13n_harness_ui`                 | Local configuration, conversations, terminal interaction, and Host lifecycle     |
-| Harness         | `a13n-harness` / `a13n_harness`                       | Agent composition, scoped Runs, continuation, and observation                    |
-| Environment     | `a13n-harness` / `a13n_harness.providers.environment` | Providers, single-Environment operations, and target state                       |
-| Envd            | Native `a13n-envd` executable                         | Environment Interaction Protocol (EIP), command containment, and file operations |
-| Envd client     | `a13n-envd-client` / `a13n_envd_client`               | Generated low-level Python EIP client                                            |
-| Stream Protocol | `a13n-stream-protocol` / `a13n_stream_protocol`       | Harness-to-AG-UI conversion, not transport or rendering                          |
+Start with the [deployment guide](a13n-service/get-started.md), or read [Core concepts](core-concepts.md) for a walkthrough of one conversation.
 
-These are component names, not alternative names for the same runtime. In particular, Envd does not run an Agent, and a saved stream snapshot is not Agent continuation state.
+## Start with your task
 
-## Hosted services
+| Your task                                  | Start here                                                      | First result                                                 |
+| ------------------------------------------ | --------------------------------------------------------------- | ------------------------------------------------------------ |
+| Deploy a new platform                      | [Deploy your first platform](a13n-service/get-started.md)       | A ready Service, administrator account, and configured model |
+| Use a platform your team already runs      | [Use an existing platform](a13n-service/use-platform.md)        | A conversation with an Agent in Console                      |
+| Call agents from your application          | [Connect your application](a13n-service/connect-application.md) | An authenticated API request and a first run result          |
+| Run agents inside a Python process you own | [Harness quickstart](a13n-harness/getting-started.md)           | An embedded Agent with no Service deployment                 |
+| Use an agent locally                       | [Harness UI setup](a13n-harness-ui/index.md)                    | A local Agent in your terminal or browser                    |
 
-The **[Service](a13n-service/index.md)** runs agents as a shared, multi-user application: organizations and workspaces, providers and models, versioned agents, durable sessions, threads and runs executed by workers with the Harness, environments, connections and webhooks, managed through an HTTP API and the Console.
+See [Choose how to use Agent Foundation](choose-your-path.md) for prerequisites and the differences between these options.
 
-For an application embedding Harness directly, start with [Embedding in a Host](a13n-harness/hosting.md) instead of deploying the Service unnecessarily.
+## Components and integration
 
-For the complete repository package map, including Service clients, logging, private frontends, and runnable examples, see the [package catalog](packages.md).
+**Service** provides the shared platform; **Console** is its browser application. **Harness** is the SDK Service uses to run agents, and you can embed it in your own Python application. **Harness UI** is a separate local application using Harness, with its own terminal and browser interfaces.
+
+For more specialized integrations, [Environments](environments/index.md) provide portable file and command operations, [Envd](a13n-envd/index.md) exposes those operations through a daemon, and [Stream Protocol](a13n-stream-protocol/index.md) converts Harness observations into typed AG-UI events. You can start using the platform before learning these integration APIs.
+
+The [package catalog](packages.md) lists distributions, imports, and runnable example projects.
 
 ## Documentation and releases
 
-The site tracks the repository's `main` branch. Source examples use the locked workspace; published packages should be used with their corresponding release documentation and dependency metadata. The project remains in `0.x` development, so do not assume compatibility across every release.
+This site tracks the repository's `main` branch. For an installed release, check its release documentation and dependency metadata; the project remains in `0.x` development, and examples on `main` may differ from published packages. [Service clients](a13n-service/sdks.md#keep-version-ownership-clear) have their own versions and compatibility requirements.
 
-Harness and Stream Protocol share one exact release version. Harness UI and Envd have their own release boundaries. Accepted architecture lives in [specifications](https://github.com/converge-ai-labs/agent-foundation/tree/main/spec); repository setup and validation live in [Contributing](https://github.com/converge-ai-labs/agent-foundation/blob/main/CONTRIBUTING.md).
+See the [package catalog](packages.md) for release boundaries, [Contributing](https://github.com/converge-ai-labs/agent-foundation/blob/main/CONTRIBUTING.md) for source setup, and the [specifications](https://github.com/converge-ai-labs/agent-foundation/tree/main/spec) for accepted architecture contracts.

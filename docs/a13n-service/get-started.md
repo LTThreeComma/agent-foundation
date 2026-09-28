@@ -1,6 +1,8 @@
-# Get started
+# Deploy your first platform
 
-This guide deploys the Service, creates the first administrator, connects a model and runs an agent, first in Console and then through the HTTP API.
+Deploy Service, create the first administrator, and connect a model. You will then be ready to run your first Agent in Console or call it from an application.
+
+Already have a running platform? Go directly to [Use an existing platform](use-platform.md) or [Connect your application](connect-application.md). For an introduction to the terminology, read [Core concepts](../core-concepts.md).
 
 ## Deploy the Service
 
@@ -32,43 +34,12 @@ Outbound requests reject private addresses and plain HTTP by default. To use a m
 
 ## Create and try an agent
 
-1. Open **Agents → Create agent**, give it a name, choose the model and write its instructions.
-2. Save it. Every save creates an immutable version.
-3. Choose **Try agent**, or open **New conversation** and pick the agent, then send a message.
-
-The conversation shows the agent's reasoning, tool calls and answer as they stream. Send more messages while it works to guide it, or stop it. When the agent asks for approval or a question, answer in the conversation. The file and terminal tools need an [environment](environments.md); add an environment template to the agent to give each conversation its own sandbox.
+Continue with [Create your own Agent](use-platform.md#create-your-own-agent) to create an assistant and verify a first response and follow-up in Console. Once it works, [invite your team](identity.md#invitations) with the roles they need.
 
 ## Use the API
 
-For application code or shell workflows, choose a [Service SDK or the remote CLI](sdks.md) and follow its repository-owned quick start. The curl examples below illustrate the Service HTTP boundary without duplicating those client guides.
+Follow [Connect your application](connect-application.md) to create a workspace API key, select an Agent, submit a message, and read its result.
 
-Create an API key under **Workspace settings → My API keys** and export it with the Service URL. Requests with the key act in its workspace, so their paths name no workspace:
+## Operate the platform
 
-```sh
-export A13N_URL=http://127.0.0.1:8080 A13N_API_KEY=a13n_...
-```
-
-Create an agent with the key of the model you added, such as `gpt-5.5` (`GET /api/v1/models` lists them):
-
-```sh
-curl -X POST "$A13N_URL/api/v1/agents" \
-  -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
-  -d '{"name": "Helper", "config": {"model": "gpt-5.5", "instructions": "Answer briefly."}}'
-```
-
-Start a conversation with its first message, naming the agent by the `id` the creation returned. The `Idempotency-Key` makes a retry after a lost response safe:
-
-```sh
-curl -X POST "$A13N_URL/api/v1/threads" \
-  -H "Authorization: Bearer $A13N_API_KEY" -H "Content-Type: application/json" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"agent_id": "ap_...", "payload": {"content": [{"type": "text", "text": "What is a13n?"}]}}'
-```
-
-The response holds the new `thread`, the message's inbox `entry` and the `run` it started. Read the run until its `status` is `completed`, `waiting`, `failed` or `cancelled`; a completed run's answer is in `output`:
-
-```sh
-curl "$A13N_URL/api/v1/runs/run_..." -H "Authorization: Bearer $A13N_API_KEY"
-```
-
-Instead of polling, follow the [thread stream](agents-and-runs.md#follow-a-thread-stream) or subscribe to [webhooks](files-and-webhooks.md#webhooks). Continue the conversation with `POST …/threads/{thread_id}/inbox`; see [Agents, threads and runs](agents-and-runs.md).
+Before expanding the deployment, review [Configure Service](configuration.md), [Run and maintain](operations.md), and [Monitor and troubleshoot](monitoring.md). These guides cover deployment settings, maintenance, and diagnosing failed requests or runs.
