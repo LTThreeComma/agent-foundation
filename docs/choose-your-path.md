@@ -1,6 +1,16 @@
 # Choose how to use Agent Foundation
 
-For a shared agent platform on your infrastructure, start with Service. You can also embed Harness in a Python application or use Harness UI locally. Choose the path that matches what you need to operate.
+For a shared agent platform on your infrastructure, start with Service. You can also embed Harness in a Python application or work interactively in Harness UI. Choose the path that matches what you need to operate.
+
+## Try the platform locally
+
+Use the **Service local quickstart** to evaluate Console and the API before setting up a shared deployment.
+
+- **You need:** Docker with Docker Compose and your own model provider API key.
+- **You get:** a local Service with a pre-created administrator, organization, and workspace. Connect your model to get a first Agent response.
+- **Start here:** [Local quickstart](a13n-service/get-started.md).
+
+The trial uses public credentials and only publishes loopback access. For a shared platform, follow the deployment path below with your own administrator credentials.
 
 ## Deploy a platform
 
@@ -8,7 +18,7 @@ Use **Service** when people or applications need shared agents, credentials, con
 
 - **You need:** a deployment host or Kubernetes cluster, PostgreSQL, Redis, an encryption key, and access to a model provider. The deployment guides describe the complete configuration.
 - **You get:** a Service API and a Console deployment where administrators configure resources and users run agents.
-- **Start here:** [Deploy your first platform](a13n-service/get-started.md).
+- **Start here:** [Deploy your platform](a13n-service/get-started.md#deploy-the-service).
 - **Then:** [Run and maintain](a13n-service/operations.md) and [Monitor and troubleshoot](a13n-service/monitoring.md).
 
 ## Use your team's platform
@@ -40,16 +50,16 @@ Use **Harness** when your own Python process should construct and execute agents
 
 The Harness SDK executes agents in your process. A Service SDK calls agents on a running Service. These are different integration choices; follow the guide for the execution model you need.
 
-## Run an Agent locally
+## Work interactively with an Agent
 
-Use **Harness UI** for a local Agent in your terminal or browser, with local configuration and conversations.
+Use **Harness UI** as a terminal and browser workbench for individuals and trusted small teams, with its own configuration and conversations.
 
 - **You need:** the [installation prerequisites](a13n-harness-ui/installation.md) and a supported model subscription or API key.
 - **You get:** an Agent application without writing Python or deploying Service.
 - **Start here:** [Harness UI](a13n-harness-ui/index.md).
 - **Then:** [Configuration recipes](a13n-harness-ui/configuration-recipes.md).
 
-Harness UI's browser interface and Service Console are separate applications. Choose Console to work with your team's deployed Service.
+Harness UI collaborators share one instance's credentials, configuration, and accessible files. It does not provide separate permissions for each participant or Service's durable worker execution. See [sharing and execution boundaries](a13n-harness-ui/index.md#sharing-and-execution-boundaries). Choose Service and Console when your team needs managed identities, workspace permissions, and execution recovery.
 
 ## Integrate individual components
 

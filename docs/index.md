@@ -2,9 +2,9 @@
 
 **Build and operate your own agent platform.**
 
-Deploy Agent Foundation on your infrastructure to manage agents, models, tools, and execution environments. Let teams use agents through the Console, or connect your applications through the API. The Service runs agents with the Python Harness SDK, built on Pydantic AI.
+Deploy Agent Foundation on your infrastructure to manage agents, models, tools, and execution environments. Let teams use agents through the Console, or connect your applications through the API. The Service runs agents with the Python Harness SDK.
 
-**[Deploy your platform](a13n-service/get-started.md)** · **[Connect your application](a13n-service/connect-application.md)**
+**[Try Service locally](a13n-service/get-started.md)** · **[Deploy your platform](a13n-service/get-started.md#deploy-the-service)** · **[Connect your application](a13n-service/connect-application.md)**
 
 Already have a platform URL? [Use an existing platform](a13n-service/use-platform.md). New to the terminology? Read [Core concepts](core-concepts.md).
 
@@ -37,23 +37,24 @@ flowchart TB
 
 You configure an Agent, then send it a message through Console or the API. The Agent uses its model and tools to work on your request. You can follow the output, answer a question or approval request, and return to the saved conversation later.
 
-Start with the [deployment guide](a13n-service/get-started.md), or read [Core concepts](core-concepts.md) for a walkthrough of one conversation.
+Start with the [local quickstart](a13n-service/get-started.md) or [deployment guide](a13n-service/get-started.md#deploy-the-service), or read [Core concepts](core-concepts.md) for a walkthrough of one conversation.
 
 ## Start with your task
 
-| Your task                                  | Start here                                                      | First result                                                 |
-| ------------------------------------------ | --------------------------------------------------------------- | ------------------------------------------------------------ |
-| Deploy a new platform                      | [Deploy your first platform](a13n-service/get-started.md)       | A ready Service, administrator account, and configured model |
-| Use a platform your team already runs      | [Use an existing platform](a13n-service/use-platform.md)        | A conversation with an Agent in Console                      |
-| Call agents from your application          | [Connect your application](a13n-service/connect-application.md) | An authenticated API request and a first run result          |
-| Run agents inside a Python process you own | [Harness quickstart](a13n-harness/getting-started.md)           | An embedded Agent with no Service deployment                 |
-| Use an agent locally                       | [Harness UI setup](a13n-harness-ui/index.md)                    | A local Agent in your terminal or browser                    |
+| Your task                                  | Start here                                                             | First result                                                       |
+| ------------------------------------------ | ---------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Try Service on your machine                | [Local quickstart](a13n-service/get-started.md)                        | A local platform with a trial account, ready to connect your model |
+| Deploy a new platform                      | [Deploy your platform](a13n-service/get-started.md#deploy-the-service) | A ready Service, administrator account, and configured model       |
+| Use a platform your team already runs      | [Use an existing platform](a13n-service/use-platform.md)               | A conversation with an Agent in Console                            |
+| Call agents from your application          | [Connect your application](a13n-service/connect-application.md)        | An authenticated API request and a first run result                |
+| Run agents inside a Python process you own | [Harness quickstart](a13n-harness/getting-started.md)                  | An embedded Agent with no Service deployment                       |
+| Work interactively with an agent           | [Harness UI setup](a13n-harness-ui/index.md)                           | An Agent workbench in your terminal or browser                     |
 
 See [Choose how to use Agent Foundation](choose-your-path.md) for prerequisites and the differences between these options.
 
 ## Components and integration
 
-**Service** provides the shared platform; **Console** is its browser application. **Harness** is the SDK Service uses to run agents, and you can embed it in your own Python application. **Harness UI** is a separate local application using Harness, with its own terminal and browser interfaces.
+**Service** provides the shared platform; **Console** is its browser application. **Harness** is the SDK Service uses to run agents, and you can embed it in your own Python application. **Harness UI** is an interactive workbench using Harness, with terminal and browser interfaces for individuals and trusted small teams. Its collaborators share the instance's credentials and access to files; Service provides managed identities, workspace permissions, and worker recovery. See [Harness UI access and execution](a13n-harness-ui/index.md#sharing-and-execution-boundaries).
 
 For more specialized integrations, [Environments](environments/index.md) provide portable file and command operations, [Envd](a13n-envd/index.md) exposes those operations through a daemon, and [Stream Protocol](a13n-stream-protocol/index.md) converts Harness observations into typed AG-UI events. You can start using the platform before learning these integration APIs.
 

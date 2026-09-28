@@ -64,11 +64,11 @@ These are configured and stored separately. Continuing a conversation does not a
 - **Service** manages shared agents, access, resources, and saved conversations, and runs the agents on your servers.
 - **Console** is the browser application people use to manage and talk to agents on Service.
 - **Harness** is the Python SDK Service uses to run agents. You can also use it directly in your own application.
-- **Harness UI** runs agents locally through its own terminal and browser interfaces. It has its own configuration and conversations; it is separate from Service Console.
+- **Harness UI** is a terminal and browser workbench for individuals and trusted small teams. It has its own configuration and conversations, and collaborators share its credentials and access. Service Console provides access to agents managed by Service. See [sharing and execution boundaries](a13n-harness-ui/index.md#sharing-and-execution-boundaries).
 - **Envd** handles remote or isolated file and command operations for environments. It does not execute the Agent itself.
 - **Stream Protocol** converts Harness observations into AG-UI events for an event consumer. Service clients use the documented [Service thread stream](a13n-service/agents-and-runs.md#follow-a-thread-stream).
 
-Start with Service and Console for the shared platform. The [usage guide](choose-your-path.md) explains when to use the SDK, local application, or individual integration components.
+Start with Service and Console for the shared platform. The [usage guide](choose-your-path.md) explains when to use the SDK, interactive workbench, or individual integration components.
 
 ## Next steps
 

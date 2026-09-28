@@ -28,7 +28,7 @@ nav:
   - Service:
       - Overview: a13n-service/index.md
       - Get started:
-          - Deploy your first platform: a13n-service/get-started.md
+          - Try or deploy Service: a13n-service/get-started.md
           - Use an existing platform: a13n-service/use-platform.md
           - Connect your application: a13n-service/connect-application.md
       - Build and use agents:
@@ -98,6 +98,7 @@ nav:
           - Installation and upgrades: a13n-harness-ui/installation.md
           - Set up your first Agent: a13n-harness-ui/setup.md
           - Use the terminal: a13n-harness-ui/everyday-use.md
+          - Use the browser: a13n-harness-ui/webui.md
       - Configure:
           - Common recipes: a13n-harness-ui/configuration-recipes.md
           - Configuration reference: a13n-harness-ui/configuration.md
@@ -112,29 +113,28 @@ nav:
           - Native tools and Web providers: a13n-harness-ui/native-and-web-tools.md
       - Operate and reference:
           - Command reference: a13n-harness-ui/command-reference.md
-          - Browser server: a13n-harness-ui/webui.md
           - Embed the Python App: a13n-harness-ui/embedding.md
           - HTTP API: a13n-harness-ui/http-api.md
           - Automation and troubleshooting: a13n-harness-ui/automation-and-troubleshooting.md
           - Tracing: a13n-harness-ui/observation.md
-  - Envd:
-      - Overview: a13n-envd/index.md
-      - Installation: a13n-envd/installation.md
-      - Sandbox image: a13n-envd/sandbox.md
-      - Configuration and transports: a13n-envd/configuration.md
-      - Session egress: a13n-envd/egress.md
-      - Sessions and output: a13n-envd/operations.md
-      - macOS computer use: a13n-envd/computer-use.md
-      - Python EIP client: a13n-envd/python-client.md
-      - Host security boundaries: a13n-envd/isolation.md
-  - Stream Protocol:
-      - Overview: a13n-stream-protocol/index.md
-      - Getting started: a13n-stream-protocol/getting-started.md
-      - Events and processors: a13n-stream-protocol/events.md
-      - Replay and recovery: a13n-stream-protocol/replay.md
-      - API and payload reference: a13n-stream-protocol/api-reference.md
   - Reference:
       - Package catalog: packages.md
+      - Envd:
+          - Overview: a13n-envd/index.md
+          - Installation: a13n-envd/installation.md
+          - Sandbox image: a13n-envd/sandbox.md
+          - Configuration and transports: a13n-envd/configuration.md
+          - Session egress: a13n-envd/egress.md
+          - Sessions and output: a13n-envd/operations.md
+          - macOS computer use: a13n-envd/computer-use.md
+          - Python EIP client: a13n-envd/python-client.md
+          - Host security boundaries: a13n-envd/isolation.md
+      - Stream Protocol:
+          - Overview: a13n-stream-protocol/index.md
+          - Getting started: a13n-stream-protocol/getting-started.md
+          - Events and processors: a13n-stream-protocol/events.md
+          - Replay and recovery: a13n-stream-protocol/replay.md
+          - API and payload reference: a13n-stream-protocol/api-reference.md
       - Logging: a13n-logging/index.md
 
 theme:

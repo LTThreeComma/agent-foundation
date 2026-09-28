@@ -1,18 +1,19 @@
 # Service
 
-The Service runs agents on your servers for people and applications to use together. Configure agents and resources in Console, or connect your application through the authenticated HTTP API. Conversations are saved, work continues when you disconnect, and interrupted execution can recover after a process failure. See [Run and maintain](operations.md) for deployment and recovery details.
+The Service runs agents on your servers for people and applications to use together. Configure agents and resources in Console, or connect your application through the authenticated HTTP API. Conversations are saved, work continues when you disconnect, and interrupted execution can recover after a process failure. Recovery does not guarantee that every external action can be repeated safely; see [run recovery](agents-and-runs.md) and [Run and maintain](operations.md).
 
-Use the Service when several people or applications share agents, credentials and history. For a personal terminal agent, use [Harness UI](../a13n-harness-ui/index.md); to run agents inside your own Python process, use [Harness](../a13n-harness/index.md) directly.
+Use the Service when several people or applications share agents, credentials and history. For an interactive terminal or browser workbench shared by trusted collaborators, use [Harness UI](../a13n-harness-ui/index.md); to run agents inside your own Python process, use [Harness](../a13n-harness/index.md) directly.
 
 Integrate through the [SDKs and remote CLI](sdks.md), or use the [HTTP API](http.md) directly. Client-specific installation and examples live with each independent SDK repository.
 
 ## Start here
 
-| Your situation                                | Guide                                              |
-| --------------------------------------------- | -------------------------------------------------- |
-| You are setting up a new platform             | [Deploy your first platform](get-started.md)       |
-| Your team already runs Service                | [Use an existing platform](use-platform.md)        |
-| You want to call an Agent from an application | [Connect your application](connect-application.md) |
+| Your situation                                | Guide                                                     |
+| --------------------------------------------- | --------------------------------------------------------- |
+| You want to try Service on your machine       | [Local quickstart](get-started.md)                        |
+| You are setting up a new platform             | [Deploy your platform](get-started.md#deploy-the-service) |
+| Your team already runs Service                | [Use an existing platform](use-platform.md)               |
+| You want to call an Agent from an application | [Connect your application](connect-application.md)        |
 
 For a short introduction through one conversation, read [Core concepts](../core-concepts.md). The concepts below describe what you configure and use on the platform.
 

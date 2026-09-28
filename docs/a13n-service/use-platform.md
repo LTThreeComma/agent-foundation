@@ -1,8 +1,8 @@
 # Use an existing platform
 
-Use this guide when your team already runs Service and you want to talk to an Agent in Console. You need the Console URL and an account with permission to run agents in a workspace. If you are setting up the platform itself, start with [Deploy your first platform](get-started.md).
+Use this guide when your team already runs Service and you want to talk to an Agent in Console. You need the Console URL and an account with permission to run agents in a workspace. If you are setting up the platform itself, start with [Service quickstart](get-started.md).
 
-Console is the browser application for Service. Harness UI is a separate local Agent application and is not needed for these steps.
+Console is the browser application for Service. Harness UI is a separate interactive workbench and is not needed for these steps.
 
 ## Sign in and select a workspace
 

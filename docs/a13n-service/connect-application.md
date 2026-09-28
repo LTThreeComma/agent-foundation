@@ -1,6 +1,6 @@
 # Connect your application
 
-Call an Agent on an existing Service from your application or a shell. You need the Service URL, a workspace API key, and an Agent configured with a working model. If the platform is not ready yet, start with [Deploy your first platform](get-started.md); to configure or try an Agent in Console, see [Use an existing platform](use-platform.md).
+Call an Agent on an existing Service from your application or a shell. You need the Service URL, a workspace API key, and an Agent configured with a working model. If the platform is not ready yet, start with [Service quickstart](get-started.md); to configure or try an Agent in Console, see [Use an existing platform](use-platform.md).
 
 ## Choose an integration
 
