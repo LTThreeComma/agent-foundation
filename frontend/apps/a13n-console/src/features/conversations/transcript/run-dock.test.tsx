@@ -73,12 +73,16 @@ function mount({
   origin = "new",
   reject = false,
   resubmit,
+  question = false,
+  waitingHead = false,
 }: {
   status?: Schema["RunStatus"];
   historical?: boolean;
   origin?: Schema["ThreadView"]["origin"];
   reject?: boolean;
   resubmit?: Resubmission;
+  question?: boolean;
+  waitingHead?: boolean;
 } = {}) {
   const posts: { path: string; body: unknown; key: string | null }[] = [];
   const reads: string[] = [];
@@ -88,17 +92,28 @@ function mount({
     status,
     ...(status === "waiting"
       ? {
-          wait_reason: "approval",
+          wait_reason: question ? "call" : "approval",
           pending: {
-            items: [
-              {
-                tool_call_id: "call",
-                kind: "approval",
-                tool_name: "shell",
-                arguments: { command: "ls" },
-                presentation: null,
-              },
-            ],
+            approvals: question
+              ? []
+              : [
+                  {
+                    tool_call_id: "call",
+                    tool_name: "shell",
+                    arguments: { command: "ls" },
+                    presentation: null,
+                  },
+                ],
+            calls: question
+              ? [
+                  {
+                    tool_call_id: "call",
+                    tool_name: "ask_user_question",
+                    arguments: { command: "ls" },
+                    presentation: null,
+                  },
+                ]
+              : [],
           },
         }
       : {}),
@@ -108,7 +123,7 @@ function mount({
     session_id: "session",
     origin,
     current_run_id: active ? "run" : null,
-    head_run_id: "run",
+    head_run_id: waitingHead ? "waiting-head" : "run",
     last_run_id: historical ? "later" : "run",
   });
   let steered = false;
@@ -172,6 +187,36 @@ function mount({
           entry("inb_new", "Sent", {
             delivery: "steer",
             ...(steered ? { status: "consumed", assigned_run_id: "run" } : {}),
+          }),
+        );
+      if (path.endsWith("/runs/waiting-head"))
+        return Response.json(
+          fixtureRun({
+            id: "waiting-head",
+            status: "waiting",
+            wait_reason: "call",
+            pending: {
+              approvals: [],
+              calls: [
+                {
+                  tool_call_id: "question",
+                  tool_name: "ask_user_question",
+                  arguments: {
+                    questions: [
+                      {
+                        header: "Color",
+                        question: "Which color?",
+                        options: [
+                          { label: "Blue", description: "Blue color" },
+                          { label: "Red", description: "Red color" },
+                        ],
+                      },
+                    ],
+                  },
+                  presentation: null,
+                },
+              ],
+            },
           }),
         );
       return Response.json(current);
@@ -362,32 +407,72 @@ it("prefills a stopped Run's message and resubmits it with the options it ran wi
   });
 });
 
-it("resumes a waiting Run with default answers before sending the new message", async () => {
-  const posts = mount({ status: "waiting" });
-  fireEvent.click(
-    await screen.findByRole("button", { name: "Continue without feedback" }),
-  );
-  fireEvent.click(await screen.findByRole("switch"));
-  fireEvent.change(await screen.findByRole("textbox", { name: "Message" }), {
-    target: { value: "Try another way" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Resolve and continue" }));
-  await waitFor(() =>
-    expect(screen.getByTestId("location").textContent).toContain(
-      "/runs/resumed",
-    ),
-  );
-  expect(posts.map(({ path, body }) => [path, body])).toEqual([
-    ["/api/v1/runs/run/resume", { answers: [] }],
-    [
-      "/api/v1/threads/thread/inbox",
-      {
-        kind: "message",
-        delivery: "steer",
-        payload: { content: [{ type: "text", text: "Try another way" }] },
-        agent_id: "agent",
+it.each([false, true])(
+  "resumes a waiting Run with default answers before sending the new message (question: %s)",
+  async (question) => {
+    const posts = mount({ status: "waiting", question });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Continue without feedback" }),
+    );
+    fireEvent.click(await screen.findByRole("switch"));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message" }), {
+      target: { value: "Try another way" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Resolve and continue" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("location").textContent).toContain(
+        "/runs/resumed",
+      ),
+    );
+    expect(posts.map(({ path, body }) => [path, body])).toEqual([
+      [
+        "/api/v1/runs/run/resume",
+        question
+          ? {
+              approvals: {},
+              calls: {
+                call: { status: "failed", message: "No response was given" },
+              },
+            }
+          : {
+              approvals: {
+                call: { action: "deny", reason: "No decision was given" },
+              },
+              calls: {},
+            },
+      ],
+      [
+        "/api/v1/threads/thread/inbox",
+        {
+          kind: "message",
+          delivery: "steer",
+          payload: { content: [{ type: "text", text: "Try another way" }] },
+          agent_id: "agent",
+        },
+      ],
+    ]);
+    expect(posts[0]?.key).toBe(`${posts[1]?.key}:resume`);
+  },
+);
+
+it("restores the waiting head's question after a failed successor and submits to that exact wait", async () => {
+  const posts = mount({ status: "failed", waitingHead: true });
+  fireEvent.click(await screen.findByRole("radio", { name: /Blue/ }));
+  expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Submit responses" }));
+  await waitFor(() => expect(posts).toHaveLength(1));
+  expect(posts[0]).toMatchObject({
+    path: "/api/v1/runs/waiting-head/resume",
+    body: {
+      approvals: {},
+      calls: {
+        question: {
+          status: "returned",
+          value: { answers: { "Which color?": "Blue" } },
+        },
       },
-    ],
-  ]);
-  expect(posts[0]?.key).toBe(`${posts[1]?.key}:resume`);
+    },
+  });
 });

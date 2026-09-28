@@ -16,8 +16,19 @@ import { ErrorNotice } from "../../../shared/feedback";
 import { CopyButton } from "../../../shared/identity";
 import { JsonView, TextAreaField } from "../../../shared/forms";
 import { QuestionResponse, readQuestions } from "./questions";
-import { questionsOnly } from "./run-actions";
 import styles from "./cards.module.css";
+
+type PendingAction = Schema["PendingCall"] & { category: "approval" | "call" };
+
+function pendingActions(pending: Schema["Pending"]): PendingAction[] {
+  return [
+    ...pending.approvals.map((call) => ({
+      ...call,
+      category: "approval" as const,
+    })),
+    ...pending.calls.map((call) => ({ ...call, category: "call" as const })),
+  ];
+}
 
 type Answer = {
   action: string;
@@ -27,12 +38,9 @@ type Answer = {
 };
 
 /** The run paused and this console cannot answer for the owning application. */
-export function PendingRequests({
-  actions,
-}: {
-  actions: readonly Schema["PendingItem"][];
-}) {
+export function PendingRequests({ pending }: { pending: Schema["Pending"] }) {
   const { t } = useTranslation();
+  const actions = pendingActions(pending);
   return (
     <div className={styles.cards} aria-label={t("Waiting for the application")}>
       <p className={styles.cardsNote}>
@@ -49,7 +57,13 @@ export function PendingRequests({
             className={styles.inlineDisclosure}
             title={<>{t("Request details")}</>}
           >
-            <JsonView value={action.presentation ?? action.arguments} />
+            <JsonView
+              value={
+                action.category === "approval"
+                  ? (action.presentation ?? action.arguments)
+                  : action.arguments
+              }
+            />
           </DisclosureSection>
         </ActionCard>
       ))}
@@ -59,20 +73,17 @@ export function PendingRequests({
 
 /**
  * Every pending action is answered together; the agent resumes with the set.
- * Questions are answered by a message, which a wait of questions alone takes
- * as the next run's input; any other wait resumes with approvals and tool
- * results, and its questions go unanswered.
+ * Questions, approvals and tool results all name their exact pending call.
+ * Ordinary inbox messages never resolve this wait.
  */
 export function RunFeedback({
   run,
-  thread,
-  actions,
+  pending,
   accepted,
   continuation,
 }: {
   run: Schema["RunView"];
-  thread: Schema["ThreadView"];
-  actions: readonly Schema["PendingItem"][];
+  pending: Schema["Pending"];
   accepted: (next: Schema["RunView"] | null) => void;
   /** The "continue without feedback" escape, shown beside Submit. */
   continuation?: ReactNode;
@@ -80,70 +91,57 @@ export function RunFeedback({
   const { t } = useTranslation(),
     client = useClient(),
     { workspace, can } = useWorkspace();
+  const actions = pendingActions(pending);
   const [answers, setAnswers] = useState<Record<string, Answer>>({}),
     [key, setKey] = useState(crypto.randomUUID());
-  const answerable = questionsOnly(actions);
   const mutation = useMutation({
     mutationFn: async () => {
-      const resume: Schema["Answer"][] = [];
-      const message: Schema["Part"][] = [];
+      const resume: Schema["Resume"] = {
+        approvals: Object.create(null),
+        calls: Object.create(null),
+      };
       for (const pending of actions) {
         const answer = answers[pending.tool_call_id];
         if (!answer?.action)
           throw new Error(t("Choose a response for every pending action."));
-        if (answer.action === "omit") continue;
-        if (answer.action === "approve" || answer.action === "reject") {
-          resume.push(
-            answer.action === "reject"
-              ? {
-                  action: "reject",
-                  tool_call_id: pending.tool_call_id,
+        if (pending.category === "approval") {
+          resume.approvals[pending.tool_call_id] =
+            answer.action === "approve"
+              ? { action: "approve" }
+              : {
+                  action: "deny",
                   ...(answer.value.trim()
                     ? { reason: answer.value.trim() }
                     : {}),
-                }
-              : { action: "approve", tool_call_id: pending.tool_call_id },
-          );
+                };
           continue;
         }
-        if (answer.action === "respond" && !answer.structured) {
-          message.push({ type: "text", text: answer.value });
+        if (answer.action === "omit" || answer.action === "failed") {
+          const message =
+            answer.action === "omit"
+              ? "No response was given"
+              : answer.value.trim();
+          if (!message) throw new Error(t("Enter a failure reason."));
+          resume.calls[pending.tool_call_id] = { status: "failed", message };
           continue;
         }
         let value: Schema["JsonValue"];
-        try {
-          value = JSON.parse(answer.value);
-        } catch {
-          throw new Error(t("Tool results and responses must be valid JSON."));
+        if (answer.action === "respond" && !answer.structured) {
+          if (!answer.value.trim())
+            throw new Error(t("Choose a response for every pending action."));
+          value = { response: answer.value.trim() };
+        } else {
+          try {
+            value = JSON.parse(answer.value);
+          } catch {
+            throw new Error(
+              t("Tool results and responses must be valid JSON."),
+            );
+          }
         }
-        if (answer.action === "complete")
-          resume.push({
-            action: "complete",
-            tool_call_id: pending.tool_call_id,
-            result: value,
-          });
-        else message.push({ type: "json", value });
+        resume.calls[pending.tool_call_id] = { status: "returned", value };
       }
       const workspace_id = workspace.id;
-      if (message.length) {
-        const receipt = data(
-          await client
-            .workspace(workspace_id)
-            .POST("/api/v1/threads/{thread_id}/inbox", {
-              params: {
-                path: { thread_id: thread.id },
-                header: commandHeaders(key),
-              },
-              body: {
-                kind: "message",
-                delivery: "next_run",
-                payload: { content: message },
-                agent_id: run.agent_id,
-              },
-            }),
-        );
-        return receipt.run;
-      }
       return data(
         await client
           .workspace(workspace_id)
@@ -152,7 +150,7 @@ export function RunFeedback({
               path: { run_id: run.id },
               header: commandHeaders(key),
             },
-            body: { answers: resume },
+            body: resume,
           }),
       );
     },
@@ -189,7 +187,8 @@ export function RunFeedback({
             value: "",
           };
           const questions =
-            answerable && action.tool_name === "ask_user_question"
+            action.category === "call" &&
+            action.tool_name === "ask_user_question"
               ? readQuestions(action.arguments)
               : null;
           if (questions)
@@ -202,7 +201,7 @@ export function RunFeedback({
               </ActionCard>
             );
           const details =
-            action.kind === "approval"
+            action.category === "approval"
               ? approvalDetails(action.presentation)
               : null;
           return (
@@ -243,10 +242,16 @@ export function RunFeedback({
                   className={styles.inlineDisclosure}
                   title={<>{t("Request details")}</>}
                 >
-                  <JsonView value={action.presentation ?? action.arguments} />
+                  <JsonView
+                    value={
+                      action.category === "approval"
+                        ? (action.presentation ?? action.arguments)
+                        : action.arguments
+                    }
+                  />
                 </DisclosureSection>
               )}
-              {action.kind === "approval" ? (
+              {action.category === "approval" ? (
                 <div className={styles.cardFooter}>
                   {(
                     [
@@ -297,27 +302,23 @@ export function RunFeedback({
                   label={t("Response")}
                   hideLabel
                   options={[
-                    // Only a wait of questions alone takes a message as answer.
-                    ...(action.kind === "client_tool" || answerable
-                      ? [
-                          {
-                            value:
-                              action.kind === "client_tool"
-                                ? "complete"
-                                : "respond",
-                            label: t(
-                              action.kind === "client_tool"
-                                ? "Return tool result"
-                                : "Respond",
-                            ),
-                          },
-                        ]
-                      : []),
+                    {
+                      value:
+                        action.tool_name !== "ask_user_question"
+                          ? "complete"
+                          : "respond",
+                      label: t(
+                        action.tool_name !== "ask_user_question"
+                          ? "Return tool result"
+                          : "Respond",
+                      ),
+                    },
+                    { value: "failed", label: t("Report tool failure") },
                     { value: "omit", label: t("Continue without a response") },
                   ]}
                 />
               )}
-              {action.kind === "approval" &&
+              {action.category === "approval" &&
                 answer.action === "reject" &&
                 answer.reasonMode && (
                   <TextAreaField
@@ -332,6 +333,18 @@ export function RunFeedback({
                     rows={3}
                   />
                 )}
+              {answer.action === "failed" && (
+                <TextAreaField
+                  label={t("Failure reason")}
+                  value={answer.value}
+                  onChange={(value) =>
+                    change(action.tool_call_id, {
+                      ...answer,
+                      value: value.slice(0, 4096),
+                    })
+                  }
+                />
+              )}
               {["complete", "respond"].includes(answer.action) && (
                 <>
                   {answer.action === "respond" && (
@@ -393,13 +406,13 @@ function ActionCard({
   details,
   children,
 }: {
-  action: Schema["PendingItem"];
+  action: PendingAction;
   details?: { risk?: string } | null;
   children: ReactNode;
 }) {
   const { t } = useTranslation();
-  const approval = action.kind === "approval";
-  const question = action.tool_name === "ask_user_question";
+  const approval = action.category === "approval";
+  const question = !approval && action.tool_name === "ask_user_question";
   return (
     <section className={styles.card}>
       <header className={styles.cardHeader}>
@@ -438,7 +451,7 @@ const highRisk = (risk?: string) => risk === "high" || risk === "extra_high";
 const lowRisk = (risk?: string) => !!risk && !highRisk(risk);
 
 function approvalDetails(
-  value: Schema["PendingItem"]["presentation"],
+  value: Schema["PendingCall"]["presentation"],
 ): { target?: string; reason?: string; risk?: string } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const details = value as Record<string, unknown>;

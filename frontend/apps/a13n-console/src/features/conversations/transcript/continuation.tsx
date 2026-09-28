@@ -5,10 +5,9 @@ import { useClient } from "../../../auth/context";
 import { useWorkspace } from "../../../layout/workspace";
 import { commandHeaders, data, type Schema } from "../../../shared/api";
 import { Composer } from "../composer";
-import { questionsOnly } from "./run-actions";
 import styles from "./cards.module.css";
 
-/** Resolving the whole waiting batch by default is a decision, so it is confirmed. */
+/** Discarding the whole waiting batch is an explicit, confirmed decision. */
 export function ContinueWithoutFeedback({
   run,
   thread,
@@ -47,22 +46,37 @@ export function ContinueWithoutFeedback({
           placeholder={t("Answer above, or send a new message")}
           submit={async (payload, key) => {
             const workspace_id = workspace.id;
-            // A message resolves a wait of questions alone by default; any
-            // other wait resumes with default answers and takes the message
-            // as guidance.
-            const resumed = questionsOnly(run.pending?.items ?? [])
-              ? null
-              : data(
-                  await client
-                    .workspace(workspace_id)
-                    .POST("/api/v1/runs/{run_id}/resume", {
-                      params: {
-                        path: { run_id: run.id },
-                        header: commandHeaders(`${key}:resume`),
-                      },
-                      body: { answers: [] },
-                    }),
-                );
+            // Explicitly resolve the whole wait before submitting ordinary guidance.
+            const resumed = data(
+              await client
+                .workspace(workspace_id)
+                .POST("/api/v1/runs/{run_id}/resume", {
+                  params: {
+                    path: { run_id: run.id },
+                    header: commandHeaders(`${key}:resume`),
+                  },
+                  body: {
+                    approvals: Object.fromEntries(
+                      (run.pending?.approvals ?? []).map((call) => [
+                        call.tool_call_id,
+                        {
+                          action: "deny" as const,
+                          reason: "No decision was given",
+                        },
+                      ]),
+                    ),
+                    calls: Object.fromEntries(
+                      (run.pending?.calls ?? []).map((call) => [
+                        call.tool_call_id,
+                        {
+                          status: "failed" as const,
+                          message: "No response was given",
+                        },
+                      ]),
+                    ),
+                  },
+                }),
+            );
             const receipt = data(
               await client
                 .workspace(workspace_id)

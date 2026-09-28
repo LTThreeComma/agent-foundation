@@ -18,7 +18,7 @@ from a13n_service.runs.schemas import (
     InboxOrder,
     Message,
     NewThread,
-    ResumeRequest,
+    Resume,
     RunItems,
     RunLabels,
     RunPage,
@@ -355,11 +355,11 @@ async def resume_run(
     response: Response,
     workspace_id: WorkspaceId,
     run_id: str,
-    body: ResumeRequest,
+    body: Resume,
     actor: Actor,
     key: IdempotencyKey,
 ) -> RunView:
-    """Answer the waiting run's approvals and client tools; the successor run continues from them."""
+    """Answer the exact waiting run's approvals, client tools and user questions; the successor continues from them."""
     successor, created = await resume.resume(runtime, actor, workspace_id, run_id, body, request_key=key)
     response.status_code = 201 if created else 200
     return tagged(response, successor)

@@ -48,17 +48,16 @@ async def test_a_client_tool_waits_and_resume_answers_it(executing, scripted_mod
     scripted_model.call("lookup", {"q": "answer"}, call_id="call_lookup")
     submitted = await runs_kit.start_thread(executing, agent, "look it up")
     waiting = await runs_kit.sealed(executing, submitted["run"]["id"])
-    assert waiting["status"] == "waiting" and waiting["wait_reason"] == "client_tool"
-    assert waiting["pending"]["items"][0] | {"presentation": None} == {
+    assert waiting["status"] == "waiting" and waiting["wait_reason"] == "call"
+    assert waiting["pending"]["calls"][0] | {"presentation": None} == {
         "tool_call_id": "call_lookup",
-        "kind": "client_tool",
         "tool_name": "lookup",
         "arguments": {"q": "answer"},
         "presentation": None,
     }
 
     scripted_model.say("It is 42")
-    answer = {"answers": [{"tool_call_id": "call_lookup", "action": "complete", "result": {"value": 42}}]}
+    answer = {"approvals": {}, "calls": {"call_lookup": {"status": "returned", "value": {"value": 42}}}}
     resumed = await executing.client.post(
         f"{executing.api}/runs/{waiting['id']}/resume", json=answer, headers={"idempotency-key": "resume-1"}
     )
@@ -86,7 +85,7 @@ async def test_a_run_override_is_frozen_and_carried_by_its_resume(executing, scr
     assert "mcp_headers" not in waiting["options"]
 
     scripted_model.say("Done")
-    answer = {"answers": [{"tool_call_id": "call_lookup", "action": "complete", "result": {"value": 42}}]}
+    answer = {"approvals": {}, "calls": {"call_lookup": {"status": "returned", "value": {"value": 42}}}}
     resumed = await executing.client.post(
         f"{executing.api}/runs/{waiting['id']}/resume", json=answer, headers={"idempotency-key": "resume-1"}
     )
@@ -97,27 +96,31 @@ async def test_a_run_override_is_frozen_and_carried_by_its_resume(executing, scr
         assert "Role: stand-in" in json.dumps(request) and "Role: default" not in json.dumps(request)
 
 
-async def test_a_message_continues_a_question_only_wait(executing, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
+@pytest.mark.parametrize("result", [{"response": "blue please"}, {"answers": {"Which color?": "blue"}}])
+async def test_a_question_response_resumes_its_exact_call(executing, scripted_model, runs_kit, result) -> None:  # type: ignore[no-untyped-def]
     agent = await runs_kit.create_agent(executing, scripted_model, user_questions=True)
     scripted_model.call("ask_user_question", {"questions": [runs_kit.QUESTION]}, call_id="call_ask")
     submitted = await runs_kit.start_thread(executing, agent, "pick a color")
     waiting = await runs_kit.sealed(executing, submitted["run"]["id"])
-    assert waiting["wait_reason"] == "user_input"
+    assert waiting["wait_reason"] == "call"
 
     scripted_model.say("Blue it is")
     reply = await executing.client.post(
-        f"{executing.api}/threads/{waiting['thread_id']}/inbox",
-        json=runs_kit.message(agent, "blue please"),
+        f"{executing.api}/runs/{waiting['id']}/resume",
+        json={"approvals": {}, "calls": {"call_ask": {"status": "returned", "value": result}}},
         headers=runs_kit.fresh_key(),
     )
     assert reply.status_code == 201, reply.text
-    successor = await runs_kit.sealed(executing, reply.json()["run"]["id"])
+    successor = await runs_kit.sealed(executing, reply.json()["id"])
     assert successor["status"] == "completed" and successor["parent_run_id"] == waiting["id"]
+    assert successor["trigger"] == "resume" and successor["resumed_by_id"] == waiting["principal_id"]
+    assert successor["resume"]["calls"]["call_ask"]["value"] == {"answers": {}, **result}
+    # The response is durable resume data, not another inbox message.
+    assert len(await runs_kit.inbox(executing, waiting["thread_id"])) == 1
     await scripted_model.request()
     second = await scripted_model.request()
-    # The question is closed with no response, then the message is read once.
-    assert [message["role"] for message in second["messages"][-2:]] == ["tool", "user"]
-    assert "blue please" in str(second["messages"][-1]["content"])
+    answers = [m for m in second["messages"] if m["role"] == "tool" and m["tool_call_id"] == "call_ask"]
+    assert len(answers) == 1 and json.loads(answers[0]["content"]) == {"answers": {}, **result}
 
 
 async def test_an_interrupt_cancels_the_model_call_in_flight(executing, scripted_model, runs_kit) -> None:  # type: ignore[no-untyped-def]
@@ -450,7 +453,7 @@ async def test_the_agent_composer_creates_an_agent_once_approved(executing, scri
     assert await custom() == []
 
     scripted_model.say("Created the greeter")
-    approve = {"answers": [{"tool_call_id": "call_create", "action": "approve"}]}
+    approve = {"approvals": {"call_create": {"action": "approve"}}, "calls": {}}
     resumed = await executing.client.post(
         f"{executing.api}/runs/{waiting['id']}/resume", json=approve, headers={"idempotency-key": "approve-1"}
     )
@@ -480,7 +483,7 @@ async def test_the_agent_composer_reads_where_its_arguments_do_not_fit(executing
         executing, (await runs_kit.start_thread(executing, composer, "make a greeter"))["run"]["id"]
     )
     scripted_model.say("That model does not fit")
-    approve = {"answers": [{"tool_call_id": "call_create", "action": "approve"}]}
+    approve = {"approvals": {"call_create": {"action": "approve"}}, "calls": {}}
     resumed = await executing.client.post(
         f"{executing.api}/runs/{waiting['id']}/resume", json=approve, headers={"idempotency-key": "approve-1"}
     )

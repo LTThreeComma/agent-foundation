@@ -35,7 +35,7 @@ flowchart LR
 
 1. A client sends a message. The Service adds it to the thread's inbox and starts a run when the thread is ready.
 2. A worker executes the run with Harness, saves its progress and streams live output to the client.
-3. The run returns a result or waits for an approval, client tool result or answer. See [Agents, threads and runs](agents-and-runs.md) to continue the conversation.
+3. The run returns a result or waits for an approval, client tool result or answer. Waiting requires an explicit resume; ordinary inbox messages remain queued. See [Agents, threads and runs](agents-and-runs.md) to continue the conversation.
 
 Control and worker are roles of one executable; a single process can run both. See [Run and maintain](operations.md).
 

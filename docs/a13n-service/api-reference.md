@@ -2385,7 +2385,7 @@ Responses:
 
 Resume Run.
 
-Answer the waiting run's approvals and client tools; the successor run continues from them.
+Answer the exact waiting run's approvals, client tools and user questions; the successor continues from them.
 
 | Parameter         | Location | Required | Type / schema  | Constraints and default                                        |
 | ----------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
@@ -2395,7 +2395,7 @@ Answer the waiting run's approvals and client tools; the successor run continues
 
 Request body: required.
 
-- `application/json`: `ResumeRequest`.
+- `application/json`: `Resume`.
 
 Responses:
 
