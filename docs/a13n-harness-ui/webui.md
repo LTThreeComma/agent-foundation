@@ -58,7 +58,7 @@ These are shared Thread drafts, not a personal task queue. Synchronized drafts c
 
 The composer footer shows the current Agent and Model names as a read-only summary. Use the adjacent **Agent & Model settings** icon to change Agent, Model, Thinking, Reasoning mode, or Fast mode. Each compact row shows its current choice and opens the available options inside the same panel. Default choices name the inherited setting rather than presenting it as an explicit override.
 
-This layout is shared by new and saved conversations at every width. On phones, the panel opens as a bottom sheet. **Composer options** separately opens Run settings for Working environments, Execution mode, Goal, and Coordinator; wide composers also retain their non-model shortcuts. Long names are truncated without squeezing the action buttons, and the full names are available through the summary's title and accessible label.
+This layout is shared by new and saved conversations at every width. On phones, the panel opens as a bottom sheet. **Composer options** separately opens Run settings for Environments, Goal, and Coordinator; wide composers also retain their non-model shortcuts. Long names are truncated without squeezing the action buttons, and the full names are available through the summary's title and accessible label.
 
 ## Fast mode
 
@@ -156,9 +156,9 @@ Existing conversations keep their saved choices. A removed resource appears as *
 
 Files, Changes, and Terminal panels still address the listener Host. Selecting a Device does not turn them into remote panels, and a Device working directory is not a filesystem sandbox. See [Device configuration and removal](environments-and-projects.md#add-device-working-environments) for file-based setup.
 
-### Execution mode for the next Run
+### Environments for subsequent Runs
 
-Open **Working environments** in the composer to choose local directories, remote bindings, and the default environment for the next Run. **Use conversation defaults** clears these temporary choices. Click the separate **Sandbox**, **Full Control**, or profile name to choose the local execution mode, including in an existing conversation. **Default** follows that conversation's saved environment. Full Control runs as the server's Host account; it is not a sandbox. Sandbox requires the Host's supported isolation launcher and native runtime and fails explicitly if unavailable, without switching to Full Control. The Host establishes that boundary; the Device daemon does not enforce Project roots as an access policy.
+Open **Environments** in the composer to edit local mode, directories, remote bindings and the default working location together. **Local · Harness server → Local mode** offers **Sandbox**, **Full Control** and configured profiles, including in an existing conversation. **Follow conversation local mode** inherits the saved local profile. Closing without applying discards the draft; **Use conversation defaults** clears all temporary overrides. Full Control runs as the server's Host account; it is not a sandbox. Sandbox requires the Host's supported isolation launcher and native runtime and fails explicitly if unavailable, without switching to Full Control. The Host establishes that boundary; the Device daemon does not enforce Project roots as an access policy.
 
 An explicit choice is sent with each Run you start from that tab until you change it or choose Default. It does not rewrite the conversation's defaults, affect another participant's selection, or change an active Run. While work is running, the picker prepares the next Send; **Steer** only adds instructions. Answering a deferred question or its automatic timeout retains the suspended Run's selected environment. New subagents inherit the captured environment; resumed subagents keep their own conversation configuration. Switching modes does not copy or isolate your project files or conversation history.
 
