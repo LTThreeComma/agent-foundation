@@ -128,7 +128,7 @@ The public boundary validates and normalizes input once. Internal code consumes 
 
 ### Resource Keys
 
-Service models and skills are identified by an immutable workspace-unique key and expose no ID ([resources](a13n-service/04-resources.md#keys)). Every other Service resource, organizations and workspaces included, is identified by its ID alone; its `name` is display text.
+Only Service models have keys: a model is identified by an immutable workspace-unique key and exposes no ID ([resources](a13n-service/04-resources.md#keys)). Every other Service resource, skills, organizations and workspaces included, is identified by its ID alone; its `name` is display text.
 
 ## Ownership and Authority
 

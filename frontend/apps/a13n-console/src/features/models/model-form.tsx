@@ -441,7 +441,10 @@ export function ModelFields({ model }: { model: ModelDraft }) {
 /** The key agents name the model by; the Service derives one when left empty. */
 function ModelKeyField({ model }: { model: ModelDraft }) {
   const { t } = useTranslation();
-  const derived = defaultModelKey(model.draft.model_name);
+  const derived = defaultModelKey(
+    model.selectedProvider?.type,
+    model.draft.model_name,
+  );
   return (
     <FormField
       label={t("Model key")}

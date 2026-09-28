@@ -107,28 +107,27 @@ async def test_models_are_created_with_their_configuration_and_the_catalog_model
     assert [item["key"] for item in listed["items"]] == ["custom", "gateway", "gpt-5-5"]
 
 
-async def test_a_model_key_defaults_to_the_upstream_name_and_addresses_the_model(service) -> None:  # type: ignore[no-untyped-def]
+async def test_a_model_key_defaults_to_its_provider_type_and_upstream_name(service) -> None:  # type: ignore[no-untyped-def]
     account = await provider(service)
-    config = {"model_name": "anthropic/Claude-Opus-5", "model_api": "openai.chat_completions"}
+    config = {"model_name": "anthropic/Claude Opus_5.1", "model_api": "openai.chat_completions"}
     keyless = {"provider_id": account["id"], "name": "Opus", "config": config}
+    # Every run of characters a key cannot hold becomes `-`; dots stay.
     defaulted = await post(service, "/models", keyless)
-    assert defaulted["key"] == "claude-opus-5"
+    assert defaulted["key"] == "openai-anthropic-claude-opus-5.1"
     assert (await post(service, "/models", {**keyless, "key": "opus.fast"}))["key"] == "opus.fast"
     duplicate = await post(service, "/models", keyless, status=409)
     assert duplicate["error"]["code"] == "already_exists"
     for key in ("Opus", "opus_fast", "-opus", "x" * 129):
         await post(service, "/models", {**keyless, "key": key}, status=400)
-    # An upstream name that makes no valid key needs an explicit one.
-    unkeyed = {**keyless, "config": {**config, "model_name": "models/opus_5"}}
-    assert (await post(service, "/models", unkeyed, status=400))["error"]["details"]["field"] == "key"
 
-    item = f"{service.api}/models/claude-opus-5"
+    key = defaulted["key"]
+    item = f"{service.api}/models/{key}"
     read = await service.client.get(item)
-    assert read.status_code == 200 and read.headers["etag"] == etag(defaulted) == '"claude-opus-5:1"'
-    stale = await service.client.patch(item, json={"name": "Claude"}, headers={"if-match": '"claude-opus-5:0"'})
+    assert read.status_code == 200 and read.headers["etag"] == etag(defaulted) == f'"{key}:1"'
+    stale = await service.client.patch(item, json={"name": "Claude"}, headers={"if-match": f'"{key}:0"'})
     assert stale.status_code == 412
     renamed = await service.client.patch(item, json={"name": "Claude"}, headers={"if-match": etag(defaulted)})
-    assert renamed.status_code == 200 and renamed.headers["etag"] == '"claude-opus-5:2"', renamed.text
+    assert renamed.status_code == 200 and renamed.headers["etag"] == f'"{key}:2"', renamed.text
     # The key is immutable.
     rekeyed = await service.client.patch(item, json={"key": "opus"}, headers={"if-match": renamed.headers["etag"]})
     assert rekeyed.status_code == 400

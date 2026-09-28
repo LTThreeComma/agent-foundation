@@ -408,7 +408,7 @@ def fresh_key() -> dict[str, str]:
 
 
 def if_match(resource: dict[str, Any]) -> dict[str, str]:
-    """The ETag of a view: its ID and version, or its key and version for a model or skill."""
+    """The ETag of a view: its ID and version, or its key and version for a model."""
     identifier = resource["id"] if "id" in resource else resource["key"]
     return {"if-match": f'"{identifier}:{resource["version"]}"'}
 

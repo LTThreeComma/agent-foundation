@@ -50,7 +50,7 @@ Create the model in `/api/v1/models` with its `config`:
 ```
 
 - `provider_id` names a model provider of the workspace, whose credential the model spends.
-- `key` identifies the model in its workspace: in paths such as `/api/v1/models/local-llama`, in agent configurations and in usage. It defaults to the upstream model name after its last `/`, lowercased (`llama3.3` here); set it when that is not a valid [key](resources.md#common-conventions) or is already taken (`409 already_exists`). It never changes.
+- `key` identifies the model in its workspace: in paths such as `/api/v1/models/local-llama`, in agent configurations and in usage. It defaults to the provider's type and the upstream model name joined by `-`, lowercased, with any other character a [key](resources.md#common-conventions) cannot hold replaced by `-` (`ollama-llama3.3` for an `ollama` provider here); set it when that is already taken (`409 already_exists`). It never changes.
 - `config.model_name` is the upstream model name, and `config.model_api` must be one of the provider type's model APIs.
 - `config.characteristics` declares the context window, context-management thresholds and `capabilities`: `image_understanding`, `video_understanding`, `audio_understanding`, and `document_understanding` for PDF documents. Optional `max_tokens`, `temperature` and `top_p` are defaults that an agent's `model_settings` can override.
 - `pricing` prices the model's own calls in usage records; catalog items carry one to copy. The provider and model it names only record where the prices came from, so a catalog price copied for another endpoint's upstream model ID still applies.

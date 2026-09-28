@@ -22,7 +22,7 @@ While the distribution keeps the local authenticator, the OpenAPI document decla
 ### Paths and scope
 
 - Only administration names its scope in the path: an organization path takes the organization ID, a workspace path the workspace ID. Account and public routes and the deployment-wide reads marked in the [route index](#route-index) act in no workspace. Every other route acts in one workspace, the API key's own or, for a login session, the one `X-Workspace-ID` names by ID; a login session without it is 400 `invalid_argument`, and an API key naming another workspace is 403 `forbidden` ([03](03-tenancy.md#authorization)). The OpenAPI document declares `X-Workspace-ID` on every route that acts in a workspace, as optional because an API key need not send it.
-- A model or skill path segment is its key ([04](04-resources.md#keys)); every other segment is an ID.
+- A model path segment is its key ([04](04-resources.md#keys)); every other segment is an ID.
 - Path resolution conceals other tenants, and every route authorizes its scope before it resolves a supplied ID, on replay and content routes too ([03](03-tenancy.md#authorization)).
 - A command that is not create, read, update or delete is `POST …/{id}/{verb}` with an imperative verb (`archive`, `interrupt`, `resume`, `set-default`, `test`, `redeliver`). A check that stores nothing is `POST …/{collection}/validate`.
 
@@ -50,7 +50,7 @@ Some reads are bounded catalogues and return all their items with `next_cursor: 
 
 ### Preconditions
 
-Every mutable resource has a `version` that a database trigger advances on each change; an update that changes nothing, or changes only bookkeeping columns its table declares unversioned, keeps it ([04](04-resources.md#rules-every-kind-follows)). A resource's strong ETag is the quoted `"{id}:{version}"` of its view, `"{key}:{version}"` for a model or skill, so a client may form `If-Match` from any view, including a list row, without reading the item again; a response that represents one versioned resource also carries it in `ETag`. Rows without a version are immutable or have their own precondition: revisions, audit events, grants, members, login sessions, webhook deliveries and spans. Inbox entries and thread mounts are edited under the thread's ETag, which the mount routes also return in `ETag`.
+Every mutable resource has a `version` that a database trigger advances on each change; an update that changes nothing, or changes only bookkeeping columns its table declares unversioned, keeps it ([04](04-resources.md#rules-every-kind-follows)). A resource's strong ETag is the quoted `"{id}:{version}"` of its view, `"{key}:{version}"` for a model, so a client may form `If-Match` from any view, including a list row, without reading the item again; a response that represents one versioned resource also carries it in `ETag`. Rows without a version are immutable or have their own precondition: revisions, audit events, grants, members, login sessions, webhook deliveries and spans. Inbox entries and thread mounts are edited under the thread's ETag, which the mount routes also return in `ETag`.
 
 Every conditional route declares the `If-Match` header (at most 512 characters). The OpenAPI document marks the header optional, but the server requires it: a missing header is 428 `precondition_required` (details `{header: "If-Match"}`) and a stale one is 412 `precondition_failed` (details `{current_etag}`). These state changes take no `If-Match`:
 
@@ -99,7 +99,7 @@ Every failure, including a request no route answers, answers in one envelope; `/
 
 ## Route index
 
-Paths are relative to `/api/v1` unless they start at the root. `{org}` is an organization ID and `{ws}` a workspace ID. Account, public and deployment-wide (marked) routes act in no workspace; any other path with neither acts in the request's workspace ([paths and scope](#paths-and-scope)). `{model}` and `{skill}` are keys.
+Paths are relative to `/api/v1` unless they start at the root. `{org}` is an organization ID and `{ws}` a workspace ID. Account, public and deployment-wide (marked) routes act in no workspace; any other path with neither acts in the request's workspace ([paths and scope](#paths-and-scope)). `{model}` is a model key.
 
 ### Health
 

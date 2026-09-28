@@ -35,7 +35,7 @@ class CatalogRef(BaseModel):
 class ModelCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     provider_id: ObjectId
-    # What agents select the model by; the upstream model name after its last `/`, lowercased, when omitted.
+    # What agents select the model by; `{provider type}-{upstream name}` with other characters as `-` when omitted.
     key: Key | None = None
     name: str = Field(min_length=1, max_length=128)
     description: str = Field(default="", max_length=2048)

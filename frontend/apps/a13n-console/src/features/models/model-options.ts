@@ -2,10 +2,19 @@
 export const keyPattern = "[a-z0-9][a-z0-9.\\-]{0,127}";
 
 /**
- * The key the Service gives a model created without one: its upstream name
- * after the last `/`, lowercased, when that is a valid key.
+ * The key the Service gives a model created without one:
+ * `{provider type}-{upstream name}`, lowercased, with every run of characters
+ * a key cannot hold replaced by `-`.
  */
-export function defaultModelKey(modelName: string): string | undefined {
-  const key = modelName.trim().split("/").at(-1)!.toLowerCase();
-  return new RegExp(`^${keyPattern}$`).test(key) ? key : undefined;
+export function defaultModelKey(
+  providerType: string | undefined,
+  modelName: string,
+): string | undefined {
+  if (!providerType || !modelName.trim()) return undefined;
+  return `${providerType}-${modelName}`
+    .toLowerCase()
+    .replace(/[^a-z0-9.-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "")
+    .slice(0, 128)
+    .replace(/[.-]+$/, "");
 }

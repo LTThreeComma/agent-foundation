@@ -144,7 +144,7 @@ class ConfigurationCapability(AbstractCapability[AgentContext]):
         self,
         kind: ResourceKind,
         reference: Annotated[
-            str, Field(min_length=1, max_length=128, description="A model's or skill's key, any other resource's ID")
+            str, Field(min_length=1, max_length=128, description="A model's key, any other resource's ID")
         ],
         revision_id: Annotated[
             str | None, Field(min_length=1, max_length=128, description="An agent's revision to read, not its default")

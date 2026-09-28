@@ -1,4 +1,4 @@
-"""Shared Service identifiers: allocated object IDs and the keys that name models and skills."""
+"""Shared Service identifiers: allocated object IDs and the keys that name models."""
 
 import re
 import secrets
@@ -38,14 +38,10 @@ _DEFAULT_BYTES = 16
 _MIN_SUFFIX, _MAX_SUFFIX = 2 * min(_RANDOM_BYTES.values()), 2 * _DEFAULT_BYTES
 OBJECT_ID_PATTERN = rf"^[a-z][a-z0-9]{{1,7}}_[0-9a-f]{{{_MIN_SUFFIX},{_MAX_SUFFIX}}}$"
 ObjectId = Annotated[str, StringConstraints(pattern=OBJECT_ID_PATTERN, max_length=8 + 1 + _MAX_SUFFIX)]
-# The immutable, workspace-unique key that alone identifies a model or skill; object IDs contain `_`.
+# The immutable, workspace-unique key that alone identifies a model; object IDs contain `_`.
 KEY_MAX_LENGTH = 128
 KEY_PATTERN = rf"^[a-z0-9][a-z0-9.-]{{0,{KEY_MAX_LENGTH - 1}}}$"
 Key = Annotated[str, StringConstraints(pattern=KEY_PATTERN)]
-
-
-def is_key(value: str) -> bool:
-    return re.fullmatch(KEY_PATTERN, value) is not None
 
 
 def new_object_id(kind: str) -> str:

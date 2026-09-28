@@ -34,7 +34,7 @@ export function Revisions({
     cache = useQueryClient(),
     page = useCursor();
   const query = useQuery(
-    revisionsQuery(client, skill.workspace_id, skill.key, page.cursor),
+    revisionsQuery(client, skill.workspace_id, skill.id, page.cursor),
   );
   if (query.isPending) return <Loading variant="list" rows={4} />;
   if (!query.data)
@@ -95,11 +95,11 @@ export function Revisions({
                         await client
                           .workspace(skill.workspace_id)
                           .POST(
-                            "/api/v1/skills/{key}/revisions/{revision_id}/set-default",
+                            "/api/v1/skills/{skill_id}/revisions/{revision_id}/set-default",
                             {
                               params: {
                                 path: {
-                                  key: skill.key,
+                                  skill_id: skill.id,
                                   revision_id: revision.id,
                                 },
                               },
@@ -115,7 +115,7 @@ export function Revisions({
                   )}
                 <DownloadRevision
                   revision={revision}
-                  filename={`${skill.key}-v${revision.number}.zip`}
+                  filename={`${revision.config.name}-v${revision.number}.zip`}
                 />
               </>
             }

@@ -38,10 +38,10 @@ export function SkillsSection({
   const client = useClient();
   const { workspace, basePath } = useWorkspace();
   const items = choices.data?.skills ?? [];
-  const selected = new Set(draft.skills.map((item) => item.skill));
+  const selected = new Set(draft.skills.map((item) => item.skill_id));
   const revisions = useQueries({
     queries: draft.skills.map((item) =>
-      revisionsQuery(client, workspace.id, item.skill),
+      revisionsQuery(client, workspace.id, item.skill_id),
     ),
   });
   return (
@@ -59,18 +59,18 @@ export function SkillsSection({
             manageLabel={t("Manage skills")}
             // Archived skills cannot be added; a selected one can still be removed.
             items={items
-              .filter((skill) => !skill.archived_at || selected.has(skill.key))
+              .filter((skill) => !skill.archived_at || selected.has(skill.id))
               .map((skill) => ({
-                id: skill.key,
+                id: skill.id,
                 name: skill.name,
-                detail: skill.key,
+                detail: skill.description,
               }))}
             selected={selected}
             onToggle={(id, checked) =>
               draft.setSkills((previous) =>
                 checked
-                  ? [...previous, { skill: id }]
-                  : previous.filter((item) => item.skill !== id),
+                  ? [...previous, { skill_id: id }]
+                  : previous.filter((item) => item.skill_id !== id),
               )
             }
           />
@@ -80,14 +80,16 @@ export function SkillsSection({
       {draft.skills.length ? (
         <ListRows>
           {draft.skills.map((selection, index) => {
-            const skill = items.find((item) => item.key === selection.skill);
+            const skill = items.find((item) => item.id === selection.skill_id);
             const versions = revisions[index]?.data?.items ?? [];
             return (
               <ListRow
-                key={selection.skill}
+                key={selection.skill_id}
                 icon={<PuzzlePieceIcon size={16} />}
-                name={skill?.name ?? selection.skill}
-                secondary={skill ? skill.key : t("Not in this workspace")}
+                name={skill?.name ?? selection.skill_id}
+                secondary={
+                  skill ? skill.description : t("Not in this workspace")
+                }
                 control={
                   <label className={styles.rowSelect}>
                     {t("Version")}
@@ -97,7 +99,7 @@ export function SkillsSection({
                       onChange={(event) =>
                         draft.setSkills((previous) =>
                           previous.map((item) =>
-                            item.skill === selection.skill
+                            item.skill_id === selection.skill_id
                               ? {
                                   ...item,
                                   revision_id: event.target.value || null,
@@ -131,12 +133,12 @@ export function SkillsSection({
                       variant="ghost"
                       size="icon-xs"
                       aria-label={t("Remove {{name}}", {
-                        name: skill?.name ?? selection.skill,
+                        name: skill?.name ?? selection.skill_id,
                       })}
                       onClick={() =>
                         draft.setSkills((previous) =>
                           previous.filter(
-                            (item) => item.skill !== selection.skill,
+                            (item) => item.skill_id !== selection.skill_id,
                           ),
                         )
                       }

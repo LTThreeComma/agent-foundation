@@ -28,7 +28,7 @@ Responses:
 
 List Agents.
 
-Agents of the workspace. `q` matches the name or description, ignoring case; `archived` keeps only archived agents, or only open ones; `source=builtin` finds the Agent Composer; the skill filters keep those with a revision pinning that skill, by key, or that skill revision.
+Agents of the workspace. `q` matches the name or description, ignoring case; `archived` keeps only archived agents, or only open ones; `source=builtin` finds the Agent Composer; the skill filters keep those with a revision pinning that skill or that skill revision.
 
 | Parameter           | Location | Required | Type / schema           | Constraints and default                                        |
 | ------------------- | -------- | -------- | ----------------------- | -------------------------------------------------------------- |
@@ -36,7 +36,7 @@ Agents of the workspace. `q` matches the name or description, ignoring case; `ar
 | `q`                 | query    | false    | string or null          | minLength=1; maxLength=256                                     |
 | `archived`          | query    | false    | boolean or null         | —                                                              |
 | `source`            | query    | false    | AgentSource or null     | —                                                              |
-| `skill`             | query    | false    | string or null          | maxLength=128                                                  |
+| `skill_id`          | query    | false    | string or null          | maxLength=72                                                   |
 | `skill_revision_id` | query    | false    | string or null          | maxLength=72                                                   |
 | `limit`             | query    | false    | integer                 | minimum=1; maximum=100; default=50                             |
 | `cursor`            | query    | false    | string or null          | —                                                              |
@@ -2830,7 +2830,7 @@ Responses:
 
 List Skills.
 
-Skills of the workspace. `q` matches the key, name or description, ignoring case; `source` the kind of source the default revision was read from; `archived` keeps only archived skills, or only open ones.
+Skills of the workspace. `q` matches the name or description, ignoring case; `source` the kind of source the default revision was read from; `archived` keeps only archived skills, or only open ones.
 
 | Parameter        | Location | Required | Type / schema              | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------------------- | -------------------------------------------------------------- |
@@ -2886,13 +2886,13 @@ Responses:
 - **400** — .
 - **default** — .
 
-### `GET /api/v1/skills/{key}`
+### `GET /api/v1/skills/{skill_id}`
 
 Get Skill.
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
-| `key`            | path     | true     | string         | —                                                              |
+| `skill_id`       | path     | true     | string         | —                                                              |
 | `X-Workspace-ID` | header   | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
 
 Responses:
@@ -2901,7 +2901,7 @@ Responses:
 - **400** — .
 - **default** — .
 
-### `PATCH /api/v1/skills/{key}`
+### `PATCH /api/v1/skills/{skill_id}`
 
 Update Skill.
 
@@ -2909,7 +2909,7 @@ Name, description and labels; an archived skill changes only by unarchiving.
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
-| `key`            | path     | true     | string         | —                                                              |
+| `skill_id`       | path     | true     | string         | —                                                              |
 | `If-Match`       | header   | false    | string or null | maxLength=512                                                  |
 | `X-Workspace-ID` | header   | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
 
@@ -2923,7 +2923,7 @@ Responses:
 - **400** — .
 - **default** — .
 
-### `POST /api/v1/skills/{key}/archive`
+### `POST /api/v1/skills/{skill_id}/archive`
 
 Archive Skill.
 
@@ -2931,7 +2931,7 @@ Archived skills keep their revisions readable and pinned; they refuse new revisi
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
-| `key`            | path     | true     | string         | —                                                              |
+| `skill_id`       | path     | true     | string         | —                                                              |
 | `If-Match`       | header   | false    | string or null | maxLength=512                                                  |
 | `X-Workspace-ID` | header   | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
 
@@ -2941,13 +2941,13 @@ Responses:
 - **400** — .
 - **default** — .
 
-### `GET /api/v1/skills/{key}/revisions`
+### `GET /api/v1/skills/{skill_id}/revisions`
 
 List Revisions.
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
-| `key`            | path     | true     | string         | —                                                              |
+| `skill_id`       | path     | true     | string         | —                                                              |
 | `limit`          | query    | false    | integer        | minimum=1; maximum=100; default=50                             |
 | `cursor`         | query    | false    | string or null | —                                                              |
 | `X-Workspace-ID` | header   | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
@@ -2958,7 +2958,7 @@ Responses:
 - **400** — .
 - **default** — .
 
-### `POST /api/v1/skills/{key}/revisions`
+### `POST /api/v1/skills/{skill_id}/revisions`
 
 Create Revision.
 
@@ -2966,7 +2966,7 @@ A package whose manifest equals the default revision's creates nothing and retur
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
-| `key`            | path     | true     | string         | —                                                              |
+| `skill_id`       | path     | true     | string         | —                                                              |
 | `If-Match`       | header   | false    | string or null | maxLength=512                                                  |
 | `X-Workspace-ID` | header   | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
 
@@ -2980,13 +2980,13 @@ Responses:
 - **400** — .
 - **default** — .
 
-### `GET /api/v1/skills/{key}/revisions/{revision_id}`
+### `GET /api/v1/skills/{skill_id}/revisions/{revision_id}`
 
 Get Revision.
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
-| `key`            | path     | true     | string         | —                                                              |
+| `skill_id`       | path     | true     | string         | —                                                              |
 | `revision_id`    | path     | true     | string         | —                                                              |
 | `X-Workspace-ID` | header   | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
 
@@ -2996,7 +2996,7 @@ Responses:
 - **400** — .
 - **default** — .
 
-### `GET /api/v1/skills/{key}/revisions/{revision_id}/content`
+### `GET /api/v1/skills/{skill_id}/revisions/{revision_id}/content`
 
 Read Archive.
 
@@ -3004,7 +3004,7 @@ The revision's package as a zip archive.
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
-| `key`            | path     | true     | string         | —                                                              |
+| `skill_id`       | path     | true     | string         | —                                                              |
 | `revision_id`    | path     | true     | string         | —                                                              |
 | `X-Workspace-ID` | header   | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
 
@@ -3014,7 +3014,7 @@ Responses:
 - **400** — .
 - **default** — .
 
-### `GET /api/v1/skills/{key}/revisions/{revision_id}/files/{path}`
+### `GET /api/v1/skills/{skill_id}/revisions/{revision_id}/files/{path}`
 
 Read File.
 
@@ -3022,7 +3022,7 @@ One package file, by the path the revision's manifest lists.
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
-| `key`            | path     | true     | string         | —                                                              |
+| `skill_id`       | path     | true     | string         | —                                                              |
 | `revision_id`    | path     | true     | string         | —                                                              |
 | `path`           | path     | true     | string         | —                                                              |
 | `X-Workspace-ID` | header   | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
@@ -3033,13 +3033,13 @@ Responses:
 - **400** — .
 - **default** — .
 
-### `POST /api/v1/skills/{key}/revisions/{revision_id}/set-default`
+### `POST /api/v1/skills/{skill_id}/revisions/{revision_id}/set-default`
 
 Set Default Revision.
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
-| `key`            | path     | true     | string         | —                                                              |
+| `skill_id`       | path     | true     | string         | —                                                              |
 | `revision_id`    | path     | true     | string         | —                                                              |
 | `If-Match`       | header   | false    | string or null | maxLength=512                                                  |
 | `X-Workspace-ID` | header   | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
@@ -3050,13 +3050,13 @@ Responses:
 - **400** — .
 - **default** — .
 
-### `POST /api/v1/skills/{key}/unarchive`
+### `POST /api/v1/skills/{skill_id}/unarchive`
 
 Unarchive Skill.
 
 | Parameter        | Location | Required | Type / schema  | Constraints and default                                        |
 | ---------------- | -------- | -------- | -------------- | -------------------------------------------------------------- |
-| `key`            | path     | true     | string         | —                                                              |
+| `skill_id`       | path     | true     | string         | —                                                              |
 | `If-Match`       | header   | false    | string or null | maxLength=512                                                  |
 | `X-Workspace-ID` | header   | false    | string or null | maxLength=41; `pattern="^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$"` |
 

@@ -8,15 +8,15 @@ from dev.service.seed_conversations import Talk
 from dev.service.seed_resources import SKILLS, publish
 
 
-def revise_after_runs(talk: Talk, cast: Cast, last_run: Json) -> dict[str, str]:
+def revise_after_runs(talk: Talk, cast: Cast, notes: Json, last_run: Json) -> dict[str, str]:
     """Publish new revisions of the release-notes skill and the writer, whose conversation continues on the new
     default and once more pinned to its first revision; also a newer revision that is not the default."""
     api = talk.api
-    notes = next(skill for skill in SKILLS if skill.key == "release-notes")
-    skill_path = f"/api/v1/skills/{notes.key}"
+    package = next(skill for skill in SKILLS if skill.name == "release-notes")
+    skill_path = f"/api/v1/skills/{notes['id']}"
     api.post(
         f"{skill_path}/revisions",
-        {"source": publish(api, notes, revision=2), "note": "Adds a checklist"},
+        {"source": publish(api, package, revision=2), "note": "Adds a checklist"},
         current=api.get(skill_path),
     )
     path = f"/api/v1/agents/{cast.writer['id']}"

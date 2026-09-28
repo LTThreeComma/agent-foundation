@@ -76,7 +76,7 @@ it("switches source with the keyboard and retains the GitHub draft", async () =>
 
 it("publishes a new version using the chosen GitHub source and the skill the user saw", async () => {
   const skill = {
-    key: "skill-test",
+    id: "sk_test",
     name: "Test skill",
     version: 3,
   } as Schema["Skill"];
@@ -101,10 +101,12 @@ it("publishes a new version using the chosen GitHub source and the skill the use
   );
   await user.click(dialog.getByRole("button", { name: "Publish version" }));
   await waitFor(() => expect(http.POST).toHaveBeenCalledTimes(1));
-  expect(http.POST.mock.calls[0][0]).toBe("/api/v1/skills/{key}/revisions");
+  expect(http.POST.mock.calls[0][0]).toBe(
+    "/api/v1/skills/{skill_id}/revisions",
+  );
   expect(http.POST.mock.calls[0][1]).toEqual({
-    params: { path: { key: "skill-test" } },
-    headers: { "If-Match": '"skill-test:3"' },
+    params: { path: { skill_id: "sk_test" } },
+    headers: { "If-Match": '"sk_test:3"' },
     body: {
       source: {
         kind: "github",
@@ -138,7 +140,7 @@ it("requires validation of the currently selected ZIP before publishing", async 
         }
       : path.endsWith("/skills/validate")
         ? manifest
-        : { key: "review-documents" },
+        : { id: "sk_new" },
     response: new Response(),
   }));
   const user = userEvent.setup();
@@ -199,7 +201,7 @@ it("imports the validated package it previewed", async () => {
             size: 4,
             source: { kind: "upload", upload_id: "upl_test" },
           }
-        : { key: "review-documents" },
+        : { id: "sk_new" },
     response: new Response(),
   }));
   const user = setup();

@@ -29,17 +29,17 @@ When the workspace has no usable model, preparing fails with `409 conflict` and 
 
 Agent Composer uses the `configuration` toolset. Every tool acts as the principal who started the run, within that principal's permissions:
 
-| Tool                    | Effect                                                                                                                                        | Default permission |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| `find_resources`        | Lists agents, models, skills, connections or environment templates, 20 at a time.                                                             | allow              |
-| `read_resource`         | Reads one of them, a model or skill by key and anything else by ID; an agent is returned at its default revision, or the named `revision_id`. | allow              |
-| `describe_agent_config` | Returns the agent configuration schema and the toolset catalog.                                                                               | allow              |
-| `create_agent`          | Creates an agent with a name, description and configuration, and returns its `agent_id` and `default_revision_id`.                            | ask                |
-| `create_agent_revision` | Adds a complete configuration as a new revision of an agent, by default making it the default revision.                                       | ask                |
+| Tool                    | Effect                                                                                                                               | Default permission |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------ |
+| `find_resources`        | Lists agents, models, skills, connections or environment templates, 20 at a time.                                                    | allow              |
+| `read_resource`         | Reads one of them, a model by key and anything else by ID; an agent is returned at its default revision, or the named `revision_id`. | allow              |
+| `describe_agent_config` | Returns the agent configuration schema and the toolset catalog.                                                                      | allow              |
+| `create_agent`          | Creates an agent with a name, description and configuration, and returns its `agent_id` and `default_revision_id`.                   | ask                |
+| `create_agent_revision` | Adds a complete configuration as a new revision of an agent, by default making it the default revision.                              | ask                |
 
 Each write stops the run and waits for your [approval](agents-and-runs.md#waits-approvals-and-questions); Console shows the proposed call to approve or deny. Refusals, such as a validation error or a missing permission, are returned to Agent Composer, which reports them.
 
-To change an agent, Agent Composer reads the revision you name, or else its default revision, and writes a whole new revision that keeps every field you did not ask to change. It uses only the model and skill keys and resource IDs its tools returned.
+To change an agent, Agent Composer reads the revision you name, or else its default revision, and writes a whole new revision that keeps every field you did not ask to change. It uses only the model keys and resource IDs its tools returned.
 
 Agent Composer does not rename agents or change their labels, archive them, or manage connections and providers. It never asks for credential values: set up connections yourself, then ask Agent Composer to use them.
 

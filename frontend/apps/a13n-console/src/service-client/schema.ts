@@ -32,7 +32,7 @@ export interface paths {
      * List Agents
      * @description Agents of the workspace. `q` matches the name or description, ignoring case; `archived` keeps only
      *     archived agents, or only open ones; `source=builtin` finds the Agent Composer; the skill filters keep those
-     *     with a revision pinning that skill, by key, or that skill revision.
+     *     with a revision pinning that skill or that skill revision.
      */
     get: operations["list_agents_api_v1_agents_get"];
     put?: never;
@@ -1667,7 +1667,7 @@ export interface paths {
     };
     /**
      * List Skills
-     * @description Skills of the workspace. `q` matches the key, name or description, ignoring case; `source` the kind of
+     * @description Skills of the workspace. `q` matches the name or description, ignoring case; `source` the kind of
      *     source the default revision was read from; `archived` keeps only archived skills, or only open ones.
      */
     get: operations["list_skills_api_v1_skills_get"];
@@ -1701,7 +1701,7 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/v1/skills/{key}": {
+  "/api/v1/skills/{skill_id}": {
     parameters: {
       query?: never;
       header?: never;
@@ -1709,7 +1709,7 @@ export interface paths {
       cookie?: never;
     };
     /** Get Skill */
-    get: operations["get_skill_api_v1_skills__key__get"];
+    get: operations["get_skill_api_v1_skills__skill_id__get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -1719,10 +1719,10 @@ export interface paths {
      * Update Skill
      * @description Name, description and labels; an archived skill changes only by unarchiving.
      */
-    patch: operations["update_skill_api_v1_skills__key__patch"];
+    patch: operations["update_skill_api_v1_skills__skill_id__patch"];
     trace?: never;
   };
-  "/api/v1/skills/{key}/archive": {
+  "/api/v1/skills/{skill_id}/archive": {
     parameters: {
       query?: never;
       header?: never;
@@ -1735,14 +1735,14 @@ export interface paths {
      * Archive Skill
      * @description Archived skills keep their revisions readable and pinned; they refuse new revisions and new pins.
      */
-    post: operations["archive_skill_api_v1_skills__key__archive_post"];
+    post: operations["archive_skill_api_v1_skills__skill_id__archive_post"];
     delete?: never;
     options?: never;
     head?: never;
     patch?: never;
     trace?: never;
   };
-  "/api/v1/skills/{key}/revisions": {
+  "/api/v1/skills/{skill_id}/revisions": {
     parameters: {
       query?: never;
       header?: never;
@@ -1750,20 +1750,20 @@ export interface paths {
       cookie?: never;
     };
     /** List Revisions */
-    get: operations["list_revisions_api_v1_skills__key__revisions_get"];
+    get: operations["list_revisions_api_v1_skills__skill_id__revisions_get"];
     put?: never;
     /**
      * Create Revision
      * @description A package whose manifest equals the default revision's creates nothing and returns that revision.
      */
-    post: operations["create_revision_api_v1_skills__key__revisions_post"];
+    post: operations["create_revision_api_v1_skills__skill_id__revisions_post"];
     delete?: never;
     options?: never;
     head?: never;
     patch?: never;
     trace?: never;
   };
-  "/api/v1/skills/{key}/revisions/{revision_id}": {
+  "/api/v1/skills/{skill_id}/revisions/{revision_id}": {
     parameters: {
       query?: never;
       header?: never;
@@ -1771,7 +1771,7 @@ export interface paths {
       cookie?: never;
     };
     /** Get Revision */
-    get: operations["get_revision_api_v1_skills__key__revisions__revision_id__get"];
+    get: operations["get_revision_api_v1_skills__skill_id__revisions__revision_id__get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -1780,7 +1780,7 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/v1/skills/{key}/revisions/{revision_id}/content": {
+  "/api/v1/skills/{skill_id}/revisions/{revision_id}/content": {
     parameters: {
       query?: never;
       header?: never;
@@ -1791,7 +1791,7 @@ export interface paths {
      * Read Archive
      * @description The revision's package as a zip archive.
      */
-    get: operations["read_archive_api_v1_skills__key__revisions__revision_id__content_get"];
+    get: operations["read_archive_api_v1_skills__skill_id__revisions__revision_id__content_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -1800,7 +1800,7 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/v1/skills/{key}/revisions/{revision_id}/files/{path}": {
+  "/api/v1/skills/{skill_id}/revisions/{revision_id}/files/{path}": {
     parameters: {
       query?: never;
       header?: never;
@@ -1811,7 +1811,7 @@ export interface paths {
      * Read File
      * @description One package file, by the path the revision's manifest lists.
      */
-    get: operations["read_file_api_v1_skills__key__revisions__revision_id__files__path__get"];
+    get: operations["read_file_api_v1_skills__skill_id__revisions__revision_id__files__path__get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -1820,7 +1820,7 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/v1/skills/{key}/revisions/{revision_id}/set-default": {
+  "/api/v1/skills/{skill_id}/revisions/{revision_id}/set-default": {
     parameters: {
       query?: never;
       header?: never;
@@ -1830,14 +1830,14 @@ export interface paths {
     get?: never;
     put?: never;
     /** Set Default Revision */
-    post: operations["set_default_revision_api_v1_skills__key__revisions__revision_id__set_default_post"];
+    post: operations["set_default_revision_api_v1_skills__skill_id__revisions__revision_id__set_default_post"];
     delete?: never;
     options?: never;
     head?: never;
     patch?: never;
     trace?: never;
   };
-  "/api/v1/skills/{key}/unarchive": {
+  "/api/v1/skills/{skill_id}/unarchive": {
     parameters: {
       query?: never;
       header?: never;
@@ -1847,7 +1847,7 @@ export interface paths {
     get?: never;
     put?: never;
     /** Unarchive Skill */
-    post: operations["unarchive_skill_api_v1_skills__key__unarchive_post"];
+    post: operations["unarchive_skill_api_v1_skills__skill_id__unarchive_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -6055,8 +6055,8 @@ export interface components {
       default_revision_id: string | null;
       /** Description */
       description: string;
-      /** Key */
-      key: string;
+      /** Id */
+      id: string;
       /** Labels */
       labels: {
         [key: string]: string;
@@ -6079,7 +6079,7 @@ export interface components {
     };
     /**
      * SkillCreate
-     * @description The skill's key is the package's SKILL.md name; `name` and `description` default to what it declares.
+     * @description `name` and `description` default to what the package's SKILL.md declares.
      */
     SkillCreate: {
       /** Description */
@@ -6157,8 +6157,8 @@ export interface components {
       note: string | null;
       /** Number */
       number: number;
-      /** Skill */
-      skill: string;
+      /** Skill Id */
+      skill_id: string;
       /** Workspace Id */
       workspace_id: string;
     };
@@ -6201,8 +6201,8 @@ export interface components {
     SkillSelection: {
       /** Revision Id */
       revision_id?: string | null;
-      /** Skill */
-      skill: string;
+      /** Skill Id */
+      skill_id: string;
     };
     /** SkillUpdate */
     SkillUpdate: {
@@ -7065,7 +7065,7 @@ export interface operations {
         q?: string | null;
         archived?: boolean | null;
         source?: components["schemas"]["AgentSource"] | null;
-        skill?: string | null;
+        skill_id?: string | null;
         skill_revision_id?: string | null;
         limit?: number;
         cursor?: string | null;
@@ -7179,7 +7179,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -7212,7 +7212,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -7270,7 +7270,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -7305,7 +7305,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -7395,7 +7395,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -7456,7 +7456,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -7486,7 +7486,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -7608,7 +7608,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -7989,7 +7989,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -8022,7 +8022,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -8055,7 +8055,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -8222,7 +8222,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -8454,7 +8454,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -8599,7 +8599,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -8719,7 +8719,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -8748,7 +8748,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -8781,7 +8781,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -8889,7 +8889,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -9007,7 +9007,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -9034,7 +9034,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -9130,7 +9130,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -9191,7 +9191,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -9225,7 +9225,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -9493,7 +9493,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -9607,7 +9607,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -9772,7 +9772,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -9916,7 +9916,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -9998,7 +9998,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -10189,7 +10189,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -10222,7 +10222,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -10304,7 +10304,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -10332,7 +10332,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -10494,7 +10494,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -10842,7 +10842,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -10961,7 +10961,7 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  get_skill_api_v1_skills__key__get: {
+  get_skill_api_v1_skills__skill_id__get: {
     parameters: {
       query?: never;
       header?: {
@@ -10969,7 +10969,7 @@ export interface operations {
         "X-Workspace-ID"?: string | null;
       };
       path: {
-        key: string;
+        skill_id: string;
       };
       cookie?: never;
     };
@@ -10988,17 +10988,17 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  update_skill_api_v1_skills__key__patch: {
+  update_skill_api_v1_skills__skill_id__patch: {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
-        key: string;
+        skill_id: string;
       };
       cookie?: never;
     };
@@ -11021,17 +11021,17 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  archive_skill_api_v1_skills__key__archive_post: {
+  archive_skill_api_v1_skills__skill_id__archive_post: {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
-        key: string;
+        skill_id: string;
       };
       cookie?: never;
     };
@@ -11050,7 +11050,7 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  list_revisions_api_v1_skills__key__revisions_get: {
+  list_revisions_api_v1_skills__skill_id__revisions_get: {
     parameters: {
       query?: {
         limit?: number;
@@ -11061,7 +11061,7 @@ export interface operations {
         "X-Workspace-ID"?: string | null;
       };
       path: {
-        key: string;
+        skill_id: string;
       };
       cookie?: never;
     };
@@ -11080,17 +11080,17 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  create_revision_api_v1_skills__key__revisions_post: {
+  create_revision_api_v1_skills__skill_id__revisions_post: {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
-        key: string;
+        skill_id: string;
       };
       cookie?: never;
     };
@@ -11113,7 +11113,7 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  get_revision_api_v1_skills__key__revisions__revision_id__get: {
+  get_revision_api_v1_skills__skill_id__revisions__revision_id__get: {
     parameters: {
       query?: never;
       header?: {
@@ -11121,7 +11121,7 @@ export interface operations {
         "X-Workspace-ID"?: string | null;
       };
       path: {
-        key: string;
+        skill_id: string;
         revision_id: string;
       };
       cookie?: never;
@@ -11141,7 +11141,7 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  read_archive_api_v1_skills__key__revisions__revision_id__content_get: {
+  read_archive_api_v1_skills__skill_id__revisions__revision_id__content_get: {
     parameters: {
       query?: never;
       header?: {
@@ -11149,7 +11149,7 @@ export interface operations {
         "X-Workspace-ID"?: string | null;
       };
       path: {
-        key: string;
+        skill_id: string;
         revision_id: string;
       };
       cookie?: never;
@@ -11169,7 +11169,7 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  read_file_api_v1_skills__key__revisions__revision_id__files__path__get: {
+  read_file_api_v1_skills__skill_id__revisions__revision_id__files__path__get: {
     parameters: {
       query?: never;
       header?: {
@@ -11177,7 +11177,7 @@ export interface operations {
         "X-Workspace-ID"?: string | null;
       };
       path: {
-        key: string;
+        skill_id: string;
         revision_id: string;
         path: string;
       };
@@ -11198,17 +11198,17 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  set_default_revision_api_v1_skills__key__revisions__revision_id__set_default_post: {
+  set_default_revision_api_v1_skills__skill_id__revisions__revision_id__set_default_post: {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
-        key: string;
+        skill_id: string;
         revision_id: string;
       };
       cookie?: never;
@@ -11228,17 +11228,17 @@ export interface operations {
       default: components["responses"]["Error"];
     };
   };
-  unarchive_skill_api_v1_skills__key__unarchive_post: {
+  unarchive_skill_api_v1_skills__skill_id__unarchive_post: {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
       };
       path: {
-        key: string;
+        skill_id: string;
       };
       cookie?: never;
     };
@@ -11345,7 +11345,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11372,7 +11372,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11559,7 +11559,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11592,7 +11592,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11648,7 +11648,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11681,7 +11681,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11781,7 +11781,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11842,7 +11842,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11872,7 +11872,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11933,7 +11933,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11966,7 +11966,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -11994,7 +11994,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -12310,7 +12310,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path?: never;
@@ -12364,7 +12364,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path?: never;
@@ -12395,7 +12395,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path?: never;
@@ -12496,7 +12496,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -12704,7 +12704,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
         /** @description The workspace ID a login session acts in; required with a login session. An API key acts in its own workspace and needs none; naming another is forbidden. */
         "X-Workspace-ID"?: string | null;
@@ -12813,7 +12813,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -12844,7 +12844,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -13031,7 +13031,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -13064,7 +13064,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -13146,7 +13146,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -13174,7 +13174,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -13230,7 +13230,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -13338,7 +13338,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {
@@ -13366,7 +13366,7 @@ export interface operations {
     parameters: {
       query?: never;
       header?: {
-        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model or skill */
+        /** @description The resource's ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model */
         "If-Match"?: string | null;
       };
       path: {

@@ -223,10 +223,7 @@ function AppContent() {
                         element={<EnvironmentsPage section="instances" />}
                       />
                       <Route path="skills" element={<SkillsPage />} />
-                      <Route
-                        path="skills/:skillKey"
-                        element={<SkillDetail />}
-                      />
+                      <Route path="skills/:skillId" element={<SkillDetail />} />
                       <Route path="memories" element={<MemoriesPage />} />
                       <Route
                         path="memories/:memoryId"

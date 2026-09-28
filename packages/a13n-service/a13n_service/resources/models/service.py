@@ -5,6 +5,7 @@ one or changing its configuration needs `write` on the provider too. Models are 
 names the same model.
 """
 
+import re
 from dataclasses import dataclass
 
 from a13n_harness import ModelCapability
@@ -19,7 +20,7 @@ from a13n_service.infra import cursors
 from a13n_service.infra.db import Storage, assign, short_session, transaction, unique_key
 from a13n_service.infra.errors import disabled, invalid, not_found
 from a13n_service.infra.http import require_match
-from a13n_service.infra.ids import KEY_MAX_LENGTH, is_key, new_object_id
+from a13n_service.infra.ids import KEY_MAX_LENGTH, new_object_id
 from a13n_service.providers.registry import Registry
 from a13n_service.resources.models.schemas import Model, ModelConfig, ModelCreate, ModelPage, ModelUpdate
 from a13n_service.resources.models.tables import ModelRow
@@ -29,6 +30,9 @@ from a13n_service.resources.rows import audit_row, find_row, given, record_updat
 from a13n_service.tenancy.access import refuse_archived, workspace_scope
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Verb, WorkspaceScope, authorize
 from a13n_service.tenancy.tables import WorkspaceRow
+
+# Characters a key cannot hold; a derived key replaces each run of them with `-`.
+_NOT_KEY = re.compile(r"[^a-z0-9.-]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,44 +97,43 @@ def require_understanding(model: ResolvedModel, kind: NativeInputMediaKind) -> N
         raise invalid("model", f"does not declare {kind}_understanding")
 
 
-def default_key(model_name: str) -> str:
-    """The key a model created without one takes: its upstream name after the last `/`, lowercased."""
-    key = model_name.rsplit("/", 1)[-1].lower()
-    if not is_key(key):
-        raise invalid("key", "required when the upstream model name does not make a valid key")
-    return key
+def default_key(provider_type: str, model_name: str) -> str:
+    """The key a model created without one takes: `{provider type}-{upstream name}`, lowercased, with every run of
+    characters a key cannot hold replaced by `-`."""
+    key = _NOT_KEY.sub("-", f"{provider_type}-{model_name}".lower()).strip(".-")
+    return key[:KEY_MAX_LENGTH].rstrip(".-")
 
 
 async def create_model(
     storage: Storage, actor: Principal, workspace_id: str, body: ModelCreate, *, registry: Registry
 ) -> Model:
-    key = body.key or default_key(body.config.model_name)
-    with unique_key(ModelRow.KIND, "uq_models_workspace_id_key", key):
-        async with transaction(storage) as session:
-            scope = await workspace_scope(session, actor, workspace_id, "write")
-            provider = await find_row(session, actor, ModelProviderRow, scope, body.provider_id, "write")
-            if not provider.enabled:
-                raise disabled(provider.KIND, provider.id)
-            _check_api(registry.get("model", provider.type), body.config)
-            row = ModelRow(
-                id=new_object_id("mdl"),
-                organization_id=scope.organization_id,
-                workspace_id=scope.workspace_id,
-                provider_id=provider.id,
-                key=key,
-                name=body.name,
-                description=body.description,
-                config=body.config.model_dump(mode="json"),
-                pricing=_dump(body.pricing),
-                catalog_ref=_dump(body.catalog_ref),
-                enabled=body.enabled,
-                created_by_id=actor.id,
-                updated_by_id=actor.id,
-            )
-            session.add(row)
+    async with transaction(storage) as session:
+        scope = await workspace_scope(session, actor, workspace_id, "write")
+        provider = await find_row(session, actor, ModelProviderRow, scope, body.provider_id, "write")
+        if not provider.enabled:
+            raise disabled(provider.KIND, provider.id)
+        _check_api(registry.get("model", provider.type), body.config)
+        key = body.key or default_key(provider.type, body.config.model_name)
+        row = ModelRow(
+            id=new_object_id("mdl"),
+            organization_id=scope.organization_id,
+            workspace_id=scope.workspace_id,
+            provider_id=provider.id,
+            key=key,
+            name=body.name,
+            description=body.description,
+            config=body.config.model_dump(mode="json"),
+            pricing=_dump(body.pricing),
+            catalog_ref=_dump(body.catalog_ref),
+            enabled=body.enabled,
+            created_by_id=actor.id,
+            updated_by_id=actor.id,
+        )
+        session.add(row)
+        with unique_key(ModelRow.KIND, "uq_models_workspace_id_key", key):
             await session.flush()
-            audit_row(session, actor, row, "create", {"key": key})
-            return Model.model_validate(row)
+        audit_row(session, actor, row, "create", {"key": key})
+        return Model.model_validate(row)
 
 
 async def get_model(storage: Storage, actor: Principal, workspace_id: str, key: str) -> Model:

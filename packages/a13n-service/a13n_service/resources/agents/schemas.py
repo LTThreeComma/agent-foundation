@@ -1,8 +1,8 @@
 """Agent configuration as a revision freezes it, per-run overrides of it, and the agent API values.
 
 Skill and subagent edges may omit `revision_id` on input; revision creation and override validation pin it
-to the head's default revision, so a stored configuration always names exact revisions. Models and skills
-are named by key, every other resource by ID.
+to the head's default revision, so a stored configuration always names exact revisions. Models are named by
+key, every other resource by ID.
 """
 
 import json
@@ -68,7 +68,7 @@ class AgentModelCharacteristics(_Frozen):
 
 
 class SkillSelection(_Frozen):
-    skill: Key
+    skill_id: ObjectId
     revision_id: ObjectId | None = None
 
 
@@ -180,7 +180,7 @@ class AgentConfig(_Frozen):
     @model_validator(mode="after")
     def unique_selections(self) -> Self:
         for label, values in (
-            ("Skills", [item.skill for item in self.skills]),
+            ("Skills", [item.skill_id for item in self.skills]),
             ("Connections", [item.connection_id for item in self.connection_tools]),
             ("Client tool names", [item.name for item in self.client_tools]),
             ("Plugin instance names", [item.instance_name for item in self.plugins]),

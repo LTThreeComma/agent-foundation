@@ -67,7 +67,7 @@ class Cast:
     analyst: Json  # a default template, so each thread reserves its own environment
 
 
-def seed_agents(api: Api, local: Local, connection: Json, search: Json) -> Cast:
+def seed_agents(api: Api, local: Local, connection: Json, search: Json, skills: dict[str, Json]) -> Cast:
     def agent(name: str, description: str, labels: dict[str, str], model: Json = local.model, **config: object) -> Json:
         instructions = f"You are the {name.lower()} of a fictional product team. Keep answers short."
         body = {"model": model["key"], "instructions": instructions, **config}
@@ -79,7 +79,7 @@ def seed_agents(api: Api, local: Local, connection: Json, search: Json) -> Cast:
             "Release writer",
             "Drafts release notes in the shared review workspace.",
             {"team": "docs", "stage": "production"},
-            skills=[{"skill": "release-notes"}],
+            skills=[{"skill_id": skills["release-notes"]["id"]}],
             toolsets={"assets": {"enabled": True}},
         ),
         reviewer=agent(
@@ -122,7 +122,7 @@ def seed_agents(api: Api, local: Local, connection: Json, search: Json) -> Cast:
             "Works in an environment of its own, reserved from the local template.",
             {"team": "platform"},
             default_environment_template_id=local.template["id"],
-            skills=[{"skill": "accessibility-review"}],
+            skills=[{"skill_id": skills["accessibility-review"]["id"]}],
         ),
     )
     api.put(f"/api/v1/agents/{cast.writer['id']}/avatar", cast.writer, png())

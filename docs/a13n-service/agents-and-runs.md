@@ -23,7 +23,7 @@ The response's `id` (`ap_…`) identifies the agent in paths and references; age
 - `POST …/agents/validate` with `{config}` checks a configuration exactly as saving would, and answers `204`.
 - `PATCH …/agents/{agent_id}` changes `name`, `description` and `labels`; `PUT …/avatar` sets an image. `POST …/duplicate` copies an agent, from its default or a chosen revision.
 - `POST …/archive` stops new runs of the agent (`422 disabled`); runs already accepted finish. `POST …/unarchive` reverses it.
-- Lists filter by `label`, `q` (name or description), `archived`, `source` (`custom` or `builtin`), and `skill` (a skill key) or `skill_revision_id`, which keep the agents with a revision pinning it.
+- Lists filter by `label`, `q` (name or description), `archived`, `source` (`custom` or `builtin`), and `skill_id` or `skill_revision_id`, which keep the agents with a revision pinning it.
 
 The built-in [Agent Composer](agent-composer.md) is an agent too, the workspace's one with `source: "builtin"`; it cannot be changed or archived.
 
@@ -38,7 +38,7 @@ A revision's `config` holds:
 | `model_characteristics`           | The context window and context-management thresholds.                                                                                  |
 | `instructions`                    | The system instructions, up to 256 KiB.                                                                                                |
 | `toolsets`                        | Built-in toolsets and each tool's enablement, configuration and permission. See [Tools and connections](tools.md#built-in-toolsets).   |
-| `skills`                          | Skills by key and the revisions they pin, `[{skill, revision_id}]`. See [Skills](skills.md).                                           |
+| `skills`                          | Skills and the revisions they pin, `[{skill_id, revision_id}]`. See [Skills](skills.md).                                               |
 | `connection_tools`                | Connections and their tools. See [Use a connection in an agent](tools.md#use-a-connection-in-an-agent).                                |
 | `client_tools`                    | Tools your application executes; see [client tools](#client-tools-and-questions).                                                      |
 | `user_questions`                  | Offers the `ask_user_question` tool.                                                                                                   |

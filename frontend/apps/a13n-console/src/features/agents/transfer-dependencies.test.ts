@@ -33,7 +33,7 @@ it("checks every catalog page and retains an unavailable pinned version", async 
         items: [{ key: "model-local", name: "Research", enabled: true }],
       };
     if (url.pathname.endsWith("/skills"))
-      return { items: [{ key: "skill-local", name: "Sources" }] };
+      return { items: [{ id: "sk_local", name: "Sources" }] };
     if (url.pathname.endsWith("/revisions"))
       return { items: [{ id: "skr_other", number: 1 }] };
     if (url.searchParams.has("cursor"))
@@ -65,7 +65,7 @@ it("checks every catalog page and retains an unavailable pinned version", async 
     {
       ...initialConfig(),
       model: "model-local",
-      skills: [{ skill: "skill-local", revision_id: "skr_pinned" }],
+      skills: [{ skill_id: "sk_local", revision_id: "skr_pinned" }],
       connection_tools: [
         { connection_id: "conn_available" },
         { connection_id: "conn_missing" },
@@ -79,7 +79,21 @@ it("checks every catalog page and retains an unavailable pinned version", async 
     true,
     false,
   ]);
+  expect(checks[1]).toMatchObject({
+    path: "skills.0.skill_id",
+    options: [
+      { value: "sk_local", label: "Sources · sk_local", id: "sk_local" },
+    ],
+  });
   expect(checks[1]?.issue).toContain("Pinned version");
+  // The pinned version is looked up under the skill's ID.
+  expect(
+    fetch.mock.calls.some(
+      ([request]) =>
+        new URL(new Request(request).url).pathname ===
+        "/api/v1/skills/sk_local/revisions",
+    ),
+  ).toBe(true);
   expect(checks[2]?.options.map((item) => item.value)).toEqual([
     "conn_available",
   ]);

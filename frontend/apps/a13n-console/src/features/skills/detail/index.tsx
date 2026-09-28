@@ -18,19 +18,19 @@ import { UsedByAgents } from "./used-by";
 import { Revisions } from "./versions";
 
 export function SkillDetail() {
-  const { skillKey = "" } = useParams(),
+  const { skillId = "" } = useParams(),
     client = useClient(),
     { workspace, can } = useWorkspace(),
     { t } = useTranslation(),
     [search] = useSearchParams();
   const [tab, setTab] = useTabParam(["files", "versions", "references"]);
   const query = useQuery({
-    queryKey: ["skills", workspace.id, "key", skillKey],
+    queryKey: ["skills", workspace.id, skillId],
     queryFn: ({ signal }) =>
       client
         .workspace(workspace.id)
-        .GET("/api/v1/skills/{key}", {
-          params: { path: { key: skillKey } },
+        .GET("/api/v1/skills/{skill_id}", {
+          params: { path: { skill_id: skillId } },
           signal,
         })
         .then(representation),
@@ -42,14 +42,14 @@ export function SkillDetail() {
   const revision = useQuery({
     ...revisionQuery(client, {
       id: revisionId,
-      skill: skill?.key ?? "",
+      skill_id: skillId,
       workspace_id: workspace.id,
     }),
     enabled: !!skill && !!revisionId,
   });
   // The first page of the Versions tab leads with the latest version.
   const latest = useQuery({
-    ...revisionsQuery(client, workspace.id, skill?.key ?? ""),
+    ...revisionsQuery(client, workspace.id, skillId),
     enabled: !!skill,
   }).data?.items[0]?.number;
   if (query.isPending) return <Loading variant="detail" page />;
@@ -86,7 +86,6 @@ export function SkillDetail() {
               <StatusPill variant="neutral">{t("Archived")}</StatusPill>
             ) : undefined
           }
-          resourceKey={skill.key}
           description={revision.data?.config.description}
           actions={
             <>
@@ -96,7 +95,7 @@ export function SkillDetail() {
               <SkillMenu
                 resource={query.data}
                 revisionId={revisionId}
-                version={revision.data?.number}
+                revision={revision.data}
               />
             </>
           }

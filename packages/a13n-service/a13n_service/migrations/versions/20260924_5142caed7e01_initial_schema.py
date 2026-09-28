@@ -476,7 +476,6 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=72), nullable=False),
         sa.Column("organization_id", sa.String(length=72), nullable=False),
         sa.Column("workspace_id", sa.String(), nullable=False),
-        sa.Column("key", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("description", sa.String(), nullable=False),
         sa.Column("default_revision_id", sa.String(length=72), nullable=True),
@@ -499,7 +498,6 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["updated_by_id"], ["principals.id"], name=op.f("fk_skills_updated_by_id_principals")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_skills")),
         sa.UniqueConstraint("workspace_id", "id", name=op.f("uq_skills_workspace_id_id")),
-        sa.UniqueConstraint("workspace_id", "key", name=op.f("uq_skills_workspace_id_key")),
     )
     op.create_table(
         "subscriptions",

@@ -280,7 +280,7 @@ class Versioned(Protocol):
 
 
 class KeyVersioned(Protocol):
-    """A view of a kind identified by key: a model or skill."""
+    """A view of a kind identified by key: a model."""
 
     @property
     def key(self) -> str: ...
@@ -336,8 +336,7 @@ IfMatch = Annotated[
     Header(
         alias="If-Match",
         max_length=512,
-        description='The resource\'s ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model '
-        "or skill",
+        description='The resource\'s ETag: `"{id}:{version}"` of its current view, `"{key}:{version}"` for a model',
     ),
 ]
 

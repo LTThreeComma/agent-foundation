@@ -9794,8 +9794,8 @@
             "title": "Description",
             "type": "string"
           },
-          "key": {
-            "title": "Key",
+          "id": {
+            "title": "Id",
             "type": "string"
           },
           "labels": {
@@ -9832,9 +9832,9 @@
           }
         },
         "required": [
+          "id",
           "organization_id",
           "workspace_id",
-          "key",
           "name",
           "description",
           "labels",
@@ -9852,7 +9852,7 @@
       },
       "SkillCreate": {
         "additionalProperties": false,
-        "description": "The skill's key is the package's SKILL.md name; `name` and `description` default to what it declares.",
+        "description": "`name` and `description` default to what the package's SKILL.md declares.",
         "properties": {
           "description": {
             "anyOf": [
@@ -10071,8 +10071,8 @@
             "title": "Number",
             "type": "integer"
           },
-          "skill": {
-            "title": "Skill",
+          "skill_id": {
+            "title": "Skill Id",
             "type": "string"
           },
           "workspace_id": {
@@ -10082,7 +10082,7 @@
         },
         "required": [
           "id",
-          "skill",
+          "skill_id",
           "workspace_id",
           "number",
           "config",
@@ -10221,14 +10221,15 @@
             ],
             "title": "Revision Id"
           },
-          "skill": {
-            "pattern": "^[a-z0-9][a-z0-9.-]{0,127}$",
-            "title": "Skill",
+          "skill_id": {
+            "maxLength": 41,
+            "pattern": "^[a-z][a-z0-9]{1,7}_[0-9a-f]{20,32}$",
+            "title": "Skill Id",
             "type": "string"
           }
         },
         "required": [
-          "skill"
+          "skill_id"
         ],
         "title": "SkillSelection",
         "type": "object"
@@ -12825,7 +12826,7 @@
     },
     "/api/v1/agents": {
       "get": {
-        "description": "Agents of the workspace. `q` matches the name or description, ignoring case; `archived` keeps only\narchived agents, or only open ones; `source=builtin` finds the Agent Composer; the skill filters keep those\nwith a revision pinning that skill, by key, or that skill revision.",
+        "description": "Agents of the workspace. `q` matches the name or description, ignoring case; `archived` keeps only\narchived agents, or only open ones; `source=builtin` finds the Agent Composer; the skill filters keep those\nwith a revision pinning that skill or that skill revision.",
         "operationId": "list_agents_api_v1_agents_get",
         "parameters": [
           {
@@ -12899,19 +12900,19 @@
           },
           {
             "in": "query",
-            "name": "skill",
+            "name": "skill_id",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 128,
+                  "maxLength": 72,
                   "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "title": "Skill"
+              "title": "Skill Id"
             }
           },
           {
@@ -13218,7 +13219,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -13232,7 +13233,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -13314,7 +13315,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -13328,7 +13329,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -13400,7 +13401,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -13414,7 +13415,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -13561,7 +13562,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -13575,7 +13576,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -13840,7 +13841,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -13854,7 +13855,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -14020,7 +14021,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -14034,7 +14035,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -14106,7 +14107,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -14120,7 +14121,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -14353,7 +14354,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -14367,7 +14368,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -15178,7 +15179,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -15192,7 +15193,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -15275,7 +15276,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -15289,7 +15290,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -15371,7 +15372,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -15385,7 +15386,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -15806,7 +15807,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -15820,7 +15821,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -16456,7 +16457,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -16470,7 +16471,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -16853,7 +16854,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -16867,7 +16868,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -17126,7 +17127,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -17140,7 +17141,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -17274,7 +17275,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -17288,7 +17289,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -17370,7 +17371,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -17384,7 +17385,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -17635,7 +17636,7 @@
         "operationId": "replace_media_defaults_api_v1_media_understanding_defaults_put",
         "parameters": [
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -17649,7 +17650,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -17934,7 +17935,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -17948,7 +17949,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -18075,7 +18076,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -18089,7 +18090,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -18354,7 +18355,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -18368,7 +18369,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -18459,7 +18460,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -18473,7 +18474,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -18618,7 +18619,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -18632,7 +18633,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -19410,7 +19411,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -19424,7 +19425,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -19712,7 +19713,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -19726,7 +19727,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -20124,7 +20125,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -20138,7 +20139,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -20504,7 +20505,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -20518,7 +20519,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -20709,7 +20710,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -20723,7 +20724,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -21102,7 +21103,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -21116,7 +21117,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -21223,7 +21224,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -21237,7 +21238,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -21450,7 +21451,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -21464,7 +21465,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -21525,7 +21526,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -21539,7 +21540,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -21932,7 +21933,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -21946,7 +21947,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -22941,7 +22942,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -22955,7 +22956,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -23025,7 +23026,7 @@
     },
     "/api/v1/skills": {
       "get": {
-        "description": "Skills of the workspace. `q` matches the key, name or description, ignoring case; `source` the kind of\nsource the default revision was read from; `archived` keeps only archived skills, or only open ones.",
+        "description": "Skills of the workspace. `q` matches the name or description, ignoring case; `source` the kind of\nsource the default revision was read from; `archived` keeps only archived skills, or only open ones.",
         "operationId": "list_skills_api_v1_skills_get",
         "parameters": [
           {
@@ -23317,16 +23318,16 @@
         ]
       }
     },
-    "/api/v1/skills/{key}": {
+    "/api/v1/skills/{skill_id}": {
       "get": {
-        "operationId": "get_skill_api_v1_skills__key__get",
+        "operationId": "get_skill_api_v1_skills__skill_id__get",
         "parameters": [
           {
             "in": "path",
-            "name": "key",
+            "name": "skill_id",
             "required": true,
             "schema": {
-              "title": "Key",
+              "title": "Skill Id",
               "type": "string"
             }
           },
@@ -23384,19 +23385,19 @@
       },
       "patch": {
         "description": "Name, description and labels; an archived skill changes only by unarchiving.",
-        "operationId": "update_skill_api_v1_skills__key__patch",
+        "operationId": "update_skill_api_v1_skills__skill_id__patch",
         "parameters": [
           {
             "in": "path",
-            "name": "key",
+            "name": "skill_id",
             "required": true,
             "schema": {
-              "title": "Key",
+              "title": "Skill Id",
               "type": "string"
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -23410,7 +23411,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -23478,22 +23479,22 @@
         ]
       }
     },
-    "/api/v1/skills/{key}/archive": {
+    "/api/v1/skills/{skill_id}/archive": {
       "post": {
         "description": "Archived skills keep their revisions readable and pinned; they refuse new revisions and new pins.",
-        "operationId": "archive_skill_api_v1_skills__key__archive_post",
+        "operationId": "archive_skill_api_v1_skills__skill_id__archive_post",
         "parameters": [
           {
             "in": "path",
-            "name": "key",
+            "name": "skill_id",
             "required": true,
             "schema": {
-              "title": "Key",
+              "title": "Skill Id",
               "type": "string"
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -23507,7 +23508,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -23565,16 +23566,16 @@
         ]
       }
     },
-    "/api/v1/skills/{key}/revisions": {
+    "/api/v1/skills/{skill_id}/revisions": {
       "get": {
-        "operationId": "list_revisions_api_v1_skills__key__revisions_get",
+        "operationId": "list_revisions_api_v1_skills__skill_id__revisions_get",
         "parameters": [
           {
             "in": "path",
-            "name": "key",
+            "name": "skill_id",
             "required": true,
             "schema": {
-              "title": "Key",
+              "title": "Skill Id",
               "type": "string"
             }
           },
@@ -23660,19 +23661,19 @@
       },
       "post": {
         "description": "A package whose manifest equals the default revision's creates nothing and returns that revision.",
-        "operationId": "create_revision_api_v1_skills__key__revisions_post",
+        "operationId": "create_revision_api_v1_skills__skill_id__revisions_post",
         "parameters": [
           {
             "in": "path",
-            "name": "key",
+            "name": "skill_id",
             "required": true,
             "schema": {
-              "title": "Key",
+              "title": "Skill Id",
               "type": "string"
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -23686,7 +23687,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -23754,16 +23755,16 @@
         ]
       }
     },
-    "/api/v1/skills/{key}/revisions/{revision_id}": {
+    "/api/v1/skills/{skill_id}/revisions/{revision_id}": {
       "get": {
-        "operationId": "get_revision_api_v1_skills__key__revisions__revision_id__get",
+        "operationId": "get_revision_api_v1_skills__skill_id__revisions__revision_id__get",
         "parameters": [
           {
             "in": "path",
-            "name": "key",
+            "name": "skill_id",
             "required": true,
             "schema": {
-              "title": "Key",
+              "title": "Skill Id",
               "type": "string"
             }
           },
@@ -23829,17 +23830,17 @@
         ]
       }
     },
-    "/api/v1/skills/{key}/revisions/{revision_id}/content": {
+    "/api/v1/skills/{skill_id}/revisions/{revision_id}/content": {
       "get": {
         "description": "The revision's package as a zip archive.",
-        "operationId": "read_archive_api_v1_skills__key__revisions__revision_id__content_get",
+        "operationId": "read_archive_api_v1_skills__skill_id__revisions__revision_id__content_get",
         "parameters": [
           {
             "in": "path",
-            "name": "key",
+            "name": "skill_id",
             "required": true,
             "schema": {
-              "title": "Key",
+              "title": "Skill Id",
               "type": "string"
             }
           },
@@ -23906,17 +23907,17 @@
         ]
       }
     },
-    "/api/v1/skills/{key}/revisions/{revision_id}/files/{path}": {
+    "/api/v1/skills/{skill_id}/revisions/{revision_id}/files/{path}": {
       "get": {
         "description": "One package file, by the path the revision's manifest lists.",
-        "operationId": "read_file_api_v1_skills__key__revisions__revision_id__files__path__get",
+        "operationId": "read_file_api_v1_skills__skill_id__revisions__revision_id__files__path__get",
         "parameters": [
           {
             "in": "path",
-            "name": "key",
+            "name": "skill_id",
             "required": true,
             "schema": {
-              "title": "Key",
+              "title": "Skill Id",
               "type": "string"
             }
           },
@@ -23992,16 +23993,16 @@
         ]
       }
     },
-    "/api/v1/skills/{key}/revisions/{revision_id}/set-default": {
+    "/api/v1/skills/{skill_id}/revisions/{revision_id}/set-default": {
       "post": {
-        "operationId": "set_default_revision_api_v1_skills__key__revisions__revision_id__set_default_post",
+        "operationId": "set_default_revision_api_v1_skills__skill_id__revisions__revision_id__set_default_post",
         "parameters": [
           {
             "in": "path",
-            "name": "key",
+            "name": "skill_id",
             "required": true,
             "schema": {
-              "title": "Key",
+              "title": "Skill Id",
               "type": "string"
             }
           },
@@ -24015,7 +24016,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -24029,7 +24030,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -24087,21 +24088,21 @@
         ]
       }
     },
-    "/api/v1/skills/{key}/unarchive": {
+    "/api/v1/skills/{skill_id}/unarchive": {
       "post": {
-        "operationId": "unarchive_skill_api_v1_skills__key__unarchive_post",
+        "operationId": "unarchive_skill_api_v1_skills__skill_id__unarchive_post",
         "parameters": [
           {
             "in": "path",
-            "name": "key",
+            "name": "skill_id",
             "required": true,
             "schema": {
-              "title": "Key",
+              "title": "Skill Id",
               "type": "string"
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -24115,7 +24116,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -24339,7 +24340,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -24353,7 +24354,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -24480,7 +24481,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -24494,7 +24495,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -25019,7 +25020,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -25033,7 +25034,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -25115,7 +25116,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -25129,7 +25130,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -25265,7 +25266,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -25279,7 +25280,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -25370,7 +25371,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -25384,7 +25385,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -25661,7 +25662,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -25675,7 +25676,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -25767,7 +25768,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -25781,7 +25782,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -25934,7 +25935,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -25948,7 +25949,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -26094,7 +26095,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -26108,7 +26109,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -26199,7 +26200,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -26213,7 +26214,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -26285,7 +26286,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -26299,7 +26300,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -27278,7 +27279,7 @@
         "operationId": "update_profile_api_v1_users_me_patch",
         "parameters": [
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -27292,7 +27293,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -27413,7 +27414,7 @@
         "operationId": "delete_avatar_api_v1_users_me_avatar_delete",
         "parameters": [
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -27427,7 +27428,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -27469,7 +27470,7 @@
         "operationId": "put_avatar_api_v1_users_me_avatar_put",
         "parameters": [
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -27483,7 +27484,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -27728,7 +27729,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -27742,7 +27743,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -28218,7 +28219,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -28232,7 +28233,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           },
@@ -28490,7 +28491,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -28504,7 +28505,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -28566,7 +28567,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -28580,7 +28581,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -28949,7 +28950,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -28963,7 +28964,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -29070,7 +29071,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -29084,7 +29085,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -29297,7 +29298,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -29311,7 +29312,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -29372,7 +29373,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -29386,7 +29387,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -29537,7 +29538,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -29551,7 +29552,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -29741,7 +29742,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -29755,7 +29756,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }
@@ -29867,7 +29868,7 @@
             }
           },
           {
-            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+            "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -29881,7 +29882,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model or skill",
+              "description": "The resource's ETag: `\"{id}:{version}\"` of its current view, `\"{key}:{version}\"` for a model",
               "title": "If-Match"
             }
           }

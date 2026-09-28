@@ -271,12 +271,12 @@ async def list_agents(
     q: str | None = None,
     archived: bool | None = None,
     source: AgentSource | None = None,
-    skill: str | None = None,
+    skill_id: str | None = None,
     skill_revision_id: str | None = None,
     limit: int,
     cursor: str | None,
 ) -> AgentPage:
-    """`skill` and `skill_revision_id` keep the agents with a revision pinning that skill or skill revision."""
+    """`skill_id` and `skill_revision_id` keep the agents with a revision pinning that skill or skill revision."""
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
         query = select(AgentRow).where(
@@ -286,8 +286,8 @@ async def list_agents(
         )
         if source is not None:
             query = query.where(AgentRow.source == source)
-        # Agent revisions store their pins as `config.skills: [{skill, revision_id}]`.
-        pin = {name: value for name, value in (("skill", skill), ("revision_id", skill_revision_id)) if value}
+        # Agent revisions store their pins as `config.skills: [{skill_id, revision_id}]`.
+        pin = {name: value for name, value in (("skill_id", skill_id), ("revision_id", skill_revision_id)) if value}
         if pin:
             query = query.where(
                 exists().where(
@@ -299,7 +299,7 @@ async def list_agents(
             query,
             AgentRow.id,
             kind="agents",
-            owner=cursors.query_owner(scope.workspace_id, labels, q, archived, source, skill, skill_revision_id),
+            owner=cursors.query_owner(scope.workspace_id, labels, q, archived, source, skill_id, skill_revision_id),
             cursor=cursor,
             limit=limit,
         )

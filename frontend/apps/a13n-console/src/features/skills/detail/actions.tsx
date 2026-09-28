@@ -41,12 +41,12 @@ export type SkillResource = ReturnType<typeof representation<Schema["Skill"]>>;
 export function SkillMenu({
   resource,
   revisionId,
-  version,
+  revision,
 }: {
   resource: SkillResource;
   revisionId: string;
-  /** Unknown until the viewed revision loads; the download names it. */
-  version?: number;
+  /** Unknown until the viewed revision loads; the download is named after it. */
+  revision?: Schema["SkillRevision"];
 }) {
   const client = useClient(),
     cache = useQueryClient(),
@@ -55,8 +55,8 @@ export function SkillMenu({
   const skill = resource.value;
   const [renaming, setRenaming] = useState(false);
   const download = useArchiveDownload(
-    { id: revisionId, skill: skill.key, workspace_id: skill.workspace_id },
-    `${skill.key}-v${version}.zip`,
+    { id: revisionId, skill_id: skill.id, workspace_id: skill.workspace_id },
+    `${revision?.config.name}-v${revision?.number}.zip`,
   );
   return (
     <>
@@ -81,10 +81,7 @@ export function SkillMenu({
               {t("Rename skill")}
             </MenuItem>
           )}
-          <MenuItem
-            disabled={version === undefined}
-            onClick={() => download.mutate()}
-          >
+          <MenuItem disabled={!revision} onClick={() => download.mutate()}>
             <DownloadSimpleIcon size={14} />
             {t("Download ZIP")}
           </MenuItem>
@@ -120,12 +117,12 @@ export function SkillMenu({
                     .workspace(skill.workspace_id)
                     .POST(
                       skill.archived_at
-                        ? "/api/v1/skills/{key}/unarchive"
-                        : "/api/v1/skills/{key}/archive",
+                        ? "/api/v1/skills/{skill_id}/unarchive"
+                        : "/api/v1/skills/{skill_id}/archive",
                       {
                         params: {
                           path: {
-                            key: skill.key,
+                            skill_id: skill.id,
                           },
                         },
                         headers: ifMatch(resource.etag),
@@ -145,7 +142,7 @@ export function SkillMenu({
         onOpenChange={setRenaming}
         title={t("Rename skill")}
         description={t(
-          "Change the display name without changing the skill key or its published versions.",
+          "Change the display name without changing its published versions or the SKILL.md name agents see.",
         )}
         closeLabel={t("Close")}
       >
@@ -177,10 +174,10 @@ function RenameForm({
         );
       return client
         .workspace(basis.value.workspace_id)
-        .PATCH("/api/v1/skills/{key}", {
+        .PATCH("/api/v1/skills/{skill_id}", {
           params: {
             path: {
-              key: basis.value.key,
+              skill_id: basis.value.id,
             },
           },
           headers: ifMatch(basis.etag),
@@ -197,10 +194,10 @@ function RenameForm({
     mutationFn: () =>
       client
         .workspace(basis.value.workspace_id)
-        .GET("/api/v1/skills/{key}", {
+        .GET("/api/v1/skills/{skill_id}", {
           params: {
             path: {
-              key: basis.value.key,
+              skill_id: basis.value.id,
             },
           },
         })

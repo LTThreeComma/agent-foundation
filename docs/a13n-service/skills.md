@@ -2,7 +2,7 @@
 
 A skill is a package of instructions and supporting files that an agent can load when a task calls for it. Skills are [revisioned](resources.md#lifecycles): each change adds an immutable revision, and agent revisions pin the exact skill revision they use. See [Harness skills](../a13n-harness/skills.md) for how agents use them at run time.
 
-A skill is identified by its [key](resources.md#common-conventions), the `name` its `SKILL.md` declares. Paths such as `/api/v1/skills/release-notes` and agent configurations name the skill by it.
+A skill is identified by its [ID](resources.md#common-conventions) (`sk_…`), which paths such as `/api/v1/skills/{skill_id}` and agent configurations use. The model sees the skill by the `name` that the `SKILL.md` of its pinned revision declares. Two skills of a workspace may declare the same name, and a new revision may declare another, but the skills of one agent must declare distinct names.
 
 ## Package format
 
@@ -39,17 +39,17 @@ curl -X POST "$A13N_URL/api/v1/skills" \
 {"source": {"kind": "github", "repository": "owner/repo", "ref": "main", "path": "skills/release-notes"}}
 ```
 
-- The skill's key is its `SKILL.md` `name`, which must be a valid key (`400 invalid_argument` on `source` otherwise) that no skill of the workspace uses yet (`409 already_exists`). `name` and `description` default to those in `SKILL.md`; pass them to override.
+- The response's `id` (`sk_…`) identifies the skill in paths and agent configurations. `name` and `description` default to those in `SKILL.md`; pass them to override.
 - GitHub imports read public repositories anonymously. `ref` defaults to the default branch and `path` to the repository root. The resolved commit is recorded; pass `commit` to require a specific one (`409 conflict`, reason `commit_mismatch`, otherwise). Each GitHub request is bounded by `control.import_timeout`.
 - Upload size is bounded by `objects.upload_bytes` (1 MiB by default).
 - `POST …/skills/validate` with `{"source": ...}` checks a package exactly as creation would and returns its manifest (name, description, files, sizes, digest and resolved source) without storing anything.
 
 ## Revisions
 
-- `POST …/skills/{key}/revisions` with `{source, note?, make_default?}` and the skill's `If-Match` adds a revision; it becomes the default unless `make_default` is `false`. The package's `SKILL.md` must keep the skill's key as its `name` (`400 invalid_argument` on `source` otherwise). A package identical to the current default is a no-op: the call returns that revision again (`201`) without creating one, regardless of `make_default`.
-- `GET …/revisions` lists revisions newest first; `POST …/revisions/{revision_id}/set-default` changes the default. A revision's `skill` is the key of its skill.
+- `POST …/skills/{skill_id}/revisions` with `{source, note?, make_default?}` and the skill's `If-Match` adds a revision; it becomes the default unless `make_default` is `false`. The package's `SKILL.md` may declare another `name`. A package identical to the current default is a no-op: the call returns that revision again (`201`) without creating one, regardless of `make_default`.
+- `GET …/revisions` lists revisions newest first; `POST …/revisions/{revision_id}/set-default` changes the default. A revision's `skill_id` names its skill.
 - `GET …/revisions/{revision_id}/content` downloads the archive, and `GET …/revisions/{revision_id}/files/{path}` one file of it.
-- `PATCH …/skills/{key}` changes `name`, `description` and `labels`. Lists filter by `label`, `q`, `archived` and `source` (`upload` or `github`, of the default revision).
+- `PATCH …/skills/{skill_id}` changes `name`, `description` and `labels`. Lists filter by `label`, `q` (name or description), `archived` and `source` (`upload` or `github`, of the default revision).
 - `POST …/archive` stops new agent revisions from pinning the skill and refuses changes; agents that already pin it keep working. `POST …/unarchive` reverses it.
 
-An agent revision selects skills in `skills` as `{"skill": "release-notes", "revision_id": ...}`; without `revision_id`, saving pins the skill's current default revision. `GET /api/v1/agents?skill=release-notes` lists the agents with a revision that pins the skill; `skill_revision_id` filters by one skill revision.
+An agent revision selects skills in `skills` as `{"skill_id": "sk_…", "revision_id": ...}`; without `revision_id`, saving pins the skill's current default revision. `GET /api/v1/agents?skill_id=sk_…` lists the agents with a revision that pins the skill; `skill_revision_id` filters by one skill revision.

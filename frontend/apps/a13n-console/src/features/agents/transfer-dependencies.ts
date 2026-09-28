@@ -87,9 +87,9 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
     });
   for (const [index, skill] of (config.skills ?? []).entries())
     refs.push({
-      path: `skills.${index}.skill`,
+      path: `skills.${index}.skill_id`,
       kind: "skill",
-      value: skill.skill,
+      value: skill.skill_id,
       revision: skill.revision_id,
       replace: (value) => ({
         ...config,
@@ -97,8 +97,8 @@ export function agentDependencies(config: AgentConfig): AgentDependency[] {
           i === index
             ? {
                 ...item,
-                skill: value,
-                revision_id: pin(item.skill, value, item.revision_id),
+                skill_id: value,
+                revision_id: pin(item.skill_id, value, item.revision_id),
               }
             : item,
         ),
@@ -227,9 +227,9 @@ export async function inspectAgentDependencies(
         return items
           .filter((item) => !item.archived_at)
           .map((item) => ({
-            value: item.key,
-            label: `${item.name} · ${item.key}`,
-            id: item.key,
+            value: item.id,
+            label: `${item.name} · ${item.id}`,
+            id: item.id,
           }));
       }
       case "connection": {
@@ -326,9 +326,9 @@ export async function inspectAgentDependencies(
             ? await allPages((cursor) =>
                 client
                   .workspace(workspaceId)
-                  .GET("/api/v1/skills/{key}/revisions", {
+                  .GET("/api/v1/skills/{skill_id}/revisions", {
                     params: {
-                      path: { key: id },
+                      path: { skill_id: id },
                       query: { cursor, limit: 100 },
                     },
                     signal,

@@ -24,17 +24,17 @@ import { SkillIcon } from "../source";
  */
 export function usedByQuery(
   client: Client,
-  skill: Pick<Schema["Skill"], "key" | "workspace_id">,
+  skill: Pick<Schema["Skill"], "id" | "workspace_id">,
   cursor?: string,
 ) {
   return queryOptions({
-    queryKey: ["skills", skill.workspace_id, skill.key, "used-by", cursor],
+    queryKey: ["skills", skill.workspace_id, skill.id, "used-by", cursor],
     queryFn: ({ signal }) =>
       client
         .workspace(skill.workspace_id)
         .GET("/api/v1/agents", {
           params: {
-            query: { skill: skill.key, archived: false, cursor },
+            query: { skill_id: skill.id, archived: false, cursor },
           },
           signal,
         })

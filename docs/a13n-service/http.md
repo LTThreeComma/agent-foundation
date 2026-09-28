@@ -71,7 +71,7 @@ Messages are for people; branch on `code` and `details.reason`. Error details ne
 
 ## Concurrency control
 
-Single-resource responses carry a strong `ETag`, such as `"ap_…:4"` (`"{key}:{version}"` for models and skills), and views carry the same `version`. Operations that change an existing resource require the ETag you last read in `If-Match`:
+Single-resource responses carry a strong `ETag`, such as `"ap_…:4"` (`"{key}:{version}"` for models), and views carry the same `version`. Operations that change an existing resource require the ETag you last read in `If-Match`:
 
 ```sh
 curl -X PATCH "$A13N_URL/api/v1/agents/$AGENT" \
@@ -104,7 +104,7 @@ Collections return `{"items": [...], "next_cursor": "..."}`. Pass `limit` (1–1
 
 ## Identifiers and time
 
-IDs are opaque strings with a kind prefix, such as `ws_`, `ap_` (agent), `sess_`, `thread_`, `run_`. Models and skills have no exposed ID: paths and references name them by their [key](resources.md#common-conventions). Timestamps are RFC 3339 with an offset.
+IDs are opaque strings with a kind prefix, such as `ws_`, `ap_` (agent), `sk_` (skill), `sess_`, `thread_`, `run_`. Models have no exposed ID: paths and references name them by their [key](resources.md#common-conventions). Timestamps are RFC 3339 with an offset.
 
 ## Streams
 

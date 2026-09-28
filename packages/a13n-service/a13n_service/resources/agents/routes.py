@@ -76,14 +76,14 @@ async def list_agents(
     q: Annotated[Search | None, Query()] = None,
     archived: bool | None = None,
     source: AgentSource | None = None,
-    skill: Annotated[str | None, Query(max_length=128)] = None,
+    skill_id: Annotated[str | None, Query(max_length=72)] = None,
     skill_revision_id: Annotated[str | None, Query(max_length=72)] = None,
     limit: PageLimit = 50,
     cursor: str | None = None,
 ) -> AgentPage:
     """Agents of the workspace. `q` matches the name or description, ignoring case; `archived` keeps only
     archived agents, or only open ones; `source=builtin` finds the Agent Composer; the skill filters keep those
-    with a revision pinning that skill, by key, or that skill revision."""
+    with a revision pinning that skill or that skill revision."""
     return await service.list_agents(
         runtime.storage,
         actor,
@@ -92,7 +92,7 @@ async def list_agents(
         q=q,
         archived=archived,
         source=source,
-        skill=skill,
+        skill_id=skill_id,
         skill_revision_id=skill_revision_id,
         limit=limit,
         cursor=cursor,

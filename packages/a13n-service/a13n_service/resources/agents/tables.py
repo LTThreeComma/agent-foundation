@@ -26,7 +26,6 @@ type AgentSource = Literal["custom", "builtin"]
 class AgentRow(Stamped, Base):
     __tablename__ = "agents"
     KIND: ClassVar[str] = "agent"
-    REFERENCE: ClassVar[str] = "id"
     __table_args__ = (
         UniqueConstraint("workspace_id", "id"),
         ForeignKeyConstraint(["organization_id", "workspace_id"], ["workspaces.organization_id", "workspaces.id"]),

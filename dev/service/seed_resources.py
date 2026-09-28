@@ -12,7 +12,7 @@ from dev.service.seed_assets import upload
 
 @dataclass(frozen=True, slots=True)
 class Skill:
-    key: str
+    name: str
     description: str
     labels: dict[str, str]
     body: str
@@ -55,31 +55,33 @@ SKILLS = (
 ARCHIVED_SKILL = "legacy-style-guide"
 
 
-def seed_skills(api: Api) -> None:
-    """Every skill, keyed by its SKILL.md name. `accessibility-review` gains a newer revision that is not its
-    default."""
+def seed_skills(api: Api) -> dict[str, Json]:
+    """Every skill, by its SKILL.md name. `accessibility-review` gains a newer revision that is not its default."""
     skills = {
-        skill.key: api.post("/api/v1/skills", {"source": publish(api, skill, revision=1), "labels": skill.labels})
+        skill.name: api.post("/api/v1/skills", {"source": publish(api, skill, revision=1), "labels": skill.labels})
         for skill in SKILLS
     }
-    draft = next(skill for skill in SKILLS if skill.key == "accessibility-review")
+    draft = next(skill for skill in SKILLS if skill.name == "accessibility-review")
     api.post(
-        f"/api/v1/skills/{draft.key}/revisions",
+        f"/api/v1/skills/{skills[draft.name]['id']}/revisions",
         {"source": publish(api, draft, revision=2), "make_default": False, "note": "Draft: adds motion checks"},
-        current=skills[draft.key],
+        current=skills[draft.name],
     )
-    api.post(f"/api/v1/skills/{ARCHIVED_SKILL}/archive", current=skills[ARCHIVED_SKILL])
+    api.post(f"/api/v1/skills/{skills[ARCHIVED_SKILL]['id']}/archive", current=skills[ARCHIVED_SKILL])
+    return skills
 
 
 def publish(api: Api, skill: Skill, *, revision: int) -> Json:
-    """An upload source holding the skill's package at `revision`; the manifest's name is the skill's key."""
+    """An upload source holding the skill's package at `revision`."""
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
-        manifest = f"---\nname: {skill.key}\ndescription: {skill.description}\n---\n"
-        archive.writestr(f"{skill.key}/SKILL.md", f"{manifest}# {skill.key}\n\n{skill.body}\n\nRevision {revision}.\n")
+        manifest = f"---\nname: {skill.name}\ndescription: {skill.description}\n---\n"
+        archive.writestr(
+            f"{skill.name}/SKILL.md", f"{manifest}# {skill.name}\n\n{skill.body}\n\nRevision {revision}.\n"
+        )
         if skill.references or revision > 1:
-            archive.writestr(f"{skill.key}/references/checklist.md", "# Checklist\n\n- Navigation\n- Empty states\n")
-    upload_id = upload(api, f"{skill.key}-{revision}.zip", "application/zip", package.getvalue())
+            archive.writestr(f"{skill.name}/references/checklist.md", "# Checklist\n\n- Navigation\n- Empty states\n")
+    upload_id = upload(api, f"{skill.name}-{revision}.zip", "application/zip", package.getvalue())
     return {"kind": "upload", "upload_id": upload_id}
 
 

@@ -104,13 +104,13 @@ def _providers(api: Api) -> Iterator[Check]:
 
 
 def _resources(api: Api, index: dict[str, str]) -> Iterator[Check]:
-    skills = {skill["key"]: skill for skill in api.items("/api/v1/skills")}
+    skills = {skill["name"]: skill for skill in api.items("/api/v1/skills")}
     draft = skills["accessibility-review"]
     yield (
         "Skills: every example, one archived, one whose newest revision is not the default",
-        {skill.key for skill in SKILLS} <= skills.keys()
+        {skill.name for skill in SKILLS} <= skills.keys()
         and skills["legacy-style-guide"]["archived_at"] is not None
-        and api.items("/api/v1/skills/accessibility-review/revisions")[0]["id"] != draft["default_revision_id"],
+        and api.items(f"/api/v1/skills/{draft['id']}/revisions")[0]["id"] != draft["default_revision_id"],
     )
     agents = {agent["id"]: agent for agent in api.items("/api/v1/agents")}
     yield (

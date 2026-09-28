@@ -62,8 +62,8 @@ def test_contract_describes_binary_downloads(contract: dict) -> None:
     paths = contract["paths"]
     downloads = {
         "/assets/{asset_id}/content": "*/*",
-        "/skills/{key}/revisions/{revision_id}/content": "application/zip",
-        "/skills/{key}/revisions/{revision_id}/files/{path}": "application/octet-stream",
+        "/skills/{skill_id}/revisions/{revision_id}/content": "application/zip",
+        "/skills/{skill_id}/revisions/{revision_id}/files/{path}": "application/octet-stream",
     }
     for path, media_type in downloads.items():
         responses = paths[f"/api/v1{path}"]["get"]["responses"]

@@ -26,7 +26,7 @@ export interface ResourceColumn<T> {
   render: (item: T) => ReactNode;
 }
 
-/** One table anatomy serves every resource list; models and skills are keyed rather than identified. */
+/** One table anatomy serves every resource list; models are keyed rather than identified. */
 export function ResourceTable<T extends { id: string } | { key: string }>({
   items,
   columns,

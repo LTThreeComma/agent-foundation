@@ -738,7 +738,7 @@
   "Saved value": "已保存的值",
   "Converse base URL": "Converse 基础 URL",
   "Update how this agent appears in your workspace.": "更新此 Agent 在工作空间中显示的信息。",
-  "Change the display name without changing the skill key or its published versions.": "修改显示名称，不影响技能标识或已发布的版本。",
+  "Change the display name without changing its published versions or the SKILL.md name agents see.": "修改显示名称，不影响已发布的版本，也不影响 Agent 看到的 SKILL.md 名称。",
   "Publish an updated package as a new version of this skill.": "将更新后的技能包发布为此技能的新版本。",
   "Use a branch, tag, or commit. Leave empty for the default branch.": "填写分支、标签或提交。留空则使用默认分支。",
   "Path to the skill inside the repository. Leave empty for the repository root.": "技能在仓库中的目录路径。留空则使用仓库根目录。",

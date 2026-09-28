@@ -45,12 +45,12 @@ def seed(api: Api, model_url: str, environments: Path) -> Seeded:
     index = seed_identity(api, org, ws)
     providers = seed_providers(api)
     local = seed_local(api, model_url, environments)
-    seed_skills(api)
+    skills = seed_skills(api)
     seed_templates(api, providers["environment"], local.template)
     subscription = seed_subscription(api, model_url)
     connections = seed_connections(api, model_url, providers["connector"]["composio"])
     search = providers["web"]["brave"]
-    cast = seed_agents(api, local, connections["ready"], search)
+    cast = seed_agents(api, local, connections["ready"], search, skills)
     memories = seed_memories(api, local.model, model_url)
     assets = {example.name: store(api, example) for example in examples()}
     talk = Talk(api)
@@ -63,7 +63,8 @@ def seed(api: Api, model_url: str, environments: Path) -> Seeded:
     with ThreadPoolExecutor(PARALLEL_CONVERSATIONS) as pool:
         for found in pool.map(lambda job: job(), jobs):
             index |= found
-    index |= revise_after_runs(talk, cast, api.get(f"/api/v1/runs/{index['conversation_last_run']}"))
+    last_run = api.get(f"/api/v1/runs/{index['conversation_last_run']}")
+    index |= revise_after_runs(talk, cast, skills["release-notes"], last_run)
     # A sub-agent's result continues its parent thread after the scenario returned.
     api.until("/api/v1/threads?limit=100", lambda page: all(item["current_run_id"] is None for item in page["items"]))
     deliveries = f"/api/v1/subscriptions/{subscription['id']}/deliveries"

@@ -137,6 +137,6 @@ class Api:
 def _if_match(current: Json | None) -> dict[str, str]:
     if current is None:
         return {}
-    # Models and skills are identified by key alone; every other resource by ID.
+    # Models are identified by key alone; every other resource by ID.
     identifier = current["id"] if "id" in current else current["key"]
     return {"if-match": f'"{identifier}:{current["version"]}"'}

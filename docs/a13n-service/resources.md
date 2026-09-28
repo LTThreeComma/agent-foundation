@@ -26,9 +26,9 @@ Nothing a run depends on is hard-deleted underneath it:
 
 ## Common conventions
 
-- **Keys and IDs.** Models and skills are identified by a `key`: 1–128 lowercase letters, digits, `-` and `.`, starting with a letter or digit (`^[a-z0-9][a-z0-9.-]{0,127}$`). A key is unique in its workspace and never changes; paths, agent configurations and ETags (`"{key}:{version}"`) name models and skills by it, and their views have no `id`. Every other resource, including agents, memories, environment templates and revisions, is identified by a kind-prefixed ID, such as `ap_…` for agents.
+- **Keys and IDs.** Only models are identified by a `key`: 1–128 lowercase letters, digits, `-` and `.`, starting with a letter or digit (`^[a-z0-9][a-z0-9.-]{0,127}$`). A key is unique in its workspace and never changes; paths, agent configurations and ETags (`"{key}:{version}"`) name a model by it, and its view has no `id`. Every other resource, including agents, skills, memories, environment templates and revisions, is identified by a kind-prefixed ID, such as `ap_…` for agents and `sk_…` for skills.
 - **Versions.** Reads return an `ETag`; changes require it in `If-Match`. See [HTTP conventions](http.md#concurrency-control).
-- **Labels.** Agents and skills carry up to 32 `labels`. List them with `?label=key:value` (repeatable, all must match), `q` (case-insensitive substring of the name or description, and of a skill's key) and `archived=true|false`.
+- **Labels.** Agents and skills carry up to 32 `labels`. List them with `?label=key:value` (repeatable, all must match), `q` (case-insensitive substring of the name or description) and `archived=true|false`.
 - **Authors.** Views carry `created_by_id`, `updated_by_id`, `created_at` and `updated_at`.
 - **Audit.** Changes to resources are recorded in the [audit trail](identity.md#audit). An update that changes nothing keeps the version and records nothing.
 

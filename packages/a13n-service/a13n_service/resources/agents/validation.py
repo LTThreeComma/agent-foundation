@@ -30,7 +30,7 @@ from a13n_service.resources.memories.service import resolve_memory
 from a13n_service.resources.models.service import resolve_media_model, resolve_model
 from a13n_service.resources.providers.service import resolve_provider
 from a13n_service.resources.providers.tables import WebProviderRow
-from a13n_service.resources.skills.pins import require_pins
+from a13n_service.resources.skills.pins import require_distinct_names, require_pins
 from a13n_service.resources.skills.schemas import SkillPin
 from a13n_service.resources.skills.tables import SkillRow
 from a13n_service.tenancy.authorize import ExecutionAuthority, Principal, Verb, WorkspaceScope
@@ -177,12 +177,12 @@ async def _pin_skills(
 ) -> tuple[SkillSelection, ...]:
     """Each skill at its selected revision, by default the skill's default revision; archived skills refuse a pin
     that is not `held` already."""
-    unpinned = {skill.skill for skill in skills if skill.revision_id is None}
+    unpinned = {skill.skill_id for skill in skills if skill.revision_id is None}
     defaults = dict(
         (
             await session.execute(
-                select(SkillRow.key, SkillRow.default_revision_id).where(
-                    SkillRow.workspace_id == workspace_id, SkillRow.key.in_(unpinned)
+                select(SkillRow.id, SkillRow.default_revision_id).where(
+                    SkillRow.workspace_id == workspace_id, SkillRow.id.in_(unpinned)
                 )
             )
         )
@@ -192,15 +192,18 @@ async def _pin_skills(
     pinned: list[SkillSelection] = []
     checked: dict[str, SkillPin] = {}
     for index, skill in enumerate(skills):
-        revision_id = skill.revision_id or defaults.get(skill.skill)
+        revision_id = skill.revision_id or defaults.get(skill.skill_id)
         if revision_id is None:
             with at_field(f"skills.{index}"):
-                raise not_found(SkillRow.KIND, skill.skill)
+                raise not_found(SkillRow.KIND, skill.skill_id)
         selection = skill.model_copy(update={"revision_id": revision_id})
         if selection not in held:
-            checked[f"skills.{index}"] = SkillPin(skill=skill.skill, revision_id=revision_id)
+            checked[f"skills.{index}"] = SkillPin(skill_id=skill.skill_id, revision_id=revision_id)
         pinned.append(selection)
     await require_pins(session, workspace_id, checked)
+    await require_distinct_names(
+        session, workspace_id, {f"skills.{index}": skill.revision_id or "" for index, skill in enumerate(pinned)}
+    )
     return tuple(pinned)
 
 

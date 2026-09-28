@@ -362,7 +362,7 @@ async def revision_config(service, agent: dict) -> dict:  # type: ignore[no-unty
 
 
 def etag(resource: dict) -> str:
-    """An agent's ETag names its ID, a skill's or model's its key."""
+    """A model's ETag names its key, every other resource's its ID."""
     return f'"{resource["id"] if "id" in resource else resource["key"]}:{resource["version"]}"'
 
 
@@ -381,6 +381,18 @@ async def create_skill(service) -> dict:  # type: ignore[no-untyped-def]
     )
     assert skill.status_code == 201, skill.text
     return skill.json()
+
+
+async def test_an_agents_skills_declare_distinct_names(service) -> None:  # type: ignore[no-untyped-def]
+    """The model sees each skill by its SKILL.md name: skills of a workspace may share one, those of an agent not."""
+    model = await create_model(service)
+    first, second = await create_skill(service), await create_skill(service)
+    both = [{"skill_id": first["id"]}, {"skill_id": second["id"]}]
+    refused = await service.client.post(
+        f"{service.api}/agents", json={"name": "Both", "config": {"model": model, "skills": both}}
+    )
+    assert refused.status_code == 400 and refused.json()["error"]["details"]["field"] == "skills.1", refused.text
+    assert (await create_agent(service, "second", model, skills=both[1:]))["name"] == "Second"
 
 
 async def test_references_are_checked_at_their_field_path(service) -> None:  # type: ignore[no-untyped-def]
@@ -402,7 +414,7 @@ async def test_references_are_checked_at_their_field_path(service) -> None:  # t
         ({"model_settings": {"timeout": 30}}, "model_settings"),
         ({"reviewer": {"model": model, "model_settings": {"unknown": 1}}}, "reviewer.model_settings"),
         ({"media_understanding": {"image": model}}, "media_understanding.image"),
-        ({"skills": [{"skill": "missing"}]}, "skills.0"),
+        ({"skills": [{"skill_id": new_object_id("sk")}]}, "skills.0"),
         ({"subagents": {"helper": {"agent_id": missing["ap"]}}}, "subagents.helper"),
         ({"connection_tools": [{"connection_id": missing["con"]}]}, "connection_tools.0"),
         ({"toolsets": {"web": {"tools": {"search": {}}}}}, "toolsets.web.tools.search.config.provider_id"),
@@ -468,11 +480,11 @@ async def test_revisions_pin_skills_and_subagents(service) -> None:  # type: ign
     skill = await create_skill(service)
     child = await create_agent(service, "child", model)
     parent = await create_agent(
-        service, "parent", model, skills=[{"skill": skill["key"]}], subagents={"helper": {"agent_id": child["id"]}}
+        service, "parent", model, skills=[{"skill_id": skill["id"]}], subagents={"helper": {"agent_id": child["id"]}}
     )
 
     pinned = await revision_config(service, parent)
-    assert pinned["skills"] == [{"skill": skill["key"], "revision_id": skill["default_revision_id"]}]
+    assert pinned["skills"] == [{"skill_id": skill["id"], "revision_id": skill["default_revision_id"]}]
     assert pinned["subagents"]["helper"]["revision_id"] == child["default_revision_id"]
 
     # An inline path back to the agent itself is refused; an async child starts a child run of its own.
@@ -525,7 +537,7 @@ async def test_configurations_validate_as_revision_creation_would_without_storin
 
     for changes, field in (
         ({"model": "missing-model"}, "model"),
-        ({"skills": [{"skill": "missing-skill"}]}, "skills.0"),
+        ({"skills": [{"skill_id": new_object_id("sk")}]}, "skills.0"),
         ({"toolsets": {"shell": {"tools": {"exec": {"permission": "review"}}}}}, "reviewer"),
     ):
         refused = await service.client.post(validate, json={"config": {"model": model, **changes}})
@@ -801,17 +813,17 @@ async def test_overrides_are_validated_and_pinned_as_the_run_freezes_them(servic
         service,
         "pinning",
         model,
-        skills=[{"skill": skill["key"]}],
+        skills=[{"skill_id": skill["id"]}],
         subagents={"helper": {"agent_id": child["id"]}},
     )
-    for path, head in ((f"skills/{skill['key']}", skill), (f"agents/{child['id']}", child)):
+    for path, head in ((f"skills/{skill['id']}", skill), (f"agents/{child['id']}", child)):
         archived = await service.client.post(f"{service.api}/{path}/archive", headers={"if-match": etag(head)})
         assert archived.status_code == 200, archived.text
     kept = await validate(AgentOverride(instructions="Only this run."), pinning["id"])
     assert kept.instructions == "Only this run."
     for override, field in (
         (AgentOverride(subagents={"extra": SubagentOverride(agent_id=child["id"])}), "subagents.extra"),
-        (AgentOverride(skills=(SkillSelection(skill=skill["key"]),)), "skills.0"),
+        (AgentOverride(skills=(SkillSelection(skill_id=skill["id"]),)), "skills.0"),
     ):
         with pytest.raises(ServiceError) as archived_pin:
             await validate(override)

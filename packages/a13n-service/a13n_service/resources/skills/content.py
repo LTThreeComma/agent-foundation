@@ -35,15 +35,15 @@ def _archive(revision: SkillRevisionRow) -> tuple[SkillManifest, ObjectRef]:
 
 
 async def read_archive(
-    storage: Storage, objects: ObjectStore, actor: Principal, workspace_id: str, key: str, revision_id: str
+    storage: Storage, objects: ObjectStore, actor: Principal, workspace_id: str, skill_id: str, revision_id: str
 ) -> tuple[str, bytes]:
     """A download file name and the revision's package archive, verified against its digest."""
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        head = await resolve_skill(session, scope.workspace_id, key)
+        head = await resolve_skill(session, scope.workspace_id, skill_id)
         revision = await resolve_revision(session, head, revision_id)
-        _, reference = _archive(revision)
-        filename = f"{head.key}-{revision.number}.zip"
+        manifest, reference = _archive(revision)
+        filename = f"{manifest.name}-{revision.number}.zip"
     return filename, await read(objects, reference)
 
 
@@ -52,14 +52,14 @@ async def read_file(
     objects: ObjectStore,
     actor: Principal,
     workspace_id: str,
-    key: str,
+    skill_id: str,
     revision_id: str,
     path: str,
 ) -> bytes:
     """One file of the revision's package, by its path below the skill directory."""
     async with short_session(storage) as session:
         scope = await workspace_scope(session, actor, workspace_id, "read")
-        head = await resolve_skill(session, scope.workspace_id, key)
+        head = await resolve_skill(session, scope.workspace_id, skill_id)
         manifest, reference = _archive(await resolve_revision(session, head, revision_id))
     if all(file.path != path for file in manifest.files):
         raise not_found("skill_file", path)

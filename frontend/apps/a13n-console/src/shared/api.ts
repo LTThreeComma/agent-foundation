@@ -17,13 +17,10 @@ export function isUnauthorized(error: unknown) {
 }
 /**
  * The Service's strong ETag of a row as the reader saw it, for rows read from a
- * collection, whose response carries no per-item ETag. Models and skills are
- * identified by key.
+ * collection, whose response carries no per-item ETag.
  */
-export function rowTag(
-  row: ({ id: string } | { key: string }) & { version: number },
-) {
-  return `"${"id" in row ? row.id : row.key}:${row.version}"`;
+export function rowTag(row: { id: string; version: number }) {
+  return `"${row.id}:${row.version}"`;
 }
 export function ifMatch(etag: string | undefined) {
   return etag ? { "If-Match": etag } : {};

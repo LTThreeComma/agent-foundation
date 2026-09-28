@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from a13n_service.infra.ids import Key, ObjectId
+from a13n_service.infra.ids import ObjectId
 from a13n_service.infra.labels import Labels
 from a13n_service.resources.uploads.schemas import Digest, UploadId
 
@@ -73,15 +73,15 @@ class SkillManifest(BaseModel):
 
 
 class SkillPin(BaseModel):
-    """An agent revision's edge to one exact revision of the skill with key `skill`."""
+    """An agent revision's edge to one exact revision of a skill."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    skill: Key
+    skill_id: ObjectId
     revision_id: ObjectId
 
 
 class SkillCreate(BaseModel):
-    """The skill's key is the package's SKILL.md name; `name` and `description` default to what it declares."""
+    """`name` and `description` default to what the package's SKILL.md declares."""
 
     model_config = ConfigDict(extra="forbid")
     name: SkillName | None = None
@@ -120,9 +120,9 @@ class SkillRevisionSummary(BaseModel):
 
 
 class Skill(BaseModel):
+    id: str
     organization_id: str
     workspace_id: str
-    key: str
     name: str
     description: str
     labels: dict[str, str]
@@ -138,8 +138,7 @@ class Skill(BaseModel):
 
 class SkillRevision(BaseModel):
     id: str
-    # The key of the skill it is a revision of.
-    skill: str
+    skill_id: str
     workspace_id: str
     number: int
     config: SkillManifest

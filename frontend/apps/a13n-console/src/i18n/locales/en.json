@@ -738,7 +738,7 @@
   "Saved value": "Saved value",
   "Converse base URL": "Converse base URL",
   "Update how this agent appears in your workspace.": "Update how this agent appears in your workspace.",
-  "Change the display name without changing the skill key or its published versions.": "Change the display name without changing the skill key or its published versions.",
+  "Change the display name without changing its published versions or the SKILL.md name agents see.": "Change the display name without changing its published versions or the SKILL.md name agents see.",
   "Publish an updated package as a new version of this skill.": "Publish an updated package as a new version of this skill.",
   "Use a branch, tag, or commit. Leave empty for the default branch.": "Use a branch, tag, or commit. Leave empty for the default branch.",
   "Path to the skill inside the repository. Leave empty for the repository root.": "Path to the skill inside the repository. Leave empty for the repository root.",

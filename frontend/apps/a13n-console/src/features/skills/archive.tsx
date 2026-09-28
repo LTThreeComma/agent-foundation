@@ -14,7 +14,7 @@ import { ErrorToast } from "../../shared/feedback";
 /** Everything needed to reach one published package. */
 export interface RevisionRef {
   id: string;
-  skill: string;
+  skill_id: string;
   workspace_id: string;
 }
 
@@ -26,7 +26,7 @@ export function archiveQuery(
     queryKey: [
       "skills",
       revision.workspace_id,
-      revision.skill,
+      revision.skill_id,
       "archive",
       revision.id,
     ],
@@ -35,10 +35,10 @@ export function archiveQuery(
         data(
           await client
             .workspace(revision.workspace_id)
-            .GET("/api/v1/skills/{key}/revisions/{revision_id}/content", {
+            .GET("/api/v1/skills/{skill_id}/revisions/{revision_id}/content", {
               params: {
                 path: {
-                  key: revision.skill,
+                  skill_id: revision.skill_id,
                   revision_id: revision.id,
                 },
               },

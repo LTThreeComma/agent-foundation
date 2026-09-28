@@ -22,14 +22,14 @@ Every mutable row has a `version` that the database advances on each change of a
 - An update that changes nothing keeps the version and records no audit event.
 - A resource row of an archived workspace refuses every verb but `read` with `disabled` (details `kind: workspace`), as the workspace itself does ([03](03-tenancy.md#authorization)). A connection's `revoke` is offboarding and stays allowed ([Connections](#connections)).
 - Every change records one audit event with action `<kind>.<verb>`, such as `agent.update`, `agent.revision.create`, `model_provider.update` or `connection.authorization.complete`, through the function [03](03-tenancy.md#audit) owns. An update's details name the changed `fields`, never values or credentials.
-- References are validated when written, and live references again when used. A failed check is `invalid_argument` naming the field path. A referenced row the caller cannot read is `not_found` and a disabled one is `disabled`, except inside an agent configuration, where a missing, disabled, archived or unusable reference is `invalid_argument` at its field with the referenced `kind` and `id` (a model's or skill's key); a missing verb stays `forbidden`.
+- References are validated when written, and live references again when used. A failed check is `invalid_argument` naming the field path. A referenced row the caller cannot read is `not_found` and a disabled one is `disabled`, except inside an agent configuration, where a missing, disabled, archived or unusable reference is `invalid_argument` at its field with the referenced `kind` and `id` (a model's key); a missing verb stays `forbidden`.
 - Retired rows stay readable. An archived head is listed with `archived_at` and refuses new runs, revisions and pins; a disabled provider resource, model, template or connection is listed and refuses new use. Disabling or removing a credential can fail later execution; it changes no recorded fact and no staged webhook delivery.
 - `labels` is a string map of at most 32 entries, keys and values at most 128 characters, on agents, skills and environment templates (and on sessions, threads and runs, [05](05-runs.md)). It is edited through the resource's own `PATCH`; lists filter with up to eight `?label=key:value` selectors, all of which must match.
 - Lists are cursor-paged in a stable order ([10](10-api.md#collections)).
 
 ## Keys
 
-Models and skills are what an author names in a configuration, so each has a **key**: it matches `^[a-z0-9][a-z0-9.-]{0,127}$`, is unique in its workspace and never changes. The API addresses them by key alone: their views carry no ID, and paths, ETags, errors and agent configurations name the key. Neither kind is ever deleted, so a key never comes to name another model or skill. Rows keep an internal ID for foreign keys, such as a usage record's model or a revision's skill. Every other resource is addressed by its ID and has no key.
+Only models have a **key**: it matches `^[a-z0-9][a-z0-9.-]{0,127}$`, is unique in its workspace and never changes. A create derives the key from the model's provider type and upstream model name ([models](#models)) unless it passes one, and must pass one when the derived key is taken (`already_exists`). The API addresses a model by key alone: its view carries no ID, and paths, ETags, errors and agent configurations name the key. A model is never deleted, so a key never comes to name another model. Model rows keep an internal ID for foreign keys, such as a usage record's model. Every other resource, skills included, is addressed by its ID and has no key.
 
 ## Revisioned heads
 
@@ -52,9 +52,9 @@ Agents and skills share the head and revision shape and one set of helpers in `r
 - **Revisions.** A revision is immutable by trigger. `number` increments per head under the head's row lock. `config` is the complete validated configuration, and `digest` is the SHA-256 of its canonical JSON. The head's `version` orders every head mutation, publication included, through its ETag ([data conventions](../data-conventions.md#resource-revisions-and-concurrency)).
 - **Publication.** `POST …/revisions` takes the configuration, an optional `note` and `make_default` (default true) and requires `If-Match` on the head. A new revision changes the head's ETag whether or not it becomes the default, and is audited as `<kind>.revision.create` on the head with its `revision_id`. A configuration whose digest equals the head's current default creates nothing, whatever `make_default` says: the request answers 201 with that revision, and the head's version, ETag and audit trail stay unchanged. With `make_default: false`, any other digest creates a revision that is not the default.
 - **Default.** `set-default` (with `If-Match`) repoints the head at one of its revisions, audited as `<kind>.revision.set_default`; repointing at the current default changes nothing.
-- **Reference.** The API addresses an agent by its ID and a skill by its [key](#keys); runs and revisions record revision IDs.
+- **Reference.** The API addresses a head by its ID; runs and revisions record revision IDs.
 - **Archive.** An archived head changes only by `unarchive`: metadata `PATCH`, new revisions and default changes are 409 `conflict` with reason `archived`. A new run naming an archived agent is `disabled`, and a configuration cannot newly pin an archived skill or subagent; a run's override keeps the pins its revision holds without that check.
-- **Lists.** Head lists filter by `label`, `q` (a case-insensitive substring of name, description or a skill's key, with `%` and `_` taken literally) and `archived` (true: only archived; false: only open; omitted: all). Revision lists are newest first.
+- **Lists.** Head lists are ordered by ID and filter by `label`, `q` (a case-insensitive substring of name or description, with `%` and `_` taken literally) and `archived` (true: only archived; false: only open; omitted: all). Revision lists are newest first.
 
 ## Agents
 
@@ -70,7 +70,7 @@ agent_revisions   revision columns; config: AgentConfig
 - `model`: a model key, with `model_settings`, native settings for the model's calling API, and `model_characteristics`, the context characteristics the agent assumes.
 - `instructions`.
 - `toolsets`: the built-in toolsets `files`, `shell`, `web`, `memory`, `assets` and `configuration`, stored normalized against the catalogue `GET /toolsets` serves. Enabled web search and scrape name a web provider resource.
-- `skills`: `{skill, revision_id}` selections, `skill` being a skill key.
+- `skills`: `{skill_id, revision_id}` selections.
 - `connection_tools`: `{connection_id, tools, defer_loading, permission, permissions}` selections ([Connections](#connections)).
 - `client_tools`, whose results a client supplies through resume, and `user_questions`, which offers `ask_user_question`.
 - `subagent_mode` (`inline` or `async`) and named `subagents`: `{agent_id, revision_id, description, context, usage_limits, environment}`. `environment.mode` is `none`, `shared` or `dedicated`, and `dedicated` names a `template_id`.
@@ -89,7 +89,7 @@ Revision creation, `set-default`, duplication and `POST /agents/validate` apply 
 
 01. Rules the configuration obeys on its own: enabled web search and scrape name `provider_id`; client tool names do not collide with built-in tool names, and their parameter schemas are valid, self-contained JSON Schemas; the `review` permission requires a `reviewer`; an async agent's edges set only `usage_limits.request_limit`.
 02. The output schema compiles, and each plugin's installed factory accepts its configuration.
-03. Skill and subagent edges name open heads and revisions of those heads.
+03. Skill and subagent edges name open heads and revisions of those heads, and the pinned skill revisions declare distinct `SKILL.md` names, since the model sees each skill by its name.
 04. The model exists, is enabled and is usable by the author. `model_settings` must match the settings schema of the model's calling API (`providers/model_settings.py`, reached through the registry: the schema `GET /provider-types/model` publishes, [08](08-providers.md#provider-type-descriptions)); the reviewer's `model_settings` is checked against the reviewer model's API as `reviewer.model_settings`.
 05. Each media model is usable and declares the matching `{kind}_understanding` capability.
 06. Each connection selection passes the connection's own check, and the agent declares no more tool permissions than one agent may have.
@@ -104,7 +104,7 @@ An author's references need `read`. A run's override (`options.overrides`, [05](
 
 - `POST /agents` `{name, description, labels, config}` creates the head and revision 1.
 - `POST /agents/validate` `{config, agent_id?}` needs `write`, applies revision validation and writes nothing: 204, or the same `invalid_argument`. `agent_id` names the agent the configuration would become a revision of, so the graph check sees cycles through it.
-- `GET /agents` filters by `label`, `q`, `archived`, `source`, `skill` (a skill key) and `skill_revision_id`.
+- `GET /agents` filters by `label`, `q`, `archived`, `source`, and by `skill_id` and `skill_revision_id`, which keep the agents with a revision that pins them.
 - `PATCH /agents/{agent}` changes `name`, `description` and `labels`.
 - `POST /agents/{agent}/archive` and `/unarchive` take `If-Match`.
 - `POST /agents/{agent}/duplicate` `{name, description, labels, revision_id?}` creates a custom head whose revision 1 copies one revision of an unarchived source, validated again. The avatar is not copied.
@@ -121,13 +121,12 @@ Export and import are Console features: the Console serializes one revision's co
 - A refresh synchronizes the deployment-owned name and description and appends a revision only when the configuration's digest changed. A preparation that changes neither metadata nor configuration leaves the head version unchanged and emits no update audit event.
 - A builtin head refuses metadata and avatar changes, revisions, default changes and archiving (409 `builtin`). It is visible and can be duplicated into a custom agent.
 
-Its tools are the built-in `configuration` toolset, which any agent may enable: `find_resources`, `read_resource` (by a model's or skill's key or any other resource's ID; an agent with its default revision's configuration, or with `revision_id`'s) and `describe_agent_config` read resources the run's principal may read, and `create_agent` and `create_agent_revision` call the same service functions as the API under the run's authority. The write tools default to the `ask` permission, which also keeps a repeated `create_agent`, which makes another agent, from going unseen. How a refusal reaches the model is [05](05-runs.md#execute)'s Service tools rule. There are no drafts and no separate session kind: the conversation is the editing session, and the revision is its result.
+Its tools are the built-in `configuration` toolset, which any agent may enable: `find_resources`, `read_resource` (by a model's key or any other resource's ID; an agent with its default revision's configuration, or with `revision_id`'s) and `describe_agent_config` read resources the run's principal may read, and `create_agent` and `create_agent_revision` call the same service functions as the API under the run's authority. The write tools default to the `ask` permission, which also keeps a repeated `create_agent`, which makes another agent, from going unseen. How a refusal reaches the model is [05](05-runs.md#execute)'s Service tools rule. There are no drafts and no separate session kind: the conversation is the editing session, and the revision is its result.
 
 ## Skills
 
 ```
-skills            head columns + key
-                  UNIQUE (workspace_id, key)
+skills            head columns
 skill_revisions   revision columns + package_ref; config: SkillManifest
 ```
 
@@ -138,11 +137,13 @@ A skill revision is a validated package. Its source is `{kind: upload, upload_id
 
 The package contract: a zip archive with `SKILL.md` at its root or in its only top-level directory; at most 1000 files, 8 MiB per file, 32 MiB expanded, 256 KiB for `SKILL.md` and 1024 bytes per path; no links and no path escaping the root; `__MACOSX/` entries are ignored. The manifest records the name, description, root, files, size, package digest and size, and the source with its resolved commit.
 
-- `POST /skills` `{name?, description?, labels, source}` creates the head and revision 1. The skill's [key](#keys) is the `SKILL.md` name, which must be a valid key (`invalid_argument` on `source`) not yet used in the workspace (`already_exists`). Name and description default to the manifest's.
+The model sees a skill by the `name` its pinned revision's `SKILL.md` declares; the head's `name` is display text. Two skills of a workspace may declare the same name, and a new revision may declare another; only the skill revisions one agent pins must declare distinct names ([validation](#validation)).
+
+- `POST /skills` `{name?, description?, labels, source}` creates the head and revision 1. Name and description default to the manifest's.
 - `POST /skills/validate` `{source}` needs `write`, checks a package exactly as creation does and returns the manifest, staging nothing.
 - `GET /skills` filters by `label`, `q`, `archived` and `source` (`upload` or `github`, the default revision's source). A skill's representation includes `default_revision {id, number, source}`.
 - `PATCH` changes `name`, `description` and `labels`.
-- Revisions: `POST` with a source and `If-Match`, whose `SKILL.md` must keep the skill's name (`invalid_argument` on `source`), list, get, `set-default`, `GET …/revisions/{rev}/content` (the zip) and `GET …/revisions/{rev}/files/{path}` (one file of the package). Both reads serve the bytes as an attachment ([10](10-api.md#representations)).
+- Revisions: `POST` with a source and `If-Match`, list, get, `set-default`, `GET …/revisions/{rev}/content` (the zip) and `GET …/revisions/{rev}/files/{path}` (one file of the package). Both reads serve the bytes as an attachment ([10](10-api.md#representations)).
 
 ## Provider resources
 
@@ -177,7 +178,7 @@ models   (mdl_)
   UNIQUE (workspace_id, key)
 ```
 
-A model is one upstream model served by one model provider of its workspace, addressed by its [key](#keys) (`/models/{key}`). The key defaults to `config.model_name` after its last `/`, lowercased; a create may choose another, such as a shorter alias, and must when the default is not a valid key (`invalid_argument` on `key`). A duplicate key is `already_exists`.
+A model is one upstream model served by one model provider of its workspace, addressed by its [key](#keys) (`/models/{key}`). The key defaults to `{provider type}-{config.model_name}`, lowercased, with every run of characters a key cannot hold replaced by `-` and cut to 128 characters, so `openai` serving `anthropic/Claude Opus 5.1` defaults to `openai-anthropic-claude-opus-5.1`. A create may choose another, such as a shorter alias, and must when the default is taken (`already_exists`).
 
 - `config` holds `model_name`, `model_api`, `characteristics` (context window, modalities and understanding capabilities) and optional `max_tokens`, `temperature` and `top_p`. `model_api` must be one of the provider type's calling APIs (`invalid_argument` on `config.model_api`).
 - `pricing`, when present, prices the model's own calls, whatever `pricing.provider` and `pricing.model` name: they only record where the prices came from, such as the catalog channel and model ID they were copied from.

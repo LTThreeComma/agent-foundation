@@ -11,17 +11,17 @@ export function revisionQuery(client: Client, revision: RevisionRef) {
     queryKey: [
       "skills",
       revision.workspace_id,
-      revision.skill,
+      revision.skill_id,
       "revision",
       revision.id,
     ],
     queryFn: ({ signal }) =>
       client
         .workspace(revision.workspace_id)
-        .GET("/api/v1/skills/{key}/revisions/{revision_id}", {
+        .GET("/api/v1/skills/{skill_id}/revisions/{revision_id}", {
           params: {
             path: {
-              key: revision.skill,
+              skill_id: revision.skill_id,
               revision_id: revision.id,
             },
           },
@@ -43,9 +43,9 @@ export function revisionsQuery(
     queryFn: ({ signal }) =>
       client
         .workspace(workspaceId)
-        .GET("/api/v1/skills/{key}/revisions", {
+        .GET("/api/v1/skills/{skill_id}/revisions", {
           params: {
-            path: { key: skillId },
+            path: { skill_id: skillId },
             query: { cursor },
           },
           signal,

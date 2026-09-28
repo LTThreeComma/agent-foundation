@@ -102,7 +102,7 @@ function ImportForm({
     [receipt, setReceipt] = useState<Schema["SkillManifest"]>();
   // A new version follows the latest one, which leads the first revision page.
   const latest = useQuery({
-    ...revisionsQuery(client, workspace.id, basis?.key ?? ""),
+    ...revisionsQuery(client, workspace.id, basis?.id ?? ""),
     enabled: !!basis,
   }).data?.items[0]?.number;
   const version = !basis ? 1 : latest === undefined ? undefined : latest + 1;
@@ -143,9 +143,9 @@ function ImportForm({
         data(
           await client
             .workspace(workspace.id)
-            .POST("/api/v1/skills/{key}/revisions", {
+            .POST("/api/v1/skills/{skill_id}/revisions", {
               params: {
-                path: { key: basis.key },
+                path: { skill_id: basis.id },
               },
               headers: ifMatch(rowTag(basis)),
               body: { source },
