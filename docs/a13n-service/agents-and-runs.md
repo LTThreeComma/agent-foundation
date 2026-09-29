@@ -320,7 +320,7 @@ A failed or cancelled run never becomes history: continuation uses the last comp
 `GET …/runs/{run_id}` returns the run: `status`, `trigger`, `lineage` (`root`, `continue` or `fork`), `parent_run_id`, the `input` or `resume` that started it, `options`, `environment_mounts`, `memory_mounts`, `pending`, `output`, `failure {code, message}`, `usage_at_seal`, `labels` and timestamps. `output` is the agent's final text, or JSON matching its `output_spec`.
 
 - `GET …/threads/{thread_id}/runs` lists a thread's runs, newest first. A thread's `head_run_id` is its latest completed or waiting run, `current_run_id` its active run.
-- `GET …/runs/{run_id}/items` returns the run's display items (text and reasoning messages, tool calls and observations) with `position` and `complete`. Items of a run that ended while they were in progress read `interrupted`. A display keeps at most 4096 items; `dropped` counts the oldest items it removed beyond that limit.
+- `GET …/runs/{run_id}/items` returns the run's display items (text and reasoning messages, tool calls and observations) with `position`, optional `resume_after`, and `complete`. Items of a run that ended while they were in progress read `interrupted`. A display keeps at most 4096 items; `dropped` counts the oldest items it removed beyond that limit.
 - `GET …/runs/{run_id}/lineage` returns the run and its ancestors, nearest first, across forks.
 - `GET …/runs/{run_id}/attempts` lists attempts with their `start_reason` (`initial`, `recovery` after a lost worker, `handoff` when a worker shuts down) and outcome. A run fails after `max_attempts` attempts that were not handoffs.
 
@@ -344,13 +344,14 @@ curl -N "$A13N_URL/api/v1/threads/$THREAD/stream" -H "Authorization: Bearer $A13
 
 The stream is provisional; the run's items are the durable record. To render a thread:
 
-1. Open the stream, then read `GET …/runs/{run_id}/items` for the active run.
+1. Read `GET …/runs/{run_id}/items` for the active run. When `position` is non-null, open the stream with `?run=<run_id>&position=<position>`. Pass its non-null `resume_after` as the `Last-Event-ID` header. Without a saved position, start retained replay without a cursor.
 2. Apply `delta` frames whose `attempt` and `sequence` come after the items' `position` (`"{attempt}-{sequence}"`).
-3. On `reset` or `gap`, read the items again; on `changed`, read the thread.
+3. On `reset`, discard superseded provisional output and read items again. On `gap`, read items and compare their position with the gap's optional `position`: clear the gap only when the missing range is covered, otherwise await a newer checkpoint or terminal state. On `changed`, read the thread.
+4. Recheck the Run on connection and periodically while it remains active: a Run that ended before subscription may not produce another stream notification. Read its final items once sealed.
 
-The stream carries only live output the items do not cover yet. Consecutive text, reasoning or tool-argument deltas of one message or tool call that arrive within `worker.stream_coalesce_seconds` come as one `delta` whose event carries their text together. After each checkpoint the Service removes the entries its items now cover, once they are `worker.stream_trim_seconds` old; it also caps a stream at about `worker.stream_length` entries and drops it `worker.stream_ttl` seconds after the last output.
+The snapshot's `resume_after` can lag because checkpoints do not wait for Redis writes. With the Run and position supplied, the server filters covered deltas and uses retained hints to seek directly. Missing, expired or incompatible hints fall back to filtered retained replay; they do not by themselves indicate lost output. Keep client deduplication for overlapping delivery. On a network reconnect, retain the display and send its continuously applied position with a matching hint; after a page refresh, load a snapshot first. Never advance that position across a gap. Consecutive text, reasoning or tool-argument deltas of one message or tool call that arrive within `worker.stream_coalesce_seconds` come as one `delta` whose event carries their text together. After each checkpoint the Service removes the entries its items now cover, once they are `worker.stream_trim_seconds` old; it also caps a stream at about `worker.stream_length` entries and drops it `worker.stream_ttl` seconds after the last output.
 
-`delta` and `boundary` frames carry an SSE `id`. Reconnect with the last one in `Last-Event-ID` to continue after it. A connection that starts or resumes after removed entries receives a `gap` first, so reading the items again is always enough to recover. The Service sends a keep-alive comment every 15 seconds and ends the stream when your access to the workspace ends. The frames' JSON Schema is `proto/a13n-service/thread-stream.schema.json`.
+`delta` and `boundary` frames carry an SSE `id`. Readers without a Run/position can reconnect with the last one in `Last-Event-ID`; a missing cursor then reports `gap`. Readers supplying a Run/position instead receive a gap only for a missing required sequence or a transport failure. Reload items and reassess coverage at later boundaries or when the Run seals. The Service sends a keep-alive comment every 15 seconds and ends the stream when your access to the workspace ends. The frames' JSON Schema is `proto/a13n-service/thread-stream.schema.json`.
 
 ## Usage
 
