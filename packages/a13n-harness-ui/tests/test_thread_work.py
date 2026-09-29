@@ -301,3 +301,33 @@ async def test_child_work_counts_and_cleanup_hint_do_not_leak_private_work(
                 assert observed.tasks.total == observed.notes.total == 0
         finally:
             finish.set()
+
+
+async def test_checkpoint_projects_read_model_before_attaching_display(tmp_path, monkeypatch):
+    from a13n_harness_ui import root_execution
+
+    path = configuration(tmp_path)
+    project = root_execution.project_continuation
+    projected = []
+
+    def project_native(continuation):
+        assert "a13n.harness-ui.display-history" not in continuation.harness_state.agent_context_state.entries
+        value = project(continuation)
+        projected.append(value)
+        return value
+
+    async def resolve(self, context, model_id):
+        async def model(messages, info):
+            yield "Retained answer"
+
+        return FunctionModel(stream_function=model)
+
+    monkeypatch.setattr(root_execution, "project_continuation", project_native)
+    monkeypatch.setattr(HarnessUiModelResolver, "__call__", resolve)
+    settings = _settings(tmp_path / "data").model_copy(update={"pricing_auto_update": False})
+    async with open_harness_ui_app(settings, configuration_path=path, host_mode="webui", instrumentation=None) as app:
+        thread = await app.create_thread()
+        receipt = await app.submit_thread(thread_id=thread.thread_id, prompt="Keep the two histories")
+        assert (await app.wait_root_operation(receipt.receipt_id)).status is RootOperationStatus.completed
+    assert len(projected) >= 2  # Before-model and terminal checkpoints.
+    assert projected[-1].latest_activity.text == "Retained answer"

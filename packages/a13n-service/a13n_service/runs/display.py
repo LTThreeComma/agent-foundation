@@ -195,7 +195,7 @@ def _failed_tool_call(source: HarnessStreamEvent[Any]) -> tuple[str, str] | None
 
 
 def _bound_payloads(source: HarnessStreamEvent[Any], event: Event) -> Event:
-    """Cap the payloads the observer retains for the whole attempt; the state keeps them whole.
+    """Cap converted payloads before folding; the state keeps them whole.
 
     One character over the bound survives, so the fold still sees the value was truncated.
     """
@@ -217,7 +217,7 @@ class DisplayFold:
         self.sizes: dict[str, int] = {}
         self.changed: set[str] = set(self.items)
         self.sequence = 0
-        self.observer = HarnessAguiObserver(processor=_bound_payloads)
+        self.observer = HarnessAguiObserver(processor=_bound_payloads, retain_events=False)
         self.assembler = CustomEventAssembler(max_bytes=max_bytes)
         self.arguments: _Arguments | None = None
 

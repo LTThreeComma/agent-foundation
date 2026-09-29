@@ -2,7 +2,7 @@
 
 ## Design Position
 
-`a13n-stream-protocol` is the shared process-local adapter from public Harness stream items to Agent User Interaction Protocol events. One `HarnessAguiObserver` converts the items for one Harness Run, uses standard AG-UI events where their semantics match directly, falls back to `CUSTOM` for every other public observation, applies an optional Host processor, and accumulates the resulting events in observation order. A fresh observer can atomically reconstruct that process-local state by folding a finite Host-supplied history of the same public source items before live observation continues.
+`a13n-stream-protocol` is the shared process-local adapter from public Harness stream items to Agent User Interaction Protocol events. One `HarnessAguiObserver` converts the items for one Harness Run, uses standard AG-UI events where their semantics match directly, falls back to `CUSTOM` for every other public observation, applies an optional Host processor, and by default accumulates the resulting events in observation order. A fresh observer can atomically reconstruct that process-local state by folding a finite Host-supplied history of the same public source items before live observation continues.
 
 The package does not define another execution or lifecycle layer. It does not run or resume an Agent, manufacture missing Harness lifecycle observations, accept application commands, retain or select durable history, assign Host event identities, or own a transport. A Host consumes each live Harness item once, routes each Run to one observer, and decides whether and how to retain source history, persist, broadcast, filter, compact, or render the returned AG-UI events.
 
@@ -53,6 +53,7 @@ class HarnessAguiObserver:
         self,
         *,
         processor: AguiEventProcessor | None = None,
+        retain_events: bool = True,
     ) -> None: ...
 
     @property
@@ -79,6 +80,8 @@ class HarnessAguiObserver:
 
 `event_count` counts accumulated post-processor frames. `snapshot` returns detached frames in the half-open range `[start, stop)`; omission of `stop` uses the current count, and the no-argument call returns all frames. Invalid ranges fail explicitly. A Host can capture the count once and read that fixed prefix in bounded batches while later events accumulate. These positions are local to one observer, not Harness source sequence numbers or Host transport cursors. The Host still owns publication visibility and replay-to-live cutover.
 
+Hosts that consume events directly without observer replay can set `retain_events=False`. Conversion, processor validation, correlation, atomicity, and detached return values stay the same, but no output frames accumulate: `event_count` remains zero and `snapshot()` raises `AguiObservationError`. `resume()` still atomically reconstructs multipart conversion state without retaining its historical output. The remaining accumulation and snapshot descriptions apply to the default retaining mode.
+
 The first successfully observed item binds the observer to the source `thread_id` and `run_id`. Later items must carry the same correlation. A root Run and each exposed child Run therefore use separate observers even when their source items were delivered through one parent Harness stream.
 
 `resume()` is valid only on a fresh, unbound observer. Its `history` is a finite asynchronous iterable containing the exact ordered public source-item prefix selected by the Host for one Harness Run. The Host owns history retention and decoding, cursor and gap semantics, duplicate exclusion, the finite replay boundary, and the subsequent replay-to-live cutover; the observer imports no storage or transport type and does not acknowledge the history source.
@@ -97,8 +100,8 @@ A processor is replay-stable: its result derives only from the supplied source i
 2. convert the source item to one or more AG-UI events;
 3. call the optional processor once for each converted event;
 4. omit only events for which the processor returns `None`, then frame retained oversized custom events;
-5. commit the staged conversion state and accumulate retained events;
-6. return detached copies of the events added by that call.
+5. commit the staged conversion state and, when retention is enabled, accumulate post-processor events;
+6. return detached copies of the events produced by that call.
 
 Without a processor, every converted event is retained unchanged. A replacement must preserve the AG-UI event type and source-derived Thread, Run, message, tool, and lifecycle correlation. A processor cannot turn another observation into a lifecycle event or expand one event into several.
 

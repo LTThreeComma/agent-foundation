@@ -186,7 +186,7 @@ async def test_scan_budget_persists_progress_and_a_stalled_store_uses_retry_budg
 
 async def test_a_failed_publication_cannot_leave_another_write_behind_seal(runtime, tenant, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from a13n_service.infra.errors import ServiceError
-    from a13n_service.runs.attempts import Lease
+    from a13n_service.runs.attempts import AttemptControl, Lease
     from a13n_service.runs.display import Display
 
     started, release = asyncio.Event(), asyncio.Event()
@@ -202,7 +202,9 @@ async def test_a_failed_publication_cannot_leave_another_write_behind_seal(runti
     monkeypatch.setattr(runtime.objects, "put", put)
     lease = Lease("run_test", "rat_test", "thr_test", tenant.organization_id, tenant.workspace_id, 1, "worker", "token")
     state = RunState(harness=HarnessState.new(thread_id=lease.thread_id), seq=1, attempt=1)
-    publishing = asyncio.create_task(checkpoints.publish_checkpoint(runtime, lease, state, Display()))
+    publishing = asyncio.create_task(
+        checkpoints.publish_checkpoint(runtime, lease, state, Display(), control=AttemptControl())
+    )
     try:
         await started.wait()
         await asyncio.sleep(0)

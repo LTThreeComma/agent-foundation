@@ -88,7 +88,7 @@ async def test_object_verification_encodes_payload_once_and_preserves_canonical_
 
     monkeypatch.setattr(objects, "_canonical_json", counted_encode)
     envelope = await store.publish(object_kind=ObjectKind.continuation, object_schema_version="1", payload=payload)
-    assert payload_encodes == 3  # Source, verified staging file, verified published file.
+    assert payload_encodes == 2  # Source and verified staging inode, reused after hard-link publication.
     path = next(layout.objects.rglob("*.json.zst"))
     raw = zstandard.ZstdDecompressor().decompress(path.read_bytes())
     fields = envelope.model_dump(mode="json")
@@ -364,3 +364,38 @@ async def test_default_store_round_trips_continuation_above_previous_limit(tmp_p
     )
     reopened, _ = _object_store(tmp_path)
     assert (await reopened.read(envelope.ref)).payload == payload
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+async def test_publication_verifies_a_target_created_by_a_competing_writer(tmp_path, monkeypatch, corrupt):
+    from a13n_harness_ui.storage import objects
+
+    store, layout = _object_store(tmp_path)
+
+    def competing_link(source, target):
+        # The target appeared after the initial exists check, before link().
+        target.write_bytes(b"corrupt" if corrupt else source.read_bytes())
+        raise FileExistsError(target)
+
+    monkeypatch.setattr(objects.os, "link", competing_link)
+    if corrupt:
+        with pytest.raises(ObjectIntegrityError):
+            await store.publish(object_kind=ObjectKind.continuation, object_schema_version="1", payload={"step": 1})
+    else:
+        value = await store.publish(object_kind=ObjectKind.continuation, object_schema_version="1", payload={"step": 1})
+        assert await store.read(value.ref) == value
+    assert list(layout.staging.iterdir()) == []
+
+
+async def test_corrupt_staging_is_not_published(tmp_path, monkeypatch):
+    store, layout = _object_store(tmp_path)
+    write = store._write_stage
+
+    def corrupt(path, content):
+        write(path, content[:-3])
+
+    monkeypatch.setattr(store, "_write_stage", corrupt)
+    with pytest.raises(ObjectIntegrityError):
+        await store.publish(object_kind=ObjectKind.continuation, object_schema_version="1", payload={"step": 1})
+    assert list(layout.objects.rglob("*.json.zst")) == []
+    assert list(layout.staging.iterdir()) == []

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from hashlib import sha256
 from typing import Any, Self, cast
@@ -58,11 +58,7 @@ class DisplayHistory(BaseModel):
 
     @property
     def completed_responses(self) -> tuple[int, ...]:
-        return tuple(
-            position
-            for position, message in enumerate(self.messages)
-            if isinstance(message, ModelResponse) and (message.metadata or {}).get(_COMPLETED_KEY) is True
-        )
+        return completed_response_positions(self.messages)
 
     @model_validator(mode="after")
     def _valid_positions(self) -> Self:
@@ -80,12 +76,33 @@ def _message_digest(encoded: bytes) -> str:
     return sha256(json.dumps(json.loads(encoded), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def saved_display_history(state: HarnessState) -> DisplayHistory | None:
-    """Read inspection state without changing the continuation's stored schema."""
-    return _read_display_history(state, state.agent_context_state.entries.get(_STATE_KEY))
+def completed_response_positions(messages: Sequence[ModelMessage]) -> tuple[int, ...]:
+    """Read completion markers from an already decoded display history."""
+    return tuple(
+        position
+        for position, message in enumerate(messages)
+        if isinstance(message, ModelResponse) and (message.metadata or {}).get(_COMPLETED_KEY) is True
+    )
 
 
-def _read_display_history(state: HarnessState, entry: CapabilityState | None) -> DisplayHistory | None:
+def saved_display_history(
+    state: HarnessState,
+    *,
+    entries: Mapping[str, CapabilityState] | None = None,
+    model_history: Sequence[ModelMessage] | None = None,
+) -> DisplayHistory | None:
+    """Read inspection state, reusing this state's decoded values when the caller has them."""
+    if entries is None:
+        entries = state.agent_context_state.entries
+    return _read_display_history(state, entries.get(_STATE_KEY), model_history=model_history)
+
+
+def _read_display_history(
+    state: HarnessState,
+    entry: CapabilityState | None,
+    *,
+    model_history: Sequence[ModelMessage] | None = None,
+) -> DisplayHistory | None:
     if entry is None:
         return None
     if entry.version != "1":
@@ -95,7 +112,9 @@ def _read_display_history(state: HarnessState, entry: CapabilityState | None) ->
     # inspection snapshot. Never apply its positional mapping to different input.
     if display.model_history_digest != _message_digest(cast(bytes, state.message_history_json)):
         return None
-    if len(display.model_positions) != len(state.message_history):
+    if model_history is None:
+        model_history = state.message_history
+    if len(display.model_positions) != len(model_history):
         raise ValueError("Display history must map the selected model history")
     return display
 

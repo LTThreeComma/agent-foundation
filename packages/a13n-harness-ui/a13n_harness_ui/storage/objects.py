@@ -305,7 +305,7 @@ class ImmutableObjectStore:
                     "Staged immutable object did not verify to its source envelope.",
                     code="object_staging_mismatch",
                 )
-            return self._publish_stage(stage, envelope)
+            return self._publish_stage(stage, staged)
         finally:
             stage.unlink(missing_ok=True)
 
@@ -319,6 +319,7 @@ class ImmutableObjectStore:
             raise
 
     def _publish_stage(self, stage: Path, envelope: ObjectEnvelope) -> ObjectEnvelope:
+        """Link a verified staging inode; a competing target still requires its own verification."""
         reference = envelope.ref
         target = self._path_for(reference)
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -329,7 +330,9 @@ class ImmutableObjectStore:
         else:
             if os.name != "nt":
                 target.chmod(0o600)
-            published = self._read_path(target)
+            # A successful hard link publishes the same bytes already verified
+            # from staging, not another encoding or copy that needs decoding.
+            published = envelope
         if published.ref != reference:
             raise ObjectIntegrityError(
                 "Published immutable object does not match its expected reference.",

@@ -128,6 +128,7 @@ def test_inspection_reuses_native_history_and_preserves_display_context_split(ki
     from datetime import UTC, datetime
 
     import a13n_harness.state as state_module
+    import a13n_harness_ui.display_history as display_module
     from a13n_harness import HarnessState
     from a13n_harness_ui.display_history import DisplayHistory, DisplayHistoryCollector, with_display_history
     from a13n_harness_ui.storage import ObjectKind, ObjectRef, StoredContinuation, StoredThreadInitialState
@@ -169,11 +170,16 @@ def test_inspection_reuses_native_history_and_preserves_display_context_split(ki
         )
     )
     decode = Mock(wraps=state_module.decode_messages)
+    display_decode = Mock(wraps=display_module.decode_messages)
+    entries = Mock(wraps=state_module.AgentContextStateSnapshot.entries.fget)
     monkeypatch.setattr(state_module, "decode_messages", decode)
+    monkeypatch.setattr(display_module, "decode_messages", display_decode)
+    monkeypatch.setattr(state_module.AgentContextStateSnapshot, "entries", property(entries))
     inspection = build_thread_inspection(thread, stored)
-    # Saved display validation also checks the native mapping once. Projection
-    # itself reuses one decoded native history for context and token metadata.
-    assert decode.call_count == (2 if kind in {"display", "cleared"} else 1)
+    assert decode.call_count == 1  # Mapping validation and projection share native history.
+    assert entries.call_count == 1  # Display and working state share the namespace decode.
+    # Validation and projection each decode display once; completion uses the projected messages.
+    assert display_decode.call_count == (2 if kind in {"display", "cleared"} else 0)
     metadata = ThreadInspection.model_validate_json(inspection.metadata_json)
     assert metadata.context_empty is (kind == "cleared")
     assert metadata.latest_request_tokens == (None if kind == "cleared" else 10)

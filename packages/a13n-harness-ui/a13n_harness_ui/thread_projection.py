@@ -33,6 +33,7 @@ from pydantic_ai.tools import DeferredToolRequests
 from a13n_harness_ui.composition import CompositionAcceptanceService
 from a13n_harness_ui.composition.models import ResolvedRunComposition
 from a13n_harness_ui.conversation import excerpt_text, input_excerpt
+from a13n_harness_ui.display_history import completed_response_positions, saved_display_history
 from a13n_harness_ui.errors import ThreadError
 from a13n_harness_ui.mcp_apps.models import AppReference
 from a13n_harness_ui.mcp_apps.snapshots import app_references
@@ -695,14 +696,19 @@ def build_thread_inspection(thread: Thread, stored: StoredContinuation | StoredT
     state = stored.harness_state
     if state.thread_id != thread.thread_id:
         raise ThreadError("Thread state belongs to another Thread.", code="thread_continuation_incompatible")
-    display = stored.display_history if isinstance(stored, StoredContinuation) else None
     model_history = state.message_history
+    entries = state.agent_context_state.entries
+    display = (
+        saved_display_history(state, entries=entries, model_history=model_history)
+        if isinstance(stored, StoredContinuation)
+        else None
+    )
     history = display.messages if display is not None else model_history
-    completed = display.completed_responses if display is not None else ()
+    completed = completed_response_positions(history) if display is not None else ()
     continuation_id = thread.continuation.logical_digest if thread.continuation else None
     notes = NotePage(continuation_id=continuation_id)
     tasks = TaskPage(continuation_id=continuation_id)
-    entry = state.agent_context_state.entries.get(WORKING_STATE_CAPABILITY_ID)
+    entry = entries.get(WORKING_STATE_CAPABILITY_ID)
     if entry is not None and continuation_id is not None:
         working = WorkingState.model_validate(entry.data)
         tasks, notes = project_working_state(working, continuation_id)

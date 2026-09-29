@@ -1096,3 +1096,51 @@ def test_steering_request_start_before_previous_part_end_preserves_message_ident
     assert first[0].message_id != second[0].message_id
     starts = [event.message_id for event in observer.snapshot() if isinstance(event, TextMessageStartEvent)]
     assert len(starts) == len(set(starts)) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("retain_events", [True, False])
+async def test_event_retention_does_not_change_conversion_resume_or_return_isolation(retain_events):
+    reference = HarnessAguiObserver()
+    observer = HarnessAguiObserver(retain_events=retain_events)
+    start = _event(0, PartStartEvent(index=0, part=TextPart("hello")))
+    reference.observe(start)
+    await observer.resume(_history(start))
+    for sequence in range(1, 101):
+        source = _event(sequence, PartDeltaEvent(index=0, delta=TextPartDelta(content_delta=" world")))
+        expected = reference.observe(source)
+        actual = observer.observe(source)
+        assert actual == expected
+        actual[0].delta = "mutated by the caller"
+    source = _event(101, PartEndEvent(index=0, part=TextPart("hello" + " world" * 100)))
+    assert observer.observe(source) == reference.observe(source)
+    assert observer.thread_id == reference.thread_id and observer.run_id == reference.run_id
+    if retain_events:
+        assert observer.snapshot() == reference.snapshot()
+    else:
+        assert observer.event_count == 0
+        with pytest.raises(AguiObservationError, match="retention is disabled"):
+            observer.snapshot()
+    with pytest.raises(AguiObservationError, match="correlation"):
+        observer.observe(_event(102, FinalResultEvent(tool_name=None, tool_call_id=None), run_id="different"))
+
+
+@pytest.mark.parametrize("retain_events", [True, False])
+def test_retention_modes_keep_processor_failure_atomic_and_custom_results_detached(retain_events):
+    reject = True
+
+    def processor(source, event):
+        if reject:
+            raise RuntimeError("rejected")
+        return event
+
+    observer = HarnessAguiObserver(processor=processor, retain_events=retain_events)
+    source = _event(0, HarnessExtensionEvent(kind="diagnostic", payload={"nested": ["original"]}))
+    with pytest.raises(RuntimeError, match="rejected"):
+        observer.observe(source)
+    assert observer.thread_id is None and observer.event_count == 0
+    reject = False
+    actual = observer.observe(source)
+    assert actual == HarnessAguiObserver().observe(source)
+    actual[0].value.clear()
+    assert observer.observe(source) == HarnessAguiObserver().observe(source)

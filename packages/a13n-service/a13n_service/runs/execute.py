@@ -518,6 +518,7 @@ class _Attempt:
                 resume_input_consumed=self.plan.resume_input is None or self.offers.requested,
             ),
             display,
+            control=self.control,
         )
         worker = self.runtime.settings.worker
         steers: list[Offered] = []
@@ -648,7 +649,7 @@ class _Attempt:
         self.fold.interrupt()
         display = None
         if not self._near_deadline():
-            display = await checkpoints.publish_display(self.runtime, self.lease, self._display())
+            display = await checkpoints.publish_display(self.runtime, self.lease, self._display(), control=self.control)
         await seal_attempt(self.runtime, self.lease, outcome, display=display)
 
     def _display(self) -> Display:

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Literal
 
 import anyio
 from a13n_harness import HarnessState
+from anyio import to_thread
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from sqlalchemy import ColumnElement, and_, exists, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +26,7 @@ from a13n_service.infra.errors import conflict
 from a13n_service.infra.objects.interface import ObjectRef, ObjectStore, read
 from a13n_service.infra.outbox import Claim, OutboxKind, OutboxRow, enqueue, settle
 from a13n_service.runs import inbox
-from a13n_service.runs.attempts import Lease, LeaseLost
+from a13n_service.runs.attempts import AttemptControl, Lease, LeaseLost
 from a13n_service.runs.display import Display, StreamPosition
 from a13n_service.runs.tables import AttemptRow, RunRow
 from a13n_service.runs.usage import UsageReport, ingest
@@ -119,7 +120,8 @@ async def load_state(
         return None
     if pointer.format != FORMAT:
         raise conflict("run", run_id, "checkpoint_incompatible")
-    return RunState.model_validate_json(await read(objects, _ref(organization_id, run_id, "state", pointer)))
+    data = await read(objects, _ref(organization_id, run_id, "state", pointer))
+    return await to_thread.run_sync(RunState.model_validate_json, data)
 
 
 async def load_display(
@@ -127,7 +129,8 @@ async def load_display(
 ) -> Display | None:
     if pointer is None:
         return None
-    return Display.model_validate_json(await read(objects, _ref(organization_id, run_id, "display", pointer)))
+    data = await read(objects, _ref(organization_id, run_id, "display", pointer))
+    return await to_thread.run_sync(Display.model_validate_json, data)
 
 
 class Committed(_Frozen):
@@ -145,31 +148,46 @@ class Committed(_Frozen):
         )
 
 
-async def publish_display(runtime: Runtime, lease: Lease, display: Display) -> DisplayPointer:
-    ref = await publish(
-        runtime.objects, lease.organization_id, lease.run_id, "display", display.model_dump_json().encode()
-    )
+async def publish_display(
+    runtime: Runtime, lease: Lease, display: Display, *, control: AttemptControl
+) -> DisplayPointer:
+    data = await to_thread.run_sync(lambda: display.model_dump_json().encode())
+    if control.expiring(runtime.settings.objects.timeout):
+        raise LeaseLost()
+    ref = await publish(runtime.objects, lease.organization_id, lease.run_id, "display", data)
     return DisplayPointer(digest=ref.digest, size=ref.size, format=FORMAT, position=display.position)
 
 
-async def publish_checkpoint(runtime: Runtime, lease: Lease, state: RunState, display: Display) -> Committed:
-    """Write the checkpoint's objects outside any session; `commit` makes them the run's checkpoint."""
-    state_ref, display_pointer = await asyncio.gather(
-        publish(runtime.objects, lease.organization_id, lease.run_id, "state", state.model_dump_json().encode()),
-        publish_display(runtime, lease, display),
+async def publish_checkpoint(
+    runtime: Runtime, lease: Lease, state: RunState, display: Display, *, control: AttemptControl
+) -> Committed:
+    """Encode stable boundary snapshots off-loop, then publish outside any session."""
+    # The attempt has flushed its coalescer and pauses folding until publication
+    # completes. Use the bounded AnyIO worker pool without abandoning its work.
+    state_data, display_data = await to_thread.run_sync(
+        lambda: (state.model_dump_json().encode(), display.model_dump_json().encode())
+    )
+    # Waiting for CPU capacity can outlive the caller's initial lease check.
+    if control.expiring(runtime.settings.objects.timeout):
+        raise LeaseLost()
+    state_ref, display_ref = await asyncio.gather(
+        publish(runtime.objects, lease.organization_id, lease.run_id, "state", state_data),
+        publish(runtime.objects, lease.organization_id, lease.run_id, "display", display_data),
         return_exceptions=True,
     )
     # Finish both writes before a failure can seal and reclaim the prefix. Ordinary gather would let the
     # other write publish an orphan after that final scan had already completed.
     if isinstance(state_ref, BaseException):
         raise state_ref
-    if isinstance(display_pointer, BaseException):
-        raise display_pointer
+    if isinstance(display_ref, BaseException):
+        raise display_ref
     return Committed(
         state=StatePointer(
             digest=state_ref.digest, size=state_ref.size, format=FORMAT, seq=state.seq, attempt=state.attempt
         ),
-        display=display_pointer,
+        display=DisplayPointer(
+            digest=display_ref.digest, size=display_ref.size, format=FORMAT, position=display.position
+        ),
     )
 
 

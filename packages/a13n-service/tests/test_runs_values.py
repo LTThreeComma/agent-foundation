@@ -123,3 +123,32 @@ def test_public_pending_preserves_approval_details_without_exposing_call_metadat
     assert public.calls[0].arguments == {"invoice": 7}
     assert "internal" not in public.model_dump_json() and "tool/private" not in public.model_dump_json()
     assert native.metadata["review"]["internal"] == {"retained": True}
+
+
+def test_display_fold_does_not_retain_observer_frames_and_keeps_the_same_snapshot():
+    from a13n_harness import HarnessEvent
+    from a13n_service.runs.display import _bound_payloads
+    from a13n_stream_protocol import HarnessAguiObserver
+    from pydantic_ai.messages import PartDeltaEvent, PartEndEvent, PartStartEvent, TextPart, TextPartDelta
+
+    fold = DisplayFold("run_test", Display(), attempt=1, max_bytes=65536)
+    reference = DisplayFold("run_test", Display(), attempt=1, max_bytes=65536)
+    reference.observer = HarnessAguiObserver(processor=_bound_payloads)
+    events = [PartStartEvent(index=0, part=TextPart("start"))]
+    events.extend(PartDeltaEvent(index=0, delta=TextPartDelta(content_delta=" text")) for _ in range(1000))
+    events.append(PartEndEvent(index=0, part=TextPart("start" + " text" * 1000)))
+    for sequence, event in enumerate(events):
+        source = HarnessEvent(
+            thread_id="thr_test",
+            run_id="run_test",
+            sequence=sequence,
+            occurred_at=datetime(2026, 9, 26, tzinfo=UTC),
+            event=event,
+        )
+        actual = fold.events(source)
+        assert actual == reference.events(source)
+        fold.fold(actual, source)
+        reference.fold(actual, source)
+    assert fold.snapshot() == reference.snapshot()
+    assert fold.observer.event_count == 0
+    assert reference.observer.event_count > 1000

@@ -784,17 +784,19 @@ class RootRunExecutor:
                 harness_release=harness_version,
                 run_composition=composition,
                 memory_cursors=dict(memory_positions or {}),
-                harness_state=with_display_history(
-                    state, display.capture(state.message_history, completed=completed_run_id is not None)
-                )
-                if display is not None
-                else state,
+                harness_state=state,
                 excerpt=excerpt,
                 deferred_requests=deferred,
                 accepted_input=StoredDeferredInput.capture(accepted, state),
                 created_at=datetime.now(UTC),
             )
-            return continuation, project_continuation(continuation)
+            # Goal/activity use native state, not the UI archive. Project them
+            # before attachment so they never decode that large namespace.
+            read_model = project_continuation(continuation)
+            if display is not None:
+                captured = display.capture(state.message_history, completed=completed_run_id is not None)
+                continuation = continuation.model_copy(update={"harness_state": with_display_history(state, captured)})
+            return continuation, read_model
 
         try:
             # The request checkpoint joins this work before model execution or
