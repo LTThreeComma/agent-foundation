@@ -69,7 +69,7 @@ export function LinkedMediaPreview({ path }: { path: string }) {
         retry={() => setAttempt((value) => value + 1)}
       />
       {file &&
-        (file.entry.size > MAX_MEDIA_BYTES ? (
+        (kind === "image" && file.entry.size > MAX_MEDIA_BYTES ? (
           <p>
             Preview supports files up to 10 MiB. Open the original file to
             inspect it.

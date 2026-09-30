@@ -24,6 +24,7 @@ import {
 } from "./buffer";
 import { CaptureContext, downloadBlob } from "./capture";
 import { FileMedia } from "./file-media";
+import { downloadFile, fileTransfer } from "./file-transfer";
 import { mediaKind, MAX_MEDIA_BYTES } from "./media-kind";
 import styles from "./native.module.css";
 
@@ -42,7 +43,8 @@ export function FileView({
   line?: number;
   onBufferChange?: () => void;
 }) {
-  const { client, fetch } = useTransport();
+  const transport = useTransport();
+  const { client } = transport;
   const buffers = useContext(FileBuffers);
   const [, render] = useReducer((value: number) => value + 1, 0);
   const [error, setError] = useState<unknown>(null);
@@ -142,12 +144,13 @@ export function FileView({
   const download = async () => {
     setError(null);
     try {
-      const query = new URLSearchParams({
+      const access = await fileTransfer(
+        transport,
         path,
-        expected_revision: buffer.base.entry.revision,
-      });
-      const response = await fetch(`/api/host/files/content?${query}`);
-      downloadBlob(await response.blob(), basename(path));
+        buffer.base.entry.revision,
+        "download",
+      );
+      downloadFile(access.url);
     } catch (failure) {
       setError(failure);
     }
@@ -224,7 +227,7 @@ export function FileView({
             variant="outline"
             size="sm"
             onClick={() => void download()}
-            disabled={buffer.base.entry.size > 10 * 1024 * 1024}
+            disabled={read.isFetching || !!read.error}
           >
             <DownloadSimple />
             Download
@@ -423,7 +426,7 @@ export function FileView({
           </div>
         )
       ) : media ? (
-        buffer.base.entry.size <= MAX_MEDIA_BYTES ? (
+        media !== "image" || buffer.base.entry.size <= MAX_MEDIA_BYTES ? (
           <FileMedia
             key={`${path}:${buffer.base.entry.revision}:${imageAttempt}`}
             path={path}
@@ -433,12 +436,10 @@ export function FileView({
           />
         ) : (
           <div className={styles.empty}>
-            <h3>
-              {media === "image" ? "Image" : "Media"} exceeds the preview limit
-            </h3>
+            <h3>Image exceeds the preview limit</h3>
             <p>
-              Media previews and downloads support up to 10 MiB. Use another
-              native workflow for larger files.
+              Image previews support up to 10 MiB. Download the original to
+              inspect it.
             </p>
           </div>
         )
@@ -451,8 +452,8 @@ export function FileView({
           </h3>
           <p>
             Only complete, NUL-free UTF-8 up to 512 KiB is editable here.
-            Downloads and whole-file captures support up to 10 MiB; larger files
-            need another native workflow.
+            Uploads and whole-file captures support up to 10 MiB. Download the
+            original to inspect larger files.
           </p>
         </div>
       )}

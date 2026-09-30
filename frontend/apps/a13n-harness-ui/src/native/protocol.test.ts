@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { open, writeFile } from "node:fs/promises";
 import { startApp } from "../../tests/app-fixture";
 import { createTransport, result, type Transport } from "../transport/client";
 import { FileBuffer, joinPath } from "./buffer";
 import { captureSource } from "./capture";
+import { fileTransfer } from "./file-transfer";
 import { ThreadDraft, values } from "../conversations/draft";
 import { submitDraft } from "../conversations/composer";
 
@@ -29,6 +31,142 @@ const read = (path: string) =>
       params: { query: { path } },
     }),
   );
+
+it("streams large reviewed media with native ranges while keeping file access scoped and captures bounded", async () => {
+  const path = joinPath(app.native_root, "streamed.mp4");
+  const size = 15_047_567;
+  const file = await open(path, "w");
+  try {
+    await file.truncate(size);
+    await file.write(Buffer.from("HEAD"), 0, 4, 0);
+    await file.write(Buffer.from("TAIL"), 0, 4, size - 4);
+  } finally {
+    await file.close();
+  }
+  const reviewed = await read(path);
+  const access = await fileTransfer(
+    transport,
+    path,
+    reviewed.entry.revision,
+    "media",
+  );
+  const url = new URL(access.url, app.origin);
+  expect(url.searchParams.has("key")).toBe(false);
+  expect(
+    (
+      await fetch(new URL("/api/host/files/transfers", app.origin), {
+        method: "POST",
+        body: "{}",
+      })
+    ).status,
+  ).toBe(401);
+  expect(
+    (
+      await fetch(
+        new URL(
+          "/api/host/files/content?path=" + encodeURIComponent(path),
+          app.origin,
+        ),
+      )
+    ).status,
+  ).toBe(401);
+  const first = await fetch(url, { headers: { Range: "bytes=0-3" } });
+  expect(first.status).toBe(206);
+  expect(first.headers.get("content-range")).toBe(`bytes 0-3/${size}`);
+  expect(first.headers.get("content-type")).toBe("video/mp4");
+  expect(first.headers.get("content-disposition")).toMatch(/^inline;/);
+  expect(first.headers.get("cache-control")).toBe("no-store");
+  expect(await first.text()).toBe("HEAD");
+  const tail = await fetch(url, { headers: { Range: "bytes=-4" } });
+  expect(tail.status).toBe(206);
+  expect(await tail.text()).toBe("TAIL");
+  const seek = await fetch(url, { headers: { Range: `bytes=${size - 4}-` } });
+  expect(seek.status).toBe(206);
+  expect(await seek.text()).toBe("TAIL");
+  const head = await fetch(url, {
+    method: "HEAD",
+    headers: { Range: "bytes=0-3" },
+  });
+  expect(head.status).toBe(200);
+  expect(head.headers.get("content-length")).toBe(String(size));
+  expect(head.headers.get("etag")).toBe(`"${reviewed.entry.revision}"`);
+  expect(await head.text()).toBe("");
+  const unsatisfiable = await fetch(url, {
+    headers: { Range: `bytes=${size}-` },
+  });
+  expect(unsatisfiable.status).toBe(416);
+  expect(unsatisfiable.headers.get("content-range")).toBe(`bytes */${size}`);
+  const conditional = await fetch(url, {
+    headers: { Range: "bytes=0-3", "If-Range": '"other-revision"' },
+  });
+  expect(conditional.status).toBe(200);
+  expect(conditional.headers.get("content-length")).toBe(String(size));
+  await conditional.body?.cancel();
+  expect(
+    (await fetch(url, { headers: { Origin: "https://untrusted.invalid" } }))
+      .status,
+  ).toBe(403);
+  expect((await fetch(url, { method: "PUT" })).status).toBe(401);
+  const token = url.searchParams.get("token")!;
+  expect(
+    (
+      await fetch(
+        new URL(
+          `/api/host/files?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token)}`,
+          app.origin,
+        ),
+      )
+    ).status,
+  ).toBe(401);
+  const tampered = new URL(url);
+  tampered.searchParams.set("token", token + "x");
+  expect((await fetch(tampered)).status).toBe(401);
+  const download = await fileTransfer(
+    transport,
+    path,
+    reviewed.entry.revision,
+    "download",
+  );
+  const bytes = await fetch(new URL(download.url, app.origin));
+  expect(bytes.headers.get("content-type")).toBe("application/octet-stream");
+  expect(bytes.headers.get("content-disposition")).toMatch(/^attachment;/);
+  let received = 0;
+  const reader = bytes.body!.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.length;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  expect(received).toBe(size);
+  const raw = await transport.fetch(
+    `/api/host/files/content?${new URLSearchParams({ path, expected_revision: reviewed.entry.revision })}`,
+    {
+      headers: { Range: "bytes=-4" },
+    },
+  );
+  expect(raw.status).toBe(206);
+  expect(await raw.text()).toBe("TAIL");
+  const threadId = (
+    await result(transport.client.POST("/api/threads", { body: {} }))
+  ).thread_id;
+  await expect(
+    captureSource(transport, threadId, { file: reviewed }),
+  ).rejects.toMatchObject({ status: 413 });
+  await writeFile(path, "changed after review");
+  expect((await fetch(url, { method: "HEAD" })).status).toBe(409);
+  await expect(
+    fileTransfer(transport, path, reviewed.entry.revision, "media"),
+  ).rejects.toMatchObject({ status: 409 });
+  const html = joinPath(app.native_root, "page.html");
+  await writeFile(html, "<script>active content</script>");
+  await expect(
+    fileTransfer(transport, html, (await read(html)).entry.revision, "media"),
+  ).rejects.toMatchObject({ status: 400 });
+});
 
 it("real App file revisions, raw transfers, paging, moves and deletion preserve native preconditions", async () => {
   const directory = app.native_root;

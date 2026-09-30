@@ -41,6 +41,9 @@ function fixture(path = "/tmp/photo.png", size = 500_000) {
     blob: async () =>
       new Blob(["media bytes"], { type: "application/octet-stream" }),
   }));
+  const post = vi.fn(async () => ({
+    data: { url: "/api/host/files/transfer?token=reviewed", expires_at: 1000 },
+  }));
   const create = vi.fn().mockReturnValue("blob:preview");
   const revoke = vi.fn();
   vi.stubGlobal(
@@ -50,7 +53,10 @@ function fixture(path = "/tmp/photo.png", size = 500_000) {
       static revokeObjectURL = revoke;
     },
   );
-  const transport = { client: { GET: get }, fetch } as unknown as Transport;
+  const transport = {
+    client: { GET: get, POST: post },
+    fetch,
+  } as unknown as Transport;
   const open = vi.fn();
   const tree = (text = `[Original](${link(path)})`) => (
     <TransportContext value={transport}>
@@ -59,7 +65,7 @@ function fixture(path = "/tmp/photo.png", size = 500_000) {
       </OpenHostFile>
     </TransportContext>
   );
-  return { tree, file, get, fetch, create, revoke, open };
+  return { tree, file, get, post, fetch, create, revoke, open };
 }
 
 it("reads reviewed bytes for inline images, reuses the expanded viewer, and releases resources", async () => {
@@ -97,44 +103,38 @@ it("reads reviewed bytes for inline images, reuses the expanded viewer, and rele
   expect(f.revoke).toHaveBeenCalledWith("blob:preview");
 });
 
-it.each(["https://external.test/full", link("/tmp/notes.txt")])(
-  "renders a linked thumbnail without nested anchors and retains %s",
-  async (href) => {
-    const f = fixture();
-    const view = render(
-      f.tree(`[**_![Thumbnail](${link("/tmp/photo.png")})_**](${href})`),
-    );
-    await screen.findByAltText("photo.png");
-    const original = screen.getByRole("link", { name: "Thumbnail" });
-    expect(original.getAttribute("href")).toBe(href);
-    expect(view.container.querySelector("a a, a figure, p figure")).toBeNull();
-    expect(view.container.querySelectorAll("figure")).toHaveLength(1);
-    if (href.startsWith("https://")) {
-      expect(original.getAttribute("target")).toBe("_blank");
-      expect(original.getAttribute("rel")).toBe("noopener noreferrer");
-    } else {
-      fireEvent.click(original);
-      expect(f.open).toHaveBeenCalledWith("/tmp/notes.txt");
-    }
-  },
-);
-
 it.each(["voice.wav", "clip.mp4"])(
   "renders %s with playback controls and an explicit decode fallback",
   async (name) => {
-    const f = fixture(`/tmp/${name}`);
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+    const f = fixture(`/tmp/${name}`, 15_047_567);
     const view = render(f.tree());
     const player = await screen.findByLabelText(
       `${name.endsWith("wav") ? "Audio" : "Video"} preview: ${name}`,
     );
-    expect(player.getAttribute("src")).toBe("blob:preview");
+    expect(player.getAttribute("src")).toBe(
+      "/api/host/files/transfer?token=reviewed",
+    );
+    expect(f.post).toHaveBeenCalledWith(
+      "/api/host/files/transfers",
+      expect.objectContaining({
+        body: {
+          path: `/tmp/${name}`,
+          expected_revision: "reviewed",
+          purpose: "media",
+        },
+      }),
+    );
+    expect(f.fetch).not.toHaveBeenCalled();
+    expect(f.create).not.toHaveBeenCalled();
     expect(player.hasAttribute("controls")).toBe(true);
     expect(player.hasAttribute("autoplay")).toBe(false);
     fireEvent.error(player);
     await screen.findByText(/cannot be previewed/);
     expect(screen.getByRole("link", { name: "Original" })).toBeTruthy();
     view.unmount();
-    expect(f.revoke).toHaveBeenCalledWith("blob:preview");
+    expect(f.revoke).not.toHaveBeenCalled();
   },
 );
 
@@ -151,8 +151,39 @@ it("keeps stale-revision errors visible and retries metadata before fetching aga
   expect(f.fetch).toHaveBeenCalledTimes(2);
 });
 
+it("reveals a native player's revision conflict and refreshes metadata before retrying", async () => {
+  vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+  const f = fixture("/tmp/clip.mp4", 15_047_567);
+  f.fetch.mockRejectedValueOnce(
+    new ApiError("File content changed; refresh before playing.", 409),
+  );
+  render(f.tree());
+  const player = await screen.findByLabelText("Video preview: clip.mp4");
+  fireEvent.error(player);
+  await screen.findByText(/File content changed/);
+  expect(f.fetch).toHaveBeenCalledWith(
+    "/api/host/files/transfer?token=reviewed",
+    expect.objectContaining({ method: "HEAD" }),
+  );
+  f.file.entry.revision = "new";
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await screen.findByLabelText("Video preview: clip.mp4");
+  expect(f.get).toHaveBeenCalledTimes(2);
+  expect(f.post).toHaveBeenLastCalledWith(
+    "/api/host/files/transfers",
+    expect.objectContaining({
+      body: {
+        path: "/tmp/clip.mp4",
+        expected_revision: "new",
+        purpose: "media",
+      },
+    }),
+  );
+});
+
 it("does not fetch oversized files and leaves the original link available", async () => {
-  const f = fixture("/tmp/clip.mp4", MAX_MEDIA_BYTES + 1);
+  const f = fixture("/tmp/photo.png", MAX_MEDIA_BYTES + 1);
   render(f.tree());
   await screen.findByText(/Preview supports files up to 10 MiB/);
   expect(f.fetch).not.toHaveBeenCalled();

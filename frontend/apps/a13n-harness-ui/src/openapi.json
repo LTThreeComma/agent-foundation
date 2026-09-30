@@ -1623,6 +1623,61 @@
           }
         }
       },
+      "head": {
+        "summary": "Download Host File",
+        "operationId": "download_host_file_api_host_files_content_head",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "title": "Path"
+            }
+          },
+          {
+            "name": "expected_revision",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expected Revision"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "get": {
         "summary": "Download Host File",
         "operationId": "download_host_file_api_host_files_content_get",
@@ -1654,6 +1709,108 @@
                 }
               ],
               "title": "Expected Revision"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/host/files/transfers": {
+      "post": {
+        "summary": "Host File Transfer",
+        "operationId": "host_file_transfer_api_host_files_transfers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileTransferRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileTransferAccess"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/host/files/transfer": {
+      "head": {
+        "summary": "Transfer Host File",
+        "operationId": "transfer_host_file_api_host_files_transfer_head",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 32768,
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "Transfer Host File",
+        "operationId": "transfer_host_file_api_host_files_transfer_get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 32768,
+              "title": "Token"
             }
           }
         ],
@@ -9720,6 +9877,25 @@
         ],
         "title": "FileText"
       },
+      "FileTransferAccess": {
+        "properties": {
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "expires_at": {
+            "type": "integer",
+            "title": "Expires At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "url",
+          "expires_at"
+        ],
+        "title": "FileTransferAccess"
+      },
       "GitChange": {
         "properties": {
           "path": {
@@ -17276,6 +17452,38 @@
           "expected_revision"
         ],
         "title": "FileDeleteRequest"
+      },
+      "FileTransferRequest": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Path"
+          },
+          "expected_revision": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Expected Revision"
+          },
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "download",
+              "media"
+            ],
+            "title": "Purpose"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path",
+          "expected_revision",
+          "purpose"
+        ],
+        "title": "FileTransferRequest"
       },
       "FileCaptureRequest": {
         "additionalProperties": false,

@@ -12,9 +12,9 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, BinaryIO, Literal
 
-from anyio import Lock, to_thread
+from anyio import CancelScope, Lock, to_thread
 from pydantic import Field, model_validator
 
 from a13n_harness_ui.errors import HarnessUiError
@@ -25,6 +25,7 @@ from a13n_harness_ui.thread_files import MAX_ATTACHMENT_BYTES, ThreadAttachment
 MAX_TEXT_BYTES = 512 * 1024
 MAX_DIRECTORY_ENTRIES = 10_000
 MAX_DELETE_ENTRIES = 10_000
+FILE_CHUNK_BYTES = 256 * 1024
 NativePath = Annotated[str, Field(min_length=1, max_length=4096)]
 Revision = Annotated[str, Field(min_length=1, max_length=128)]
 
@@ -112,6 +113,44 @@ class FileSnapshot:
     data: bytes
 
 
+@dataclass(slots=True)
+class FileStream:
+    """An owned regular-file handle, checked around each bounded read."""
+
+    entry: FileEntry
+    resolved_path: Path
+    stream: BinaryIO
+    changed_ns: int
+
+    async def close(self) -> None:
+        with CancelScope(shield=True):
+            await to_thread.run_sync(self.stream.close)
+
+    def check(self) -> None:
+        info = os.fstat(self.stream.fileno())
+        try:
+            named_revision = _entry(self.resolved_path).revision
+        except FileNotFoundError:
+            named_revision = None
+        if (
+            _revision(info) != self.entry.revision
+            or info.st_ctime_ns != self.changed_ns
+            or named_revision != self.entry.revision
+        ):
+            raise _error("conflict", "File content changed; refresh before playing or downloading.")
+
+    def read(self, offset: int, size: int) -> bytes:
+        if not 0 <= size <= FILE_CHUNK_BYTES or offset < 0:
+            raise ValueError("File stream reads must be bounded and nonnegative.")
+        self.check()
+        self.stream.seek(offset)
+        data = self.stream.read(size)
+        self.check()
+        if len(data) != min(size, max(0, self.entry.size - offset)):
+            raise _error("conflict", "File changed during transfer; refresh before retrying.")
+        return data
+
+
 @dataclass(frozen=True, slots=True)
 class SelectedFile:
     source: FileContextSource
@@ -177,32 +216,38 @@ def _expect(path: Path, revision: str | None) -> FileEntry | None:
     return entry
 
 
-def _snapshot(request: FileReadRequest, limit: int) -> FileSnapshot:
+def _open_stream(request: FileReadRequest) -> FileStream:
     path = _path(request.path).resolve(strict=True)
     entry = _entry(path)
     if entry.kind != "file":
         raise _error("type_invalid", "Only regular files support content operations.")
     if request.expected_revision is not None and request.expected_revision != entry.revision:
         raise _error("conflict", "File content changed; refresh before selecting or downloading.")
-    if entry.size > limit:
-        raise _error("too_large", f"File exceeds the {limit}-byte transfer limit.")
     # Nonblocking open prevents a concurrent FIFO substitution from blocking a worker.
     fd = os.open(path, os.O_RDONLY | (os.O_NONBLOCK | os.O_NOFOLLOW if os.name == "posix" else 0))
-    with os.fdopen(fd, "rb") as stream:
+    stream = os.fdopen(fd, "rb")
+    try:
         before = os.fstat(stream.fileno())
         if not stat.S_ISREG(before.st_mode) or _revision(before) != entry.revision:
             raise _error("conflict", "File changed while opening it.")
+        opened = FileStream(entry, path, stream, before.st_ctime_ns)
+        opened.check()
+        return opened
+    except BaseException:
+        stream.close()
+        raise
+
+
+def _snapshot(request: FileReadRequest, limit: int) -> FileSnapshot:
+    opened = _open_stream(request)
+    with opened.stream as stream:
+        if opened.entry.size > limit:
+            raise _error("too_large", f"File exceeds the {limit}-byte transfer limit.")
         data = stream.read(limit + 1)
-        after = os.fstat(stream.fileno())
+        opened.check()
     if len(data) > limit:
         raise _error("too_large", f"File exceeds the {limit}-byte transfer limit.")
-    if (
-        _revision(after) != entry.revision
-        or after.st_ctime_ns != before.st_ctime_ns
-        or _entry(path).revision != entry.revision
-    ):
-        raise _error("conflict", "File changed while reading it; no snapshot was returned.")
-    return FileSnapshot(entry, str(path), data)
+    return FileSnapshot(opened.entry, str(opened.resolved_path), data)
 
 
 def _rename_no_replace(source: Path, destination: Path) -> None:
@@ -321,6 +366,12 @@ class HostFiles:
 
     async def download(self, request: FileReadRequest) -> FileSnapshot:
         return await self._run(lambda: _snapshot(request, MAX_ATTACHMENT_BYTES))
+
+    async def open_stream(self, request: FileReadRequest) -> FileStream:
+        return await self._run(lambda: _open_stream(request))
+
+    async def read_stream(self, opened: FileStream, offset: int, size: int) -> bytes:
+        return await self._run(lambda: opened.read(offset, size))
 
     async def write(self, path: str, data: bytes, *, expected_revision: str | None) -> FileEntry:
         def save() -> FileEntry:

@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowsOut } from "@phosphor-icons/react";
 import { useTransport } from "../transport/context";
 import { ImagePreview } from "../shell/image-preview";
 import { ErrorNotice } from "../shell/ui";
 import { basename } from "./buffer";
 import type { MediaKind } from "./media-kind";
+import { fileTransfer } from "./file-transfer";
 import styles from "./file-image.module.css";
 
 /** The parent keys this view by requested path, reviewed revision and refresh. */
@@ -24,17 +25,36 @@ export function FileMedia({
   const [error, setError] = useState<unknown>();
   const [dimensions, setDimensions] = useState<string>();
   const [expanded, setExpanded] = useState(false);
+  const [ready, setReady] = useState(false);
+  const player = useRef<HTMLMediaElement>(null);
+  const lifetime = useRef<AbortController | null>(null);
   useEffect(() => {
     const controller = new AbortController();
+    lifetime.current = controller;
     let url: string | undefined;
     const query = new URLSearchParams({ path, expected_revision: revision });
-    void transport
-      .fetch(`/api/host/files/content?${query}`, { signal: controller.signal })
-      .then((response) => response.blob())
-      .then((blob) => {
-        if (controller.signal.aborted) return;
-        url = URL.createObjectURL(blob);
-        setSrc(url);
+    const content =
+      kind === "image"
+        ? transport
+            .fetch(`/api/host/files/content?${query}`, {
+              signal: controller.signal,
+            })
+            .then((response) => response.blob())
+            .then((blob) => {
+              if (controller.signal.aborted) return undefined;
+              url = URL.createObjectURL(blob);
+              return url;
+            })
+        : fileTransfer(
+            transport,
+            path,
+            revision,
+            "media",
+            controller.signal,
+          ).then((access) => access.url);
+    void content
+      .then((source) => {
+        if (!controller.signal.aborted) setSrc(source);
       })
       .catch((failure: unknown) => {
         if (!controller.signal.aborted) setError(failure);
@@ -43,18 +63,42 @@ export function FileMedia({
       controller.abort();
       if (url) URL.revokeObjectURL(url);
     };
-  }, [transport, path, revision]);
+  }, [transport, path, revision, kind]);
+  useEffect(() => {
+    const element = player.current;
+    return () => {
+      if (element) {
+        element.pause();
+        element.removeAttribute("src");
+        element.load();
+      }
+    };
+  }, [src, error]);
   const name = basename(path);
   const label = `${kind[0].toUpperCase()}${kind.slice(1)}`;
-  const decodeError = () =>
-    setError(
-      new Error(
-        `This ${kind} cannot be previewed. Download the original to inspect it.`,
-      ),
+  const decodeError = () => {
+    const failure = new Error(
+      `This ${kind} cannot be previewed. The browser may not support its codec. Download the original to inspect it.`,
     );
+    if (kind === "image" || !src) {
+      setError(failure);
+      return;
+    }
+    // Native players hide HTTP failures. Distinguish stale/expired access from
+    // unsupported codecs without downloading the body or retrying playback.
+    const signal = lifetime.current?.signal;
+    void transport.fetch(src, { method: "HEAD", signal }).then(
+      () => {
+        if (!signal?.aborted) setError(failure);
+      },
+      (error: unknown) => {
+        if (!signal?.aborted) setError(error);
+      },
+    );
+  };
   return (
     <section className={styles.preview} aria-label={`${label} preview`}>
-      {(!src || (kind === "image" && !dimensions)) && !error && (
+      {(!src || (kind === "image" ? !dimensions : !ready)) && !error && (
         <p role="status">Loading {kind}…</p>
       )}
       <ErrorNotice error={error} retry={retry} />
@@ -83,20 +127,28 @@ export function FileMedia({
             </button>
           ) : kind === "audio" ? (
             <audio
+              ref={(element) => {
+                player.current = element;
+              }}
               src={src}
               controls
               preload="metadata"
               aria-label={`Audio preview: ${name}`}
               onError={decodeError}
+              onLoadedMetadata={() => setReady(true)}
             />
           ) : (
             <video
+              ref={(element) => {
+                player.current = element;
+              }}
               src={src}
               controls
               preload="metadata"
               playsInline
               aria-label={`Video preview: ${name}`}
               onError={decodeError}
+              onLoadedMetadata={() => setReady(true)}
             />
           )}
           {dimensions && (

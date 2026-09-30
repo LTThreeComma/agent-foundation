@@ -12,7 +12,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TransportContext } from "../transport/context";
 import { ApiError, type Schema, type Transport } from "../transport/client";
 import { FileBuffers, type FileBuffer } from "./buffer";
-import { downloadBlob } from "./capture";
+import { downloadFile } from "./file-transfer";
 import { FileView } from "./file-view";
 
 vi.mock("../configuration/editor", () => ({
@@ -23,6 +23,10 @@ vi.mock("../configuration/editor", () => ({
 vi.mock("./capture", () => ({
   CaptureContext: () => null,
   downloadBlob: vi.fn(),
+}));
+vi.mock("./file-transfer", async (actual) => ({
+  ...(await actual<typeof import("./file-transfer")>()),
+  downloadFile: vi.fn(),
 }));
 afterEach(() => {
   cleanup();
@@ -51,7 +55,9 @@ function metadata(
 function fixture(initial = metadata()) {
   let current = initial;
   const get = vi.fn(async () => ({ data: current }));
-  const post = vi.fn();
+  const post = vi.fn(async () => ({
+    data: { url: "/api/host/files/transfer?token=reviewed", expires_at: 1000 },
+  }));
   const blob = new Blob(["image bytes"], { type: "application/octet-stream" });
   const fetch = vi.fn(async (_url: string, _init?: RequestInit) => ({
     blob: async () => blob,
@@ -161,7 +167,19 @@ it("expands the loaded bytes in the shared viewer and keeps ordinary download av
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   fireEvent.click(screen.getByRole("button", { name: "Download" }));
   await waitFor(() =>
-    expect(downloadBlob).toHaveBeenCalledWith(f.blob, "screen.png"),
+    expect(downloadFile).toHaveBeenCalledWith(
+      "/api/host/files/transfer?token=reviewed",
+    ),
+  );
+  expect(f.post).toHaveBeenCalledWith(
+    "/api/host/files/transfers",
+    expect.objectContaining({
+      body: {
+        path: "/code/screen.png",
+        expected_revision: "first",
+        purpose: "download",
+      },
+    }),
   );
 });
 
@@ -169,10 +187,12 @@ it("does not fetch oversize images or unsupported binary formats", async () => {
   const f = fixture(metadata("/code/huge.png", 10 * 1024 * 1024 + 1));
   const view = render(f.tree());
   await screen.findByText("Image exceeds the preview limit");
-  expect(
-    (screen.getByRole("button", { name: "Download" }) as HTMLButtonElement)
-      .disabled,
-  ).toBe(true);
+  await waitFor(() =>
+    expect(
+      (screen.getByRole("button", { name: "Download" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false),
+  );
   expect(f.fetch).not.toHaveBeenCalled();
   f.update(metadata("/code/document.pdf"));
   view.rerender(f.tree());
@@ -184,6 +204,47 @@ it("does not fetch oversize images or unsupported binary formats", async () => {
   await screen.findByRole("textbox");
   expect(screen.queryByRole("region", { name: "Image preview" })).toBeNull();
   expect(f.fetch).not.toHaveBeenCalled();
+});
+
+it("streams videos above the attachment limit and releases native playback on close", async () => {
+  const pause = vi
+    .spyOn(HTMLMediaElement.prototype, "pause")
+    .mockImplementation(() => {});
+  const load = vi
+    .spyOn(HTMLMediaElement.prototype, "load")
+    .mockImplementation(() => {});
+  const f = fixture(metadata("/code/clip.mp4", 15_047_567));
+  const view = render(f.tree());
+  const player = await screen.findByLabelText("Video preview: clip.mp4");
+  expect(player.getAttribute("src")).toBe(
+    "/api/host/files/transfer?token=reviewed",
+  );
+  expect(player.hasAttribute("controls")).toBe(true);
+  expect(player.hasAttribute("autoplay")).toBe(false);
+  expect(f.post).toHaveBeenCalledWith(
+    "/api/host/files/transfers",
+    expect.objectContaining({
+      body: {
+        path: "/code/clip.mp4",
+        expected_revision: "first",
+        purpose: "media",
+      },
+    }),
+  );
+  expect(f.fetch).not.toHaveBeenCalled();
+  expect(f.create).not.toHaveBeenCalled();
+  fireEvent.loadedMetadata(player);
+  expect(screen.queryByText("Loading video…")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Download" }));
+  await waitFor(() => expect(f.post).toHaveBeenCalledTimes(2));
+  expect(f.post.mock.calls[1]).toMatchObject([
+    "/api/host/files/transfers",
+    { body: { purpose: "download" } },
+  ]);
+  view.unmount();
+  expect(pause).toHaveBeenCalled();
+  expect(load).toHaveBeenCalled();
+  expect(player.hasAttribute("src")).toBe(false);
 });
 
 it("previews an extensionless symlink using its resolved image name and requested path", async () => {

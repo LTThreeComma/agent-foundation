@@ -595,7 +595,43 @@ export interface paths {
         post?: never;
         delete?: never;
         options?: never;
+        /** Download Host File */
+        head: operations["download_host_file_api_host_files_content_head"];
+        patch?: never;
+        trace?: never;
+    };
+    "/api/host/files/transfers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Host File Transfer */
+        post: operations["host_file_transfer_api_host_files_transfers_post"];
+        delete?: never;
+        options?: never;
         head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/host/files/transfer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Transfer Host File */
+        get: operations["transfer_host_file_api_host_files_transfer_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        /** Transfer Host File */
+        head: operations["transfer_host_file_api_host_files_transfer_head"];
         patch?: never;
         trace?: never;
     };
@@ -3261,6 +3297,13 @@ export interface components {
             presentation: "text" | "binary" | "too_large";
             /** Text */
             text?: string | null;
+        };
+        /** FileTransferAccess */
+        FileTransferAccess: {
+            /** Url */
+            url: string;
+            /** Expires At */
+            expires_at: number;
         };
         /** GitChange */
         GitChange: {
@@ -6151,6 +6194,18 @@ export interface components {
              */
             recursive?: boolean;
         };
+        /** FileTransferRequest */
+        FileTransferRequest: {
+            /** Path */
+            path: string;
+            /** Expected Revision */
+            expected_revision: string;
+            /**
+             * Purpose
+             * @enum {string}
+             */
+            purpose: "download" | "media";
+        };
         /** FileCaptureRequest */
         FileCaptureRequest: {
             /** Path */
@@ -7698,6 +7753,124 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FileEntry"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_host_file_api_host_files_content_head: {
+        parameters: {
+            query: {
+                path: string;
+                expected_revision?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    host_file_transfer_api_host_files_transfers_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileTransferRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileTransferAccess"];
+                };
+            };
+        };
+    };
+    transfer_host_file_api_host_files_transfer_get: {
+        parameters: {
+            query: {
+                token: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    transfer_host_file_api_host_files_transfer_head: {
+        parameters: {
+            query: {
+                token: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
