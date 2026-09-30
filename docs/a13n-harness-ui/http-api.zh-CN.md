@@ -289,8 +289,6 @@ SQLite 提交后才返回确认。相同身份和规范化发布内容重复请�
 | `GET /api/host/files/metadata`                                      | 本机条目元数据，不跟随末端符号链接                     |
 | `GET /api/host/files/text`                                          | 完整可编辑 UTF-8，或明确的二进制、超大内容类型         |
 | `PUT /api/host/files/text`                                          | 使用已观测修订创建或保存文本                           |
-| `GET /api/host/files/content`                                       | 支持字节范围、仅作附件的本机流式下载                   |
-| `HEAD /api/host/files/content`                                      | 本机下载元数据，无内容正文                             |
 | `POST /api/host/files/transfers`                                    | 签发仅限一个已审阅文件修订和用途的短期访问链接         |
 | `GET /api/host/files/transfer`                                      | 支持字节范围的受限浏览器播放或下载                     |
 | `HEAD /api/host/files/transfer`                                     | 受限文件元数据，无内容正文                             |
@@ -381,9 +379,9 @@ Git Changes 只读，使用与 Files 相同的计算机共享开关。路径指�
 
 读取 `GET /api/host/files?path=<absolute-path>` 获取目录，或 `/api/host/files/metadata?path=...` 获取条目元数据。目录默认每页 200 项，最多 500；扫描超过 10000 项会被拒绝，响应包含 `next_offset`。后续页同时传入 `offset` 和上一页 `directory.revision`；冲突时需重新开始列出。元数据描述末端符号链接本身，文本读取和浏览返回解析后的目标及其修订。
 
-编辑前先读取 `/api/host/files/text?path=...`。`presentation: text` 提供 512 KiB 内完整、无 NUL 的 UTF-8 文本；`binary` 和 `too_large` 不提供可编辑文本。保存使用 `PUT /api/host/files/text`，JSON 包含 `path`、`text` 和观测到的 `expected_revision`。省略修订表示**仅创建**，不是最后写入生效。过期保存返回 `409 host_files_conflict`，客户端缓冲区不应丢弃。保存符号链接需显式选择解析后的目标。原子替换硬链接文件只改变选定目录项，其他别名保留原字节。原始上传使用 `PUT /api/host/files/content?path=...&expected_revision=...`，发送 octet-stream 字节，上限 10 MiB；只有新文件可省略修订。下载使用对应 GET，可选固定 `expected_revision`，始终以附件 disposition 和 octet-stream 内容类型返回。下载按有界片段流式读取，不限制整文件大小。单个字节范围返回 206；无法满足的范围返回 416，并带 `Content-Range: bytes */{size}`。HEAD 只返回响应头。不支持的范围单位和多段范围会被忽略；If-Range 不匹配时返回完整表示。发现修订变化时，若响应头尚未发送则返回 409，否则终止已开始的传输。
+编辑前先读取 `/api/host/files/text?path=...`。`presentation: text` 提供 512 KiB 内完整、无 NUL 的 UTF-8 文本；`binary` 和 `too_large` 不提供可编辑文本。保存使用 `PUT /api/host/files/text`，JSON 包含 `path`、`text` 和观测到的 `expected_revision`。省略修订表示**仅创建**，不是最后写入生效。过期保存返回 `409 host_files_conflict`，客户端缓冲区不应丢弃。保存符号链接需显式选择解析后的目标。原子替换硬链接文件只改变选定目录项，其他别名保留原字节。原始上传使用 `PUT /api/host/files/content?path=...&expected_revision=...`，发送 octet-stream 字节，上限 10 MiB；只有新文件可省略修订。这个端点只接受上传；所有本机文件下载统一使用下面的受限流式传输。
 
-浏览器播放器和下载通过带认证的 `POST /api/host/files/transfers` 获取受限链接，请求为 `{"path":"/absolute/clip.mp4","expected_revision":"<reviewed>","purpose":"media"}`（`download` 表示附件下载）。响应包含 `url` 和 Unix 秒数 `expires_at`。签名链接只在当前监听实例的 30 分钟内，授权 GET/HEAD `/api/host/files/transfer` 访问该文件修订和用途，不包含实例 API key。Host/Origin 和计算机共享检查仍然生效。只有受支持的被动音视频格式获得 inline 媒体类型。可直接将该 URL 用作播放器源或附件下载链接，支持字节范围，无需先收集整个 Blob。修订过期时，应先刷新元数据再重新获取链接。过期或无效的签名不能授权访问，监听实例重启后原链接失效。
+所有本机文件下载和图片、音视频预览通过带认证的 `POST /api/host/files/transfers` 获取受限链接，请求为 `{"path":"/absolute/clip.mp4","expected_revision":"<reviewed>","purpose":"media"}`（`download` 表示附件下载）。响应包含 `url` 和 Unix 秒数 `expires_at`。签名链接只在当前监听实例的 30 分钟内，授权 GET/HEAD `/api/host/files/transfer` 访问该文件修订和用途，不包含实例 API key。Host/Origin 和计算机共享检查仍然生效。下载不区分文件名或整文件大小，始终使用附件 disposition 和 octet-stream 内容类型。只有受支持的被动位图、音视频格式获得 inline 媒体类型。直接将该 URL 用作浏览器预览源或附件下载链接，不要先在 JavaScript 中收集整个文件 Blob。传输每次最多读取 256 KiB，不限制整文件大小。单个字节范围返回 206；无法满足的范围返回 416，并带 `Content-Range: bytes */{size}`。HEAD 只返回响应头，不返回正文。不支持的范围单位和多段范围会被忽略；If-Range 不匹配时返回完整表示。发送响应头前会先进行一次有界读取来验证文件。报告大小不可靠的本机普通文件读取到 EOF，不声明 Content-Length 或范围支持。发现修订变化时，若响应头尚未发送则返回 409，否则终止已开始的传输。图片预览的解码上限仍为 10 MiB，独立于下载。修订过期时，应先刷新元数据再重新获取链接。过期或无效的签名不能授权访问，监听实例重启后原链接失效。
 
 创建目录接受 `{"path":"/absolute/new-directory"}`，父目录必须存在。移动接受 `path`、`destination` 和源 `expected_revision`，原子拒绝已有目标（包括并发创建），拒绝跨设备移动，不隐式复制再删除。不支持不可覆盖移动的平台或文件系统返回 `host_files_unsupported`，不会冒险覆盖。删除接受 `path`、`expected_revision` 和可选 `recursive: true`；不递归时目录必须为空。递归预检查限制最多 10000 项和 128 层目录。符号链接作为条目删除，不跟随目标。后续 `host_files_partial_failure` 会报告已完成删除；请刷新，不要盲目重试原目录树删除。
 

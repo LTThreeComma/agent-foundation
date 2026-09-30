@@ -25,6 +25,11 @@ from a13n_harness_ui.surfaces import SurfaceModel
 TRANSFER_PATH = "/api/host/files/transfer"
 TRANSFER_TTL_SECONDS = 30 * 60
 _MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
     ".mp3": "audio/mpeg",
     ".m4a": "audio/mp4",
     ".wav": "audio/wav",
@@ -68,7 +73,9 @@ class FileTransfers:
                 resolved_path.suffix.lower()
             )
             if media_type is None:
-                raise HarnessUiError("This file format cannot be played inline.", code="host_files_media_unsupported")
+                raise HarnessUiError(
+                    "This file format cannot be previewed inline.", code="host_files_media_unsupported"
+                )
         claims = _Claims(
             **request.model_dump(), expires_at=int(time.time()) + TRANSFER_TTL_SECONDS, media_type=media_type
         )
@@ -159,19 +166,22 @@ async def stream_response(
 ) -> Response:
     """The returned response owns the handle; failures before return close it here."""
     try:
-        size = opened.entry.size
+        # A bounded probe distinguishes empty disk files from native regular
+        # files (for example procfs/sysfs) whose stat size is not their content length.
+        first = await read(opened, 0, FILE_CHUNK_BYTES)
+        size = opened.entry.size if len(first) == min(FILE_CHUNK_BYTES, opened.entry.size) else None
         etag = f'"{opened.entry.revision}"'
         headers = {
-            "Accept-Ranges": "bytes",
+            "Accept-Ranges": "bytes" if size is not None else "none",
             "ETag": etag,
             "Content-Disposition": f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{quote(filename, safe='')}",
             "Content-Security-Policy": "sandbox; default-src 'none'",
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
         }
-        start, end = 0, size - 1
+        start, end = 0, size - 1 if size is not None else None
         status = 200
-        if request.scope["method"] == "GET":
+        if request.scope["method"] == "GET" and size is not None:
             requested = request.headers.get("range")
             if request.headers.get("if-range", etag) != etag:
                 requested = None
@@ -184,20 +194,34 @@ async def stream_response(
                 start, end = selected
                 status = 206
                 headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-        headers["Content-Length"] = str(max(0, end - start + 1))
+                first = await read(opened, start, min(FILE_CHUNK_BYTES, end - start + 1))
+                if len(first) != min(FILE_CHUNK_BYTES, end - start + 1):
+                    raise HarnessUiError(
+                        "File changed during transfer; refresh before retrying.", code="host_files_conflict"
+                    )
+        if end is not None:
+            headers["Content-Length"] = str(max(0, end - start + 1))
         if request.scope["method"] == "HEAD":
             await opened.close()
-            return Response(status_code=200, headers=headers, media_type=media_type)
-        # Validate the first chunk before headers, so a detected conflict remains a 409.
-        first = await read(opened, start, min(FILE_CHUNK_BYTES, max(0, end - start + 1)))
+            response = Response(status_code=200, headers=headers, media_type=media_type)
+            if size is None:
+                del response.headers["Content-Length"]
+            return response
 
         async def chunks() -> AsyncIterable[bytes]:
             offset = start
             if first:
                 yield first
                 offset += len(first)
-            while offset <= end:
-                chunk = await read(opened, offset, min(FILE_CHUNK_BYTES, end - offset + 1))
+            while end is None or offset <= end:
+                count = FILE_CHUNK_BYTES if end is None else min(FILE_CHUNK_BYTES, end - offset + 1)
+                chunk = await read(opened, offset, count)
+                if end is not None and len(chunk) != count:
+                    raise HarnessUiError(
+                        "File changed during transfer; refresh before retrying.", code="host_files_conflict"
+                    )
+                if not chunk:
+                    break
                 yield chunk
                 offset += len(chunk)
 

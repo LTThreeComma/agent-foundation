@@ -61,14 +61,7 @@ it("streams large reviewed media with native ranges while keeping file access sc
     ).status,
   ).toBe(401);
   expect(
-    (
-      await fetch(
-        new URL(
-          "/api/host/files/content?path=" + encodeURIComponent(path),
-          app.origin,
-        ),
-      )
-    ).status,
+    (await fetch(new URL("/api/host/files/transfer", app.origin))).status,
   ).toBe(401);
   const first = await fetch(url, { headers: { Range: "bytes=0-3" } });
   expect(first.status).toBe(206);
@@ -142,14 +135,22 @@ it("streams large reviewed media with native ranges while keeping file access sc
     reader.releaseLock();
   }
   expect(received).toBe(size);
-  const raw = await transport.fetch(
-    `/api/host/files/content?${new URLSearchParams({ path, expected_revision: reviewed.entry.revision })}`,
-    {
-      headers: { Range: "bytes=-4" },
-    },
-  );
+  const raw = await transport.fetch(download.url, {
+    headers: { Range: "bytes=-4" },
+  });
   expect(raw.status).toBe(206);
   expect(await raw.text()).toBe("TAIL");
+  for (const [method, status] of [
+    ["GET", 404],
+    ["HEAD", 405],
+  ] as const) {
+    await expect(
+      transport.fetch(
+        `/api/host/files/content?${new URLSearchParams({ path })}`,
+        { method },
+      ),
+    ).rejects.toMatchObject({ status });
+  }
   const threadId = (
     await result(transport.client.POST("/api/threads", { body: {} }))
   ).thread_id;
@@ -231,9 +232,13 @@ it("real App file revisions, raw transfers, paging, moves and deletion preserve 
     { method: "PUT", body: new Uint8Array([0, 255, 4]) },
   );
   const uploaded = await read(uploadPath);
-  const downloaded = await transport.fetch(
-    `/api/host/files/content?${new URLSearchParams({ path: uploadPath, expected_revision: uploaded.entry.revision })}`,
+  const access = await fileTransfer(
+    transport,
+    uploadPath,
+    uploaded.entry.revision,
+    "download",
   );
+  const downloaded = await fetch(new URL(access.url, app.origin));
   expect([...new Uint8Array(await downloaded.arrayBuffer())]).toEqual([
     0, 255, 4,
   ]);

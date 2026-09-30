@@ -64,10 +64,10 @@ def test_transfer_capabilities_are_signed_scoped_expiring_and_listener_local(mon
         transfers.verify(token)
 
 
-def test_inline_access_only_accepts_passive_audio_and_video() -> None:
+def test_inline_access_only_accepts_passive_images_audio_and_video() -> None:
     transfers = FileTransfers()
     for name in ("page.html", "graphic.svg", "document.pdf"):
-        with pytest.raises(HarnessUiError, match="cannot be played inline"):
+        with pytest.raises(HarnessUiError, match="cannot be previewed inline"):
             transfers.issue(
                 FileTransferRequest(path=f"/tmp/{name}", expected_revision="one", purpose="media"), Path(name)
             )
@@ -78,6 +78,17 @@ def test_inline_access_only_accepts_passive_audio_and_video() -> None:
     access = transfers.issue(selected, Path("/tmp/clip.MP4"))
     token = parse_qs(urlsplit(access.url).query)["token"][0]
     assert transfers.verify(token).media_type == "video/mp4"
+    for extension, media_type in {
+        "png": "image/png",
+        "JPG": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "webp": "image/webp",
+        "gif": "image/gif",
+    }.items():
+        selected = FileTransferRequest(path=f"/tmp/image.{extension}", expected_revision="one", purpose="media")
+        access = transfers.issue(selected, Path(selected.path))
+        token = parse_qs(urlsplit(access.url).query)["token"][0]
+        assert transfers.verify(token).media_type == media_type
 
 
 def connection(method: str = "GET", **headers: str) -> HTTPConnection:
@@ -85,7 +96,7 @@ def connection(method: str = "GET", **headers: str) -> HTTPConnection:
         {
             "type": "http",
             "method": method,
-            "path": "/api/host/files/content",
+            "path": "/api/host/files/transfer",
             "asgi": {"spec_version": "2.4"},
             "headers": [(key.replace("_", "-").encode(), value.encode()) for key, value in headers.items()],
         }
@@ -197,3 +208,82 @@ async def test_stream_rejects_stale_open_and_first_read(tmp_path: Path) -> None:
         await files.open_stream(FileReadRequest(path=str(path), expected_revision=revision))
     with pytest.raises(HarnessUiError, match="share-computer"):
         await HostFiles().open_stream(FileReadRequest(path=str(path)))
+
+
+@pytest.mark.parametrize("name", ["archive.zip", "data.bin", "large.txt", "clip.mp4"])
+async def test_download_ranges_have_no_whole_file_limit(tmp_path: Path, name: str) -> None:
+    path = tmp_path / name
+    size = 5 * 1024**3 + 7
+    with path.open("wb") as stream:
+        stream.truncate(size)
+        stream.seek(size - 4)
+        stream.write(b"TAIL")
+    files = HostFiles(enabled=True)
+    reviewed = await files.metadata(str(path))
+    selected = FileTransferRequest(path=str(path), expected_revision=reviewed.revision, purpose="download")
+    transfers = FileTransfers()
+    access = transfers.issue(selected, path)
+    claims = transfers.verify(parse_qs(urlsplit(access.url).query)["token"][0])
+    opened = await files.open_stream(FileReadRequest(path=claims.path, expected_revision=claims.expected_revision))
+    request = connection(range="bytes=-4")
+    response = await stream_response(request, opened, files.read_stream, filename=name, media_type=claims.media_type)
+    content = bytearray()
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            content.extend(message["body"])
+
+    await response(request.scope, receive, send)
+    assert response.status_code == 206
+    assert response.headers["content-range"] == f"bytes {size - 4}-{size - 1}/{size}"
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert content == b"TAIL"
+    assert opened.stream.closed
+
+
+@pytest.mark.parametrize("path", [Path("/proc/version"), Path("/sys/devices/system/cpu/online")])
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+async def test_native_regular_files_with_unreliable_stat_sizes(path: Path, method: str) -> None:
+    if not path.is_file():
+        pytest.skip("Native pseudo-files are unavailable on this platform")
+    expected = path.read_bytes()
+    assert path.stat().st_size != len(expected)
+    files = HostFiles(enabled=True)
+    opened = await files.open_stream(FileReadRequest(path=str(path)))
+    request = connection(method, range="bytes=0-3")
+    response = await stream_response(request, opened, files.read_stream, filename=path.name)
+    content = bytearray()
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            assert len(message["body"]) <= FILE_CHUNK_BYTES
+            content.extend(message["body"])
+
+    await response(request.scope, receive, send)
+    assert response.status_code == 200
+    assert response.headers["accept-ranges"] == "none"
+    assert "content-length" not in response.headers
+    assert "content-range" not in response.headers
+    assert content == (expected if method == "GET" else b"")
+    assert opened.stream.closed
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+async def test_empty_disk_files_are_complete_zero_byte_transfers(tmp_path: Path, method: str) -> None:
+    path = tmp_path / "empty"
+    path.touch()
+    files = HostFiles(enabled=True)
+    opened = await files.open_stream(FileReadRequest(path=str(path)))
+    request = connection(method)
+    response = await stream_response(request, opened, files.read_stream, filename=path.name)
+    content = bytearray()
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            content.extend(message["body"])
+
+    await response(request.scope, receive, send)
+    assert response.status_code == 200
+    assert response.headers["content-length"] == "0"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert not content and opened.stream.closed

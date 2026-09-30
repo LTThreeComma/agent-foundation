@@ -588,15 +588,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Download Host File */
-        get: operations["download_host_file_api_host_files_content_get"];
+        get?: never;
         /** Upload Host File */
         put: operations["upload_host_file_api_host_files_content_put"];
         post?: never;
         delete?: never;
         options?: never;
-        /** Download Host File */
-        head: operations["download_host_file_api_host_files_content_head"];
+        head?: never;
         patch?: never;
         trace?: never;
     };
@@ -7698,38 +7696,6 @@ export interface operations {
             };
         };
     };
-    download_host_file_api_host_files_content_get: {
-        parameters: {
-            query: {
-                path: string;
-                expected_revision?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     upload_host_file_api_host_files_content_put: {
         parameters: {
             query: {
@@ -7753,38 +7719,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FileEntry"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    download_host_file_api_host_files_content_head: {
-        parameters: {
-            query: {
-                path: string;
-                expected_revision?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

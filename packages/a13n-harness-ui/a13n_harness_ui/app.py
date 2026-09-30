@@ -118,7 +118,6 @@ from a13n_harness_ui.host_files import (
     FileEntry,
     FileMoveRequest,
     FileReadRequest,
-    FileSnapshot,
     FileStream,
     FileText,
     FileWriteRequest,
@@ -1718,10 +1717,6 @@ class HarnessUiApp:
     async def read_host_file(self, request: FileReadRequest) -> FileText:
         async with self._operation():
             return await self._host_files.read_text(request)
-
-    async def download_host_file(self, request: FileReadRequest) -> FileSnapshot:
-        async with self._operation():
-            return await self._host_files.download(request)
 
     async def open_host_file_stream(self, request: FileReadRequest) -> FileStream:
         opened: FileStream | None = None

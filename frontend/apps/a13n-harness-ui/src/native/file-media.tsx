@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowsOut } from "@phosphor-icons/react";
 import { useTransport } from "../transport/context";
+import { ApiError } from "../transport/client";
 import { ImagePreview } from "../shell/image-preview";
 import { ErrorNotice } from "../shell/ui";
 import { basename } from "./buffer";
@@ -27,46 +28,27 @@ export function FileMedia({
   const [expanded, setExpanded] = useState(false);
   const [ready, setReady] = useState(false);
   const player = useRef<HTMLMediaElement>(null);
+  const image = useRef<HTMLImageElement>(null);
   const lifetime = useRef<AbortController | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     lifetime.current = controller;
-    let url: string | undefined;
-    const query = new URLSearchParams({ path, expected_revision: revision });
-    const content =
-      kind === "image"
-        ? transport
-            .fetch(`/api/host/files/content?${query}`, {
-              signal: controller.signal,
-            })
-            .then((response) => response.blob())
-            .then((blob) => {
-              if (controller.signal.aborted) return undefined;
-              url = URL.createObjectURL(blob);
-              return url;
-            })
-        : fileTransfer(
-            transport,
-            path,
-            revision,
-            "media",
-            controller.signal,
-          ).then((access) => access.url);
-    void content
-      .then((source) => {
-        if (!controller.signal.aborted) setSrc(source);
+    void fileTransfer(transport, path, revision, "media", controller.signal)
+      .then((access) => {
+        if (!controller.signal.aborted) setSrc(access.url);
       })
       .catch((failure: unknown) => {
         if (!controller.signal.aborted) setError(failure);
       });
     return () => {
       controller.abort();
-      if (url) URL.revokeObjectURL(url);
     };
   }, [transport, path, revision, kind]);
   useEffect(() => {
     const element = player.current;
+    const picture = image.current;
     return () => {
+      picture?.removeAttribute("src");
       if (element) {
         element.pause();
         element.removeAttribute("src");
@@ -80,19 +62,32 @@ export function FileMedia({
     const failure = new Error(
       `This ${kind} cannot be previewed. The browser may not support its codec. Download the original to inspect it.`,
     );
-    if (kind === "image" || !src) {
+    if (!src) {
       setError(failure);
       return;
     }
-    // Native players hide HTTP failures. Distinguish stale/expired access from
-    // unsupported codecs without downloading the body or retrying playback.
+    // Native elements hide HTTP failures; HEAD has no JSON error body.
+    // Interpret the transfer status without downloading bytes or retrying playback.
     const signal = lifetime.current?.signal;
     void transport.fetch(src, { method: "HEAD", signal }).then(
       () => {
         if (!signal?.aborted) setError(failure);
       },
       (error: unknown) => {
-        if (!signal?.aborted) setError(error);
+        if (signal?.aborted) return;
+        if (error instanceof ApiError && error.status === 409)
+          setError(
+            new Error(
+              "File content changed. Retry to review the current file.",
+            ),
+          );
+        else if (error instanceof ApiError && error.status === 403)
+          setError(
+            new Error(
+              "File access expired or is unavailable. Retry to obtain new access.",
+            ),
+          );
+        else setError(error);
       },
     );
   };
@@ -113,6 +108,7 @@ export function FileMedia({
               onClick={() => setExpanded(true)}
             >
               <img
+                ref={image}
                 src={src}
                 alt={name}
                 hidden={!dimensions}

@@ -10,7 +10,12 @@ import {
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TransportContext } from "../transport/context";
-import { ApiError, type Schema, type Transport } from "../transport/client";
+import {
+  ApiError,
+  responseError,
+  type Schema,
+  type Transport,
+} from "../transport/client";
 import { FileBuffers, type FileBuffer } from "./buffer";
 import { downloadFile } from "./file-transfer";
 import { FileView } from "./file-view";
@@ -34,6 +39,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const source = "/api/host/files/transfer?token=reviewed";
 function metadata(
   path = "/code/screen.png",
   size = 88_047,
@@ -55,14 +61,21 @@ function metadata(
 function fixture(initial = metadata()) {
   let current = initial;
   const get = vi.fn(async () => ({ data: current }));
-  const post = vi.fn(async () => ({
-    data: { url: "/api/host/files/transfer?token=reviewed", expires_at: 1000 },
-  }));
-  const blob = new Blob(["image bytes"], { type: "application/octet-stream" });
-  const fetch = vi.fn(async (_url: string, _init?: RequestInit) => ({
-    blob: async () => blob,
-  }));
-  const create = vi.fn().mockReturnValue("blob:preview");
+  const post = vi.fn(
+    async (
+      _url: string,
+      _options: {
+        body: { path: string; expected_revision: string; purpose: string };
+        signal?: AbortSignal;
+      },
+    ) => ({
+      data: { url: source, expires_at: 1000 },
+    }),
+  );
+  const fetch = vi.fn(
+    async (_url: string, _init?: RequestInit) => new Response(null),
+  );
+  const create = vi.fn();
   const revoke = vi.fn();
   vi.stubGlobal(
     "URL",
@@ -97,7 +110,6 @@ function fixture(initial = metadata()) {
     get,
     post,
     fetch,
-    blob,
     create,
     revoke,
     update(next: Schema<"FileText">) {
@@ -123,26 +135,35 @@ it.each([
   ["animated.gif", 900],
   ["screen.webp", 10 * 1024 * 1024],
 ])(
-  "previews %s at %i bytes without treating it as editable text",
+  "streams %s at %i bytes without collecting a Blob or treating it as editable text",
   async (name, size) => {
     const f = fixture(metadata(`/code/${name}`, size));
     const view = render(f.tree());
     const image = await loaded(name);
-    expect(image.getAttribute("src")).toBe("blob:preview");
-    const [url, options] = f.fetch.mock.calls[0]!;
-    const query = new URL(url, "http://localhost").searchParams;
-    expect(query.get("path")).toBe(`/code/${name}`);
-    expect(query.get("expected_revision")).toBe("first");
+    expect(image.getAttribute("src")).toBe(source);
+    expect(f.post).toHaveBeenCalledWith(
+      "/api/host/files/transfers",
+      expect.objectContaining({
+        body: {
+          path: `/code/${name}`,
+          expected_revision: "first",
+          purpose: "media",
+        },
+      }),
+    );
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
-    expect(f.post).not.toHaveBeenCalled();
+    expect(f.fetch).not.toHaveBeenCalled();
+    expect(f.create).not.toHaveBeenCalled();
+    const signal = f.post.mock.calls[0]![1].signal;
     view.unmount();
-    expect(options?.signal?.aborted).toBe(true);
-    expect(f.revoke).toHaveBeenCalledWith("blob:preview");
+    expect(signal?.aborted).toBe(true);
+    expect(image.hasAttribute("src")).toBe(false);
+    expect(f.revoke).not.toHaveBeenCalled();
   },
 );
 
-it("expands the loaded bytes in the shared viewer and keeps ordinary download available", async () => {
+it("expands the streamed image in the shared viewer and streams the original download", async () => {
   const f = fixture();
   render(f.tree());
   await loaded();
@@ -158,20 +179,14 @@ it("expands the loaded bytes in the shared viewer and keeps ordinary download av
     within(dialog)
       .getByRole("link", { name: "Download image" })
       .getAttribute("href"),
-  ).toBe("blob:preview");
-  expect(f.fetch).toHaveBeenCalledTimes(1);
-  expect(f.post).not.toHaveBeenCalled();
+  ).toBe(source);
   fireEvent.click(
     within(dialog).getByRole("button", { name: "Close image preview" }),
   );
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   fireEvent.click(screen.getByRole("button", { name: "Download" }));
-  await waitFor(() =>
-    expect(downloadFile).toHaveBeenCalledWith(
-      "/api/host/files/transfer?token=reviewed",
-    ),
-  );
-  expect(f.post).toHaveBeenCalledWith(
+  await waitFor(() => expect(downloadFile).toHaveBeenCalledWith(source));
+  expect(f.post).toHaveBeenLastCalledWith(
     "/api/host/files/transfers",
     expect.objectContaining({
       body: {
@@ -181,9 +196,10 @@ it("expands the loaded bytes in the shared viewer and keeps ordinary download av
       },
     }),
   );
+  expect(f.fetch).not.toHaveBeenCalled();
 });
 
-it("does not fetch oversize images or unsupported binary formats", async () => {
+it("does not preview oversize images or unsupported binary formats but still allows downloads", async () => {
   const f = fixture(metadata("/code/huge.png", 10 * 1024 * 1024 + 1));
   const view = render(f.tree());
   await screen.findByText("Image exceeds the preview limit");
@@ -193,16 +209,29 @@ it("does not fetch oversize images or unsupported binary formats", async () => {
         .disabled,
     ).toBe(false),
   );
-  expect(f.fetch).not.toHaveBeenCalled();
+  expect(f.post).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Download" }));
+  await waitFor(() =>
+    expect(f.post).toHaveBeenCalledWith(
+      "/api/host/files/transfers",
+      expect.objectContaining({
+        body: {
+          path: "/code/huge.png",
+          expected_revision: "first",
+          purpose: "download",
+        },
+      }),
+    ),
+  );
   f.update(metadata("/code/document.pdf"));
   view.rerender(f.tree());
   await screen.findByText("Binary file");
-  expect(f.fetch).not.toHaveBeenCalled();
   const svg = metadata("/code/icon.svg");
   f.update({ ...svg, presentation: "text", text: "<svg />" });
   view.rerender(f.tree());
   await screen.findByRole("textbox");
   expect(screen.queryByRole("region", { name: "Image preview" })).toBeNull();
+  expect(f.post).toHaveBeenCalledTimes(1);
   expect(f.fetch).not.toHaveBeenCalled();
 });
 
@@ -216,9 +245,7 @@ it("streams videos above the attachment limit and releases native playback on cl
   const f = fixture(metadata("/code/clip.mp4", 15_047_567));
   const view = render(f.tree());
   const player = await screen.findByLabelText("Video preview: clip.mp4");
-  expect(player.getAttribute("src")).toBe(
-    "/api/host/files/transfer?token=reviewed",
-  );
+  expect(player.getAttribute("src")).toBe(source);
   expect(player.hasAttribute("controls")).toBe(true);
   expect(player.hasAttribute("autoplay")).toBe(false);
   expect(f.post).toHaveBeenCalledWith(
@@ -254,21 +281,32 @@ it("previews an extensionless symlink using its resolved image name and requeste
   });
   render(f.tree());
   await loaded("latest");
-  expect(
-    new URL(f.fetch.mock.calls[0]![0], "http://localhost").searchParams.get(
-      "path",
-    ),
-  ).toBe("/code/latest");
+  expect(f.post).toHaveBeenCalledWith(
+    "/api/host/files/transfers",
+    expect.objectContaining({
+      body: {
+        path: "/code/latest",
+        expected_revision: "first",
+        purpose: "media",
+      },
+    }),
+  );
 });
 
-it("refreshes a changed revision and retries a failed decode even when the revision is unchanged", async () => {
+it("refreshes a changed revision and obtains new access after a decode failure", async () => {
   const f = fixture();
-  f.create
-    .mockReturnValueOnce("blob:first")
-    .mockReturnValueOnce("blob:second")
-    .mockReturnValue("blob:retry");
+  f.post
+    .mockResolvedValueOnce({
+      data: { url: `${source}-first`, expires_at: 1000 },
+    })
+    .mockResolvedValueOnce({
+      data: { url: `${source}-second`, expires_at: 1000 },
+    })
+    .mockResolvedValueOnce({
+      data: { url: `${source}-retry`, expires_at: 1000 },
+    });
   render(f.tree());
-  await loaded();
+  const old = await loaded();
   f.update({
     ...metadata(),
     entry: { ...metadata().entry, revision: "second" },
@@ -276,31 +314,26 @@ it("refreshes a changed revision and retries a failed decode even when the revis
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
   await waitFor(() =>
     expect(screen.getByAltText("screen.png").getAttribute("src")).toBe(
-      "blob:second",
+      `${source}-second`,
     ),
   );
-  expect(f.revoke).toHaveBeenCalledWith("blob:first");
-  expect(
-    new URL(f.fetch.mock.calls[1]![0], "http://localhost").searchParams.get(
-      "expected_revision",
-    ),
-  ).toBe("second");
+  expect(old.hasAttribute("src")).toBe(false);
+  expect(f.post.mock.calls[1]![1].body.expected_revision).toBe("second");
   fireEvent.error(screen.getByAltText("screen.png"));
   await screen.findByText(/This image cannot be previewed/);
   expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await waitFor(() =>
     expect(screen.getByAltText("screen.png").getAttribute("src")).toBe(
-      "blob:retry",
+      `${source}-retry`,
     ),
   );
-  expect(f.revoke).toHaveBeenCalledWith("blob:second");
-  expect(f.fetch).toHaveBeenCalledTimes(3);
+  expect(f.post).toHaveBeenCalledTimes(3);
 });
 
-it("reports a content revision conflict and re-observes disk before retrying", async () => {
+it("reports access revision conflicts and re-observes disk before retrying", async () => {
   const f = fixture();
-  f.fetch.mockRejectedValueOnce(
+  f.post.mockRejectedValueOnce(
     new ApiError(
       "File content changed; refresh before selecting or downloading.",
       409,
@@ -308,33 +341,52 @@ it("reports a content revision conflict and re-observes disk before retrying", a
   );
   render(f.tree());
   await screen.findByText(/File content changed/);
-  expect(f.create).not.toHaveBeenCalled();
   f.update({ ...metadata(), entry: { ...metadata().entry, revision: "new" } });
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await loaded();
-  expect(
-    new URL(f.fetch.mock.calls.at(-1)![0], "http://localhost").searchParams.get(
-      "expected_revision",
-    ),
-  ).toBe("new");
+  expect(f.post.mock.calls.at(-1)![1].body.expected_revision).toBe("new");
 });
 
-it("aborts a replaced view and ignores late response bodies", async () => {
+it.each([
+  [409, /File content changed/],
+  [403, /File access expired/],
+])(
+  "explains bodyless HEAD failures with status %i for native image loads",
+  async (status, message) => {
+    const f = fixture();
+    f.fetch.mockRejectedValueOnce(
+      await responseError(new Response(null, { status })),
+    );
+    render(f.tree());
+    fireEvent.error(await screen.findByAltText("screen.png"));
+    await screen.findByText(message);
+    expect(f.fetch).toHaveBeenCalledWith(
+      source,
+      expect.objectContaining({ method: "HEAD" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByAltText("screen.png");
+    expect(f.post).toHaveBeenCalledTimes(2);
+  },
+);
+
+it("aborts replaced access requests and ignores late signed URLs", async () => {
   const f = fixture();
-  let resolveBody!: (blob: Blob) => void;
-  f.fetch.mockResolvedValueOnce({
-    blob: () =>
-      new Promise((resolve) => {
-        resolveBody = resolve;
+  let resolve!: (value: { data: { url: string; expires_at: number } }) => void;
+  f.post.mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = done;
       }),
-  });
+  );
   const view = render(f.tree());
-  await waitFor(() => expect(resolveBody).toBeDefined());
+  await waitFor(() => expect(resolve).toBeDefined());
   f.update(metadata("/code/next.png"));
   view.rerender(f.tree());
   await loaded("next.png");
-  expect(f.fetch.mock.calls[0]![1]?.signal?.aborted).toBe(true);
-  resolveBody(f.blob);
+  expect(f.post.mock.calls[0]![1].signal?.aborted).toBe(true);
+  resolve({ data: { url: `${source}-late`, expires_at: 1000 } });
   await waitFor(() => expect(screen.queryByAltText("screen.png")).toBeNull());
-  expect(f.create).toHaveBeenCalledTimes(1);
+  expect(screen.getByAltText("next.png").getAttribute("src")).toBe(source);
+  expect(f.create).not.toHaveBeenCalled();
 });

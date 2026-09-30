@@ -146,8 +146,6 @@ class FileStream:
         self.stream.seek(offset)
         data = self.stream.read(size)
         self.check()
-        if len(data) != min(size, max(0, self.entry.size - offset)):
-            raise _error("conflict", "File changed during transfer; refresh before retrying.")
         return data
 
 
@@ -363,9 +361,6 @@ class HostFiles:
             return FileText(entry=snapshot.entry, resolved_path=snapshot.resolved_path, presentation="text", text=text)
 
         return await self._run(read)
-
-    async def download(self, request: FileReadRequest) -> FileSnapshot:
-        return await self._run(lambda: _snapshot(request, MAX_ATTACHMENT_BYTES))
 
     async def open_stream(self, request: FileReadRequest) -> FileStream:
         return await self._run(lambda: _open_stream(request))

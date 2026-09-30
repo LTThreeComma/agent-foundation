@@ -37,10 +37,9 @@ function fixture(path = "/tmp/photo.png", size = 500_000) {
   const get = vi.fn(
     async (_url: string, _options: { signal: AbortSignal }) => ({ data: file }),
   );
-  const fetch = vi.fn(async (_url: string, _options?: RequestInit) => ({
-    blob: async () =>
-      new Blob(["media bytes"], { type: "application/octet-stream" }),
-  }));
+  const fetch = vi.fn(
+    async (_url: string, _options?: RequestInit) => new Response(null),
+  );
   const post = vi.fn(async () => ({
     data: { url: "/api/host/files/transfer?token=reviewed", expires_at: 1000 },
   }));
@@ -68,7 +67,7 @@ function fixture(path = "/tmp/photo.png", size = 500_000) {
   return { tree, file, get, post, fetch, create, revoke, open };
 }
 
-it("reads reviewed bytes for inline images, reuses the expanded viewer, and releases resources", async () => {
+it("uses reviewed streaming access for inline images and the expanded viewer without collecting Blobs", async () => {
   const f = fixture();
   const view = render(f.tree());
   const image = await screen.findByAltText("photo.png");
@@ -81,9 +80,19 @@ it("reads reviewed bytes for inline images, reuses the expanded viewer, and rele
     "/api/host/files/text",
     expect.objectContaining({ params: { query: { path: "/tmp/photo.png" } } }),
   );
-  const url = new URL(f.fetch.mock.calls[0][0], "http://localhost");
-  expect(url.searchParams.get("path")).toBe("/tmp/photo.png");
-  expect(url.searchParams.get("expected_revision")).toBe("reviewed");
+  expect(f.post).toHaveBeenCalledWith(
+    "/api/host/files/transfers",
+    expect.objectContaining({
+      body: {
+        path: "/tmp/photo.png",
+        expected_revision: "reviewed",
+        purpose: "media",
+      },
+    }),
+  );
+  expect(image.getAttribute("src")).toBe(
+    "/api/host/files/transfer?token=reviewed",
+  );
   expect(view.container.querySelector("p figure")).toBeNull();
   fireEvent.click(
     screen.getByRole("button", { name: "Expand image: photo.png" }),
@@ -91,16 +100,19 @@ it("reads reviewed bytes for inline images, reuses the expanded viewer, and rele
   await screen.findByRole("dialog");
   expect(
     screen.getByRole("link", { name: "Download image" }).getAttribute("href"),
-  ).toBe("blob:preview");
+  ).toBe("/api/host/files/transfer?token=reviewed");
   fireEvent.click(screen.getByRole("button", { name: "Close image preview" }));
   fireEvent.click(screen.getByRole("link", { name: "Original" }));
   expect(f.open).toHaveBeenCalledWith("/tmp/photo.png");
   view.rerender(
     f.tree(`[Original](${link("/tmp/photo.png")})\n\nMore streamed text`),
   );
-  expect(f.fetch).toHaveBeenCalledTimes(1);
+  expect(f.post).toHaveBeenCalledTimes(1);
+  expect(f.fetch).not.toHaveBeenCalled();
+  expect(f.create).not.toHaveBeenCalled();
   view.unmount();
-  expect(f.revoke).toHaveBeenCalledWith("blob:preview");
+  expect(image.hasAttribute("src")).toBe(false);
+  expect(f.revoke).not.toHaveBeenCalled();
 });
 
 it.each(["voice.wav", "clip.mp4"])(
@@ -140,7 +152,7 @@ it.each(["voice.wav", "clip.mp4"])(
 
 it("keeps stale-revision errors visible and retries metadata before fetching again", async () => {
   const f = fixture();
-  f.fetch.mockRejectedValueOnce(
+  f.post.mockRejectedValueOnce(
     new ApiError("File content changed; refresh before selecting it.", 409),
   );
   render(f.tree());
@@ -148,7 +160,7 @@ it("keeps stale-revision errors visible and retries metadata before fetching aga
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await screen.findByAltText("photo.png");
   expect(f.get).toHaveBeenCalledTimes(2);
-  expect(f.fetch).toHaveBeenCalledTimes(2);
+  expect(f.post).toHaveBeenCalledTimes(2);
 });
 
 it("reveals a native player's revision conflict and refreshes metadata before retrying", async () => {
@@ -187,6 +199,7 @@ it("does not fetch oversized files and leaves the original link available", asyn
   render(f.tree());
   await screen.findByText(/Preview supports files up to 10 MiB/);
   expect(f.fetch).not.toHaveBeenCalled();
+  expect(f.post).not.toHaveBeenCalled();
   expect(screen.getByRole("link", { name: "Original" })).toBeTruthy();
 });
 
@@ -221,5 +234,6 @@ it("defers media reads until near the viewport and aborts an outstanding read on
   resolve({ data: f.file });
   await Promise.resolve();
   expect(f.fetch).not.toHaveBeenCalled();
+  expect(f.post).not.toHaveBeenCalled();
   expect(disconnect).toHaveBeenCalled();
 });

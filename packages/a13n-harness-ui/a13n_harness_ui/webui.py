@@ -1065,14 +1065,6 @@ def create_webui(
             data.extend(chunk)
         return await app().upload_host_file(path, bytes(data), expected_revision=expected_revision)
 
-    @server.get("/api/host/files/content")
-    @server.head("/api/host/files/content")
-    async def download_host_file(
-        request: Request, path: NativePath, expected_revision: Revision | None = None
-    ) -> Response:
-        opened = await app().open_host_file_stream(FileReadRequest(path=path, expected_revision=expected_revision))
-        return await stream_response(request, opened, app().read_host_file_stream, filename=Path(path).name)
-
     @server.post(
         "/api/host/files/transfers", response_model=FileTransferAccess, openapi_extra=_body(FileTransferRequest)
     )
