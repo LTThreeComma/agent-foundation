@@ -499,7 +499,9 @@ export function ConversationTranscript({
   onSavedEntries,
   recovery,
   pending,
+  activity,
 }: {
+  activity?: ReactNode;
   pending?: PendingInteraction;
   recovery?: FocusDisplay["recovery"];
   turns?: Schema<"TranscriptTurn">[];
@@ -562,6 +564,7 @@ export function ConversationTranscript({
         recovery={recovery}
         pending={pending}
       />
+      {activity}
       {gap && <GapNotice />}
     </>
   );
@@ -1006,6 +1009,11 @@ function ExecutionSegment({
     (count, row) => count + (row.kind === "tools" ? row.tools.length : 0),
     0,
   );
+  const runningTools = rows
+    .flatMap((row) => (row.kind === "tools" ? row.tools : []))
+    .filter((tool) =>
+      ["Receiving input", "Awaiting result"].includes(describeTool(tool).phase),
+    ).length;
   const preview = toolInfo
     ? `${toolInfo.label} ${toolInfo.summary} · ${toolInfo.phase}`
     : latest?.kind === "thinking"
@@ -1020,6 +1028,7 @@ function ExecutionSegment({
           <span>
             {" "}
             · {toolCount} {toolCount === 1 ? "tool call" : "tool calls"}
+            {runningTools > 0 && ` · ${runningTools} running`}
           </span>
         ) : null
       }
