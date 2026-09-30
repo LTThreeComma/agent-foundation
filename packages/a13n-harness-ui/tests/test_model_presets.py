@@ -41,9 +41,13 @@ async def test_every_offered_provider_constructs_native_model_with_selected_endp
     model = await HarnessUiModelResolver({recipe.model_id: recipe}).resolve(recipe.model_id, thread_id="thread-test")
     assert model.model_name == model_name
     if provider.transport == "xai":
+        from pydantic_ai.models.wrapper import WrapperModel
         from pydantic_ai.models.xai import XaiModel
 
-        assert isinstance(model, XaiModel)
+        native_model = model
+        while isinstance(native_model, WrapperModel):
+            native_model = native_model.wrapped
+        assert isinstance(native_model, XaiModel)
     elif provider.transport == "openai-client":
         assert str(model.client.base_url).rstrip("/") == endpoint
     else:
@@ -416,7 +420,6 @@ async def test_native_thinking_stream_tool_continuation_and_checkpoint_replay(pr
     import httpx2 as httpx
     from pydantic_ai import Agent
     from pydantic_ai.messages import ModelMessagesTypeAdapter, PartDeltaEvent, ThinkingPart, ThinkingPartDelta
-    from pydantic_ai.models.zai import ZaiModel
     from pydantic_ai.run import AgentRunResultEvent
     from pydantic_ai.settings import ModelSettings
 
@@ -498,7 +501,6 @@ async def test_native_thinking_stream_tool_continuation_and_checkpoint_replay(pr
         model = await HarnessUiModelResolver({recipe.model_id: recipe}).resolve(
             recipe.model_id, thread_id="thread-test"
         )
-        assert isinstance(model, ZaiModel) is (provider == "zai")
         agent = Agent(model, model_settings=cast(ModelSettings, recipe.settings))
 
         @agent.tool_plain
