@@ -33,7 +33,7 @@ export function FileMedia({
   useEffect(() => {
     const controller = new AbortController();
     lifetime.current = controller;
-    void fileTransfer(transport, path, revision, "media", controller.signal)
+    void fileTransfer(transport, path, revision, "inline", controller.signal)
       .then((access) => {
         if (!controller.signal.aborted) setSrc(access.url);
       })

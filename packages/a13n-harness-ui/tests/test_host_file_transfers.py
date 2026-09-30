@@ -47,12 +47,12 @@ def test_unsatisfiable_ranges(header: str) -> None:
 def test_transfer_capabilities_are_signed_scoped_expiring_and_listener_local(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("a13n_harness_ui.host_file_transfers.time.time", lambda: 1000)
     transfers = FileTransfers()
-    selected = FileTransferRequest(path="/tmp/clip.mp4", expected_revision="reviewed", purpose="media")
+    selected = FileTransferRequest(path="/tmp/clip.mp4", expected_revision="reviewed", disposition="inline")
     access = transfers.issue(selected, Path(selected.path))
     token = parse_qs(urlsplit(access.url).query)["token"][0]
     claims = transfers.verify(token)
     assert claims.path == selected.path and claims.expected_revision == "reviewed"
-    assert claims.purpose == "media" and claims.media_type == "video/mp4"
+    assert claims.disposition == "inline" and claims.media_type == "video/mp4"
     assert access.expires_at == 1000 + TRANSFER_TTL_SECONDS
     for invalid in ("", token + "x", "x" + token, token.replace(".", ".x")):
         with pytest.raises(HarnessUiError, match="expired or is invalid"):
@@ -64,17 +64,22 @@ def test_transfer_capabilities_are_signed_scoped_expiring_and_listener_local(mon
         transfers.verify(token)
 
 
-def test_inline_access_only_accepts_passive_images_audio_and_video() -> None:
+def test_unknown_and_active_types_remain_downloadable_even_when_inline_is_requested() -> None:
     transfers = FileTransfers()
-    for name in ("page.html", "graphic.svg", "document.pdf"):
-        with pytest.raises(HarnessUiError, match="cannot be previewed inline"):
-            transfers.issue(
-                FileTransferRequest(path=f"/tmp/{name}", expected_revision="one", purpose="media"), Path(name)
+    for name in ("page.html", "graphic.svg", "document.pdf", "file.unknown-format", "image.png.gz"):
+        for disposition in ("inline", "attachment"):
+            access = transfers.issue(
+                FileTransferRequest(path=f"/tmp/{name}", expected_revision="one", disposition=disposition), Path(name)
             )
-        transfers.issue(
-            FileTransferRequest(path=f"/tmp/{name}", expected_revision="one", purpose="download"), Path(name)
-        )
-    selected = FileTransferRequest(path="/tmp/latest", expected_revision="one", purpose="media")
+            token = parse_qs(urlsplit(access.url).query)["token"][0]
+            claims = transfers.verify(token)
+            assert claims.disposition == "attachment"
+            assert claims.media_type == "application/octet-stream"
+
+
+def test_inline_access_uses_resolved_standard_library_mime_types() -> None:
+    transfers = FileTransfers()
+    selected = FileTransferRequest(path="/tmp/latest", expected_revision="one", disposition="inline")
     access = transfers.issue(selected, Path("/tmp/clip.MP4"))
     token = parse_qs(urlsplit(access.url).query)["token"][0]
     assert transfers.verify(token).media_type == "video/mp4"
@@ -84,11 +89,65 @@ def test_inline_access_only_accepts_passive_images_audio_and_video() -> None:
         "jpeg": "image/jpeg",
         "webp": "image/webp",
         "gif": "image/gif",
+        "avif": "image/avif",
+        "bmp": "image/bmp",
+        "oga": "audio/ogg",
     }.items():
-        selected = FileTransferRequest(path=f"/tmp/image.{extension}", expected_revision="one", purpose="media")
+        selected = FileTransferRequest(path=f"/tmp/image.{extension}", expected_revision="one", disposition="inline")
         access = transfers.issue(selected, Path(selected.path))
         token = parse_qs(urlsplit(access.url).query)["token"][0]
         assert transfers.verify(token).media_type == media_type
+
+
+async def test_file_info_observes_the_resolved_revision_without_reading_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import a13n_harness_ui.host_files as module
+
+    target = tmp_path / "image.avif"
+    target.write_bytes(b"not decoded by the server")
+    link = tmp_path / "latest"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("Native symlinks are unavailable")
+    opened = []
+    original = module._open_stream
+
+    def track(request):
+        handle = original(request)
+        opened.append(handle)
+        return handle
+
+    def no_read(*args):
+        raise AssertionError("File info must not read content")
+
+    monkeypatch.setattr(module, "_open_stream", track)
+    monkeypatch.setattr(module.FileStream, "read", no_read)
+    monkeypatch.setattr(module, "_snapshot", no_read)
+    files = HostFiles(enabled=True)
+    info = await files.info(FileReadRequest(path=str(link)))
+    assert info.resolved_path == str(target)
+    assert info.entry.path == str(target)
+    assert info.media_type == "image/avif"
+    assert all(handle.stream.closed for handle in opened)
+    with pytest.raises(HarnessUiError, match="changed"):
+        await files.info(FileReadRequest(path=str(link), expected_revision="stale"))
+    with pytest.raises(HarnessUiError):
+        await HostFiles(enabled=False).info(FileReadRequest(path=str(link)))
+
+
+def test_transfer_mime_resolution_is_not_an_extension_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "a13n_harness_ui.host_files.mimetypes.guess_file_type", lambda *args, **kwargs: ("video/new-format", None)
+    )
+    access = FileTransfers()
+    selected = access.issue(
+        FileTransferRequest(path="/tmp/unknown", expected_revision="one", disposition="inline"), Path("/tmp/unknown")
+    )
+    token = parse_qs(urlsplit(selected.url).query)["token"][0]
+    assert access.verify(token).media_type == "video/new-format"
+    assert access.verify(token).disposition == "inline"
 
 
 def connection(method: str = "GET", **headers: str) -> HTTPConnection:
@@ -220,7 +279,7 @@ async def test_download_ranges_have_no_whole_file_limit(tmp_path: Path, name: st
         stream.write(b"TAIL")
     files = HostFiles(enabled=True)
     reviewed = await files.metadata(str(path))
-    selected = FileTransferRequest(path=str(path), expected_revision=reviewed.revision, purpose="download")
+    selected = FileTransferRequest(path=str(path), expected_revision=reviewed.revision, disposition="attachment")
     transfers = FileTransfers()
     access = transfers.issue(selected, path)
     claims = transfers.verify(parse_qs(urlsplit(access.url).query)["token"][0])

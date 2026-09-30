@@ -512,6 +512,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/host/files/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Host File Info */
+        get: operations["host_file_info_api_host_files_info_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/host/files/text": {
         parameters: {
             query?: never;
@@ -3272,6 +3289,14 @@ export interface components {
             mode: number;
             /** Link Target */
             link_target?: string | null;
+        };
+        /** FileInfo */
+        FileInfo: {
+            entry: components["schemas"]["FileEntry"];
+            /** Resolved Path */
+            resolved_path: string;
+            /** Media Type */
+            media_type: string;
         };
         /** FilePage */
         FilePage: {
@@ -6199,10 +6224,11 @@ export interface components {
             /** Expected Revision */
             expected_revision: string;
             /**
-             * Purpose
+             * Disposition
+             * @default attachment
              * @enum {string}
              */
-            purpose: "download" | "media";
+            disposition?: "attachment" | "inline";
         };
         /** FileCaptureRequest */
         FileCaptureRequest: {
@@ -7555,6 +7581,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DirectoryPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    host_file_info_api_host_files_info_get: {
+        parameters: {
+            query: {
+                path: string;
+                expected_revision?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileInfo"];
                 };
             };
             /** @description Validation Error */

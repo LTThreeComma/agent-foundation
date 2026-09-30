@@ -4,12 +4,12 @@ export function fileTransfer(
   transport: Transport,
   path: string,
   revision: string,
-  purpose: "download" | "media",
+  disposition: "attachment" | "inline",
   signal?: AbortSignal,
 ) {
   return result(
     transport.client.POST("/api/host/files/transfers", {
-      body: { path, expected_revision: revision, purpose },
+      body: { path, expected_revision: revision, disposition },
       signal,
     }),
   );

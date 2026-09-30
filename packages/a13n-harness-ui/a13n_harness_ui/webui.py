@@ -68,6 +68,7 @@ from a13n_harness_ui.host_files import (
     FileDeleteRequest,
     FileDeletion,
     FileEntry,
+    FileInfo,
     FileMoveRequest,
     FileReadRequest,
     FileText,
@@ -1020,6 +1021,10 @@ def create_webui(
     ) -> DirectoryPage:
         return await app().browse_host_files(path, offset=offset, limit=limit, revision=revision)
 
+    @server.get("/api/host/files/info", response_model=FileInfo)
+    async def host_file_info(path: NativePath, expected_revision: Revision | None = None) -> FileInfo:
+        return await app().host_file_info(FileReadRequest(path=path, expected_revision=expected_revision))
+
     @server.get("/api/host/files/text", response_model=FileText)
     async def host_file_text(path: NativePath, expected_revision: Revision | None = None) -> FileText:
         return await app().read_host_file(FileReadRequest(path=path, expected_revision=expected_revision))
@@ -1091,7 +1096,7 @@ def create_webui(
             app().read_host_file_stream,
             filename=Path(selected.path).name,
             media_type=selected.media_type,
-            inline=selected.purpose == "media",
+            inline=selected.disposition == "inline",
         )
 
     @server.post(

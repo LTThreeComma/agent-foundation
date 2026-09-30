@@ -1385,6 +1385,65 @@
         }
       }
     },
+    "/api/host/files/info": {
+      "get": {
+        "summary": "Host File Info",
+        "operationId": "host_file_info_api_host_files_info_get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "title": "Path"
+            }
+          },
+          {
+            "name": "expected_revision",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expected Revision"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileInfo"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/host/files/text": {
       "get": {
         "summary": "Host File Text",
@@ -9704,6 +9763,31 @@
         ],
         "title": "FileEntry"
       },
+      "FileInfo": {
+        "properties": {
+          "entry": {
+            "$ref": "#/components/schemas/FileEntry"
+          },
+          "resolved_path": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Resolved Path"
+          },
+          "media_type": {
+            "type": "string",
+            "title": "Media Type"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "entry",
+          "resolved_path",
+          "media_type"
+        ],
+        "title": "FileInfo"
+      },
       "FilePage": {
         "additionalProperties": false,
         "properties": {
@@ -17357,21 +17441,21 @@
             "minLength": 1,
             "title": "Expected Revision"
           },
-          "purpose": {
+          "disposition": {
             "type": "string",
             "enum": [
-              "download",
-              "media"
+              "attachment",
+              "inline"
             ],
-            "title": "Purpose"
+            "title": "Disposition",
+            "default": "attachment"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
           "path",
-          "expected_revision",
-          "purpose"
+          "expected_revision"
         ],
         "title": "FileTransferRequest"
       },

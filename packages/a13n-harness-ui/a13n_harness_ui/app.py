@@ -116,6 +116,7 @@ from a13n_harness_ui.host_files import (
     FileDeleteRequest,
     FileDeletion,
     FileEntry,
+    FileInfo,
     FileMoveRequest,
     FileReadRequest,
     FileStream,
@@ -1713,6 +1714,10 @@ class HarnessUiApp:
     ) -> DirectoryPage:
         async with self._operation():
             return await self._host_files.browse(path, offset=offset, limit=limit, revision=revision)
+
+    async def host_file_info(self, request: FileReadRequest) -> FileInfo:
+        async with self._operation():
+            return await self._host_files.info(request)
 
     async def read_host_file(self, request: FileReadRequest) -> FileText:
         async with self._operation():

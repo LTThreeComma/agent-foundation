@@ -19,35 +19,17 @@ from starlette.requests import HTTPConnection
 from starlette.types import Receive, Scope, Send
 
 from a13n_harness_ui.errors import HarnessUiError
-from a13n_harness_ui.host_files import FILE_CHUNK_BYTES, FileStream, NativePath, Revision
+from a13n_harness_ui.host_files import FILE_CHUNK_BYTES, FileStream, NativePath, Revision, file_media_type
 from a13n_harness_ui.surfaces import SurfaceModel
 
 TRANSFER_PATH = "/api/host/files/transfer"
 TRANSFER_TTL_SECONDS = 30 * 60
-_MEDIA_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-    ".mp3": "audio/mpeg",
-    ".m4a": "audio/mp4",
-    ".wav": "audio/wav",
-    ".ogg": "audio/ogg",
-    ".opus": "audio/ogg",
-    ".flac": "audio/flac",
-    ".aac": "audio/aac",
-    ".mp4": "video/mp4",
-    ".webm": "video/webm",
-    ".mov": "video/quicktime",
-    ".m4v": "video/mp4",
-}
 
 
 class FileTransferRequest(SurfaceModel):
     path: NativePath
     expected_revision: Revision
-    purpose: Literal["download", "media"]
+    disposition: Literal["attachment", "inline"] = "attachment"
 
 
 class FileTransferAccess(SurfaceModel):
@@ -67,17 +49,20 @@ class FileTransfers:
         self._secret = secrets.token_bytes(32)
 
     def issue(self, request: FileTransferRequest, resolved_path: Path) -> FileTransferAccess:
-        media_type = "application/octet-stream"
-        if request.purpose == "media":
-            media_type = _MEDIA_TYPES.get(Path(request.path).suffix.lower()) or _MEDIA_TYPES.get(
-                resolved_path.suffix.lower()
-            )
-            if media_type is None:
-                raise HarnessUiError(
-                    "This file format cannot be previewed inline.", code="host_files_media_unsupported"
-                )
+        media_type = file_media_type(resolved_path)
+        # Response safety is independent of which renderer the frontend chooses.
+        # Unknown and active document types always remain detached downloads.
+        passive = media_type.startswith(("audio/", "video/")) or (
+            media_type.startswith("image/") and media_type != "image/svg+xml"
+        )
+        inline = request.disposition == "inline" and passive
         claims = _Claims(
-            **request.model_dump(), expires_at=int(time.time()) + TRANSFER_TTL_SECONDS, media_type=media_type
+            **{
+                **request.model_dump(),
+                "disposition": "inline" if inline else "attachment",
+            },
+            expires_at=int(time.time()) + TRANSFER_TTL_SECONDS,
+            media_type=media_type if inline else "application/octet-stream",
         )
         payload = base64.urlsafe_b64encode(claims.model_dump_json().encode()).decode()
         signature = hmac.digest(self._secret, payload.encode(), "sha256").hex()

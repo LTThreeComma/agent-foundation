@@ -43,12 +43,18 @@ it("streams large reviewed media with native ranges while keeping file access sc
   } finally {
     await file.close();
   }
-  const reviewed = await read(path);
+  const reviewed = await result(
+    transport.client.GET("/api/host/files/info", {
+      params: { query: { path } },
+    }),
+  );
+  expect(reviewed.media_type).toBe("video/mp4");
+  expect("text" in reviewed).toBe(false);
   const access = await fileTransfer(
     transport,
     path,
     reviewed.entry.revision,
-    "media",
+    "inline",
   );
   const url = new URL(access.url, app.origin);
   expect(url.searchParams.has("key")).toBe(false);
@@ -118,7 +124,7 @@ it("streams large reviewed media with native ranges while keeping file access sc
     transport,
     path,
     reviewed.entry.revision,
-    "download",
+    "attachment",
   );
   const bytes = await fetch(new URL(download.url, app.origin));
   expect(bytes.headers.get("content-type")).toBe("application/octet-stream");
@@ -160,13 +166,21 @@ it("streams large reviewed media with native ranges while keeping file access sc
   await writeFile(path, "changed after review");
   expect((await fetch(url, { method: "HEAD" })).status).toBe(409);
   await expect(
-    fileTransfer(transport, path, reviewed.entry.revision, "media"),
+    fileTransfer(transport, path, reviewed.entry.revision, "inline"),
   ).rejects.toMatchObject({ status: 409 });
   const html = joinPath(app.native_root, "page.html");
   await writeFile(html, "<script>active content</script>");
-  await expect(
-    fileTransfer(transport, html, (await read(html)).entry.revision, "media"),
-  ).rejects.toMatchObject({ status: 400 });
+  const detached = await fileTransfer(
+    transport,
+    html,
+    (await read(html)).entry.revision,
+    "inline",
+  );
+  const document = await fetch(new URL(detached.url, app.origin));
+  expect(document.headers.get("content-disposition")).toMatch(/^attachment;/);
+  expect(document.headers.get("content-type")).toBe("application/octet-stream");
+  expect(document.headers.get("content-security-policy")).toContain("sandbox");
+  expect(await document.text()).toBe("<script>active content</script>");
 });
 
 it("real App file revisions, raw transfers, paging, moves and deletion preserve native preconditions", async () => {
@@ -236,7 +250,7 @@ it("real App file revisions, raw transfers, paging, moves and deletion preserve 
     transport,
     uploadPath,
     uploaded.entry.revision,
-    "download",
+    "attachment",
   );
   const downloaded = await fetch(new URL(access.url, app.origin));
   expect([...new Uint8Array(await downloaded.arrayBuffer())]).toEqual([

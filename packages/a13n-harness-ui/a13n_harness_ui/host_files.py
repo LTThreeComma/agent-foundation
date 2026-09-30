@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import hashlib
+import mimetypes
 import os
 import stat
 import sys
@@ -50,6 +51,12 @@ class DirectoryPage(SurfaceModel):
 class FileReadRequest(SurfaceModel):
     path: NativePath
     expected_revision: Revision | None = None
+
+
+class FileInfo(SurfaceModel):
+    entry: FileEntry
+    resolved_path: NativePath
+    media_type: str
 
 
 class FileText(SurfaceModel):
@@ -157,6 +164,12 @@ class SelectedFile:
 
 def _error(code: str, message: str) -> HarnessUiError:
     return HarnessUiError(message, code=f"host_files_{code}")
+
+
+def file_media_type(path: Path) -> str:
+    """A filename hint, not content validation or a promise of browser support."""
+    media_type, encoding = mimetypes.guess_file_type(path, strict=False)
+    return media_type if media_type is not None and encoding is None else "application/octet-stream"
 
 
 def _path(value: str) -> Path:
@@ -340,6 +353,19 @@ class HostFiles:
             )
 
         return await self._run(read)
+
+    async def info(self, request: FileReadRequest) -> FileInfo:
+        def inspect() -> FileInfo:
+            opened = _open_stream(request)
+            with opened.stream:
+                opened.check()
+                return FileInfo(
+                    entry=opened.entry,
+                    resolved_path=str(opened.resolved_path),
+                    media_type=file_media_type(opened.resolved_path),
+                )
+
+        return await self._run(inspect)
 
     async def read_text(self, request: FileReadRequest) -> FileText:
         def read() -> FileText:

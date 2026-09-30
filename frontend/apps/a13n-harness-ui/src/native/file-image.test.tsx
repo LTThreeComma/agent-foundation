@@ -43,7 +43,8 @@ const source = "/api/host/files/transfer?token=reviewed";
 function metadata(
   path = "/code/screen.png",
   size = 88_047,
-): Schema<"FileText"> {
+  media_type = "image/png",
+): Schema<"FileText"> & { media_type: string } {
   return {
     entry: {
       path,
@@ -54,6 +55,7 @@ function metadata(
       mode: 0,
     },
     resolved_path: path,
+    media_type,
     presentation: size > 512 * 1024 ? "too_large" : "binary",
     text: null,
   };
@@ -65,7 +67,7 @@ function fixture(initial = metadata()) {
     async (
       _url: string,
       _options: {
-        body: { path: string; expected_revision: string; purpose: string };
+        body: { path: string; expected_revision: string; disposition: string };
         signal?: AbortSignal;
       },
     ) => ({
@@ -112,7 +114,7 @@ function fixture(initial = metadata()) {
     fetch,
     create,
     revoke,
-    update(next: Schema<"FileText">) {
+    update(next: Schema<"FileText"> & { media_type: string }) {
       current = next;
     },
   };
@@ -147,9 +149,14 @@ it.each([
         body: {
           path: `/code/${name}`,
           expected_revision: "first",
-          purpose: "media",
+          disposition: "inline",
         },
       }),
+    );
+    expect(f.get).toHaveBeenCalledTimes(1);
+    expect(f.get).toHaveBeenCalledWith(
+      "/api/host/files/info",
+      expect.anything(),
     );
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
@@ -192,7 +199,7 @@ it("expands the streamed image in the shared viewer and streams the original dow
       body: {
         path: "/code/screen.png",
         expected_revision: "first",
-        purpose: "download",
+        disposition: "attachment",
       },
     }),
   );
@@ -218,15 +225,15 @@ it("does not preview oversize images or unsupported binary formats but still all
         body: {
           path: "/code/huge.png",
           expected_revision: "first",
-          purpose: "download",
+          disposition: "attachment",
         },
       }),
     ),
   );
-  f.update(metadata("/code/document.pdf"));
+  f.update(metadata("/code/document.pdf", 88_047, "application/pdf"));
   view.rerender(f.tree());
   await screen.findByText("Binary file");
-  const svg = metadata("/code/icon.svg");
+  const svg = metadata("/code/icon.svg", 88_047, "image/svg+xml");
   f.update({ ...svg, presentation: "text", text: "<svg />" });
   view.rerender(f.tree());
   await screen.findByRole("textbox");
@@ -242,7 +249,7 @@ it("streams videos above the attachment limit and releases native playback on cl
   const load = vi
     .spyOn(HTMLMediaElement.prototype, "load")
     .mockImplementation(() => {});
-  const f = fixture(metadata("/code/clip.mp4", 15_047_567));
+  const f = fixture(metadata("/code/clip.mp4", 15_047_567, "video/mp4"));
   const view = render(f.tree());
   const player = await screen.findByLabelText("Video preview: clip.mp4");
   expect(player.getAttribute("src")).toBe(source);
@@ -254,7 +261,7 @@ it("streams videos above the attachment limit and releases native playback on cl
       body: {
         path: "/code/clip.mp4",
         expected_revision: "first",
-        purpose: "media",
+        disposition: "inline",
       },
     }),
   );
@@ -266,7 +273,7 @@ it("streams videos above the attachment limit and releases native playback on cl
   await waitFor(() => expect(f.post).toHaveBeenCalledTimes(2));
   expect(f.post.mock.calls[1]).toMatchObject([
     "/api/host/files/transfers",
-    { body: { purpose: "download" } },
+    { body: { disposition: "attachment" } },
   ]);
   view.unmount();
   expect(pause).toHaveBeenCalled();
@@ -274,7 +281,7 @@ it("streams videos above the attachment limit and releases native playback on cl
   expect(player.hasAttribute("src")).toBe(false);
 });
 
-it("previews an extensionless symlink using its resolved image name and requested path", async () => {
+it("previews an extensionless symlink using server MIME and its requested path", async () => {
   const f = fixture({
     ...metadata("/code/latest"),
     resolved_path: "/code/actual.png",
@@ -287,7 +294,7 @@ it("previews an extensionless symlink using its resolved image name and requeste
       body: {
         path: "/code/latest",
         expected_revision: "first",
-        purpose: "media",
+        disposition: "inline",
       },
     }),
   );

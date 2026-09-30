@@ -58,12 +58,25 @@ export function FileView({
   const read = useQuery({
     queryKey: ["native", "text", path],
     queryFn: async ({ signal }) => {
-      const next = await result(
-        client.GET("/api/host/files/text", {
+      const info = await result(
+        client.GET("/api/host/files/info", {
           params: { query: { path } },
           signal,
         }),
       );
+      const next = mediaKind(info.media_type)
+        ? info
+        : {
+            ...(await result(
+              client.GET("/api/host/files/text", {
+                params: {
+                  query: { path, expected_revision: info.entry.revision },
+                },
+                signal,
+              }),
+            )),
+            media_type: info.media_type,
+          };
       const existing = buffers.get(path);
       if (existing) existing.observe(next);
       else buffers.set(path, new FileBuffer(next));
@@ -148,7 +161,7 @@ export function FileView({
         transport,
         path,
         buffer.base.entry.revision,
-        "download",
+        "attachment",
       );
       downloadFile(access.url);
     } catch (failure) {
@@ -157,9 +170,7 @@ export function FileView({
   };
   const editable = buffer.base.presentation === "text";
   const markdown = editable && /\.(?:md|markdown)$/i.test(path);
-  const media = !editable
-    ? (mediaKind(path) ?? mediaKind(buffer.base.resolved_path))
-    : null;
+  const media = !editable ? mediaKind(buffer.base.media_type) : null;
   const refreshContent = async () => {
     const revision = buffer.base.entry.revision;
     const next = await read.refetch();
@@ -177,7 +188,7 @@ export function FileView({
         </strong>
         <span>
           {buffer.base.entry.size.toLocaleString()} bytes ·{" "}
-          {media ?? buffer.base.presentation.replace("_", " ")}
+          {media ?? (buffer.base.presentation ?? "binary").replace("_", " ")}
         </span>
       </header>
       <div className={styles.path}>{path}</div>

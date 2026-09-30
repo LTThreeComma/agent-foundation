@@ -20,8 +20,12 @@ afterEach(() => {
 });
 const link = (path: string) =>
   `/threads/current?native=files&native_path=${encodeURIComponent(path)}`;
-function fixture(path = "/tmp/photo.png", size = 500_000) {
-  const file: Schema<"FileText"> = {
+function fixture(
+  path = "/tmp/photo.png",
+  size = 500_000,
+  media_type = "image/png",
+) {
+  const file: Schema<"FileInfo"> = {
     entry: {
       path,
       kind: "file",
@@ -31,11 +35,23 @@ function fixture(path = "/tmp/photo.png", size = 500_000) {
       modified_ns: 0,
     },
     resolved_path: path,
-    presentation: "binary",
-    text: null,
+    media_type,
   };
   const get = vi.fn(
-    async (_url: string, _options: { signal: AbortSignal }) => ({ data: file }),
+    async (
+      _url: string,
+      options: { signal: AbortSignal; params: { query: { path: string } } },
+    ) => ({
+      data:
+        options.params.query.path === path
+          ? file
+          : {
+              ...file,
+              entry: { ...file.entry, path: options.params.query.path },
+              resolved_path: options.params.query.path,
+              media_type: "text/plain",
+            },
+    }),
   );
   const fetch = vi.fn(
     async (_url: string, _options?: RequestInit) => new Response(null),
@@ -77,7 +93,7 @@ it("uses reviewed streaming access for inline images and the expanded viewer wit
   });
   fireEvent.load(image);
   expect(f.get).toHaveBeenCalledWith(
-    "/api/host/files/text",
+    "/api/host/files/info",
     expect.objectContaining({ params: { query: { path: "/tmp/photo.png" } } }),
   );
   expect(f.post).toHaveBeenCalledWith(
@@ -86,7 +102,7 @@ it("uses reviewed streaming access for inline images and the expanded viewer wit
       body: {
         path: "/tmp/photo.png",
         expected_revision: "reviewed",
-        purpose: "media",
+        disposition: "inline",
       },
     }),
   );
@@ -115,12 +131,66 @@ it("uses reviewed streaming access for inline images and the expanded viewer wit
   expect(f.revoke).not.toHaveBeenCalled();
 });
 
+it.each(["https://external.test/full", link("/tmp/notes.txt")])(
+  "renders a linked thumbnail without nested anchors and retains %s",
+  async (href) => {
+    const f = fixture();
+    const view = render(
+      f.tree(`[**_![Thumbnail](${link("/tmp/photo.png")})_**](${href})`),
+    );
+    await screen.findByAltText("photo.png");
+    const original = screen.getByRole("link", { name: "Thumbnail" });
+    expect(original.getAttribute("href")).toBe(href);
+    expect(view.container.querySelector("a a, a figure, p figure")).toBeNull();
+    expect(view.container.querySelectorAll("figure")).toHaveLength(1);
+    if (href.startsWith("https://")) {
+      expect(original.getAttribute("target")).toBe("_blank");
+      expect(original.getAttribute("rel")).toBe("noopener noreferrer");
+    } else {
+      fireEvent.click(original);
+      expect(f.open).toHaveBeenCalledWith("/tmp/notes.txt");
+    }
+  },
+);
+
+it("previews extensionless file links based on MIME without reading text", async () => {
+  const f = fixture("/tmp/latest", 1234, "image/avif");
+  render(f.tree());
+  await screen.findByAltText("latest");
+  expect(f.get).toHaveBeenCalledTimes(1);
+  expect(f.get).toHaveBeenCalledWith("/api/host/files/info", expect.anything());
+  expect(f.post).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  "application/octet-stream",
+  "image/svg+xml",
+  "text/html",
+  "application/pdf",
+])(
+  "keeps unrecognized %s files as original links without inline content requests",
+  async (media_type) => {
+    const f = fixture("/tmp/unknown", 1234, media_type);
+    const view = render(f.tree());
+    await waitFor(() =>
+      expect(view.container.querySelector("figure")).toBeNull(),
+    );
+    expect(screen.getByRole("link", { name: "Original" })).toBeTruthy();
+    expect(f.post).not.toHaveBeenCalled();
+    expect(f.fetch).not.toHaveBeenCalled();
+  },
+);
+
 it.each(["voice.wav", "clip.mp4"])(
   "renders %s with playback controls and an explicit decode fallback",
   async (name) => {
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
     vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
-    const f = fixture(`/tmp/${name}`, 15_047_567);
+    const f = fixture(
+      `/tmp/${name}`,
+      15_047_567,
+      name.endsWith("wav") ? "audio/x-wav" : "video/mp4",
+    );
     const view = render(f.tree());
     const player = await screen.findByLabelText(
       `${name.endsWith("wav") ? "Audio" : "Video"} preview: ${name}`,
@@ -134,7 +204,7 @@ it.each(["voice.wav", "clip.mp4"])(
         body: {
           path: `/tmp/${name}`,
           expected_revision: "reviewed",
-          purpose: "media",
+          disposition: "inline",
         },
       }),
     );
@@ -166,7 +236,7 @@ it("keeps stale-revision errors visible and retries metadata before fetching aga
 it("reveals a native player's revision conflict and refreshes metadata before retrying", async () => {
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
   vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
-  const f = fixture("/tmp/clip.mp4", 15_047_567);
+  const f = fixture("/tmp/clip.mp4", 15_047_567, "video/mp4");
   f.fetch.mockRejectedValueOnce(
     new ApiError("File content changed; refresh before playing.", 409),
   );
@@ -188,7 +258,7 @@ it("reveals a native player's revision conflict and refreshes metadata before re
       body: {
         path: "/tmp/clip.mp4",
         expected_revision: "new",
-        purpose: "media",
+        disposition: "inline",
       },
     }),
   );
@@ -217,7 +287,7 @@ it("defers media reads until near the viewport and aborts an outstanding read on
       disconnect = disconnect;
     },
   );
-  let resolve!: (value: { data: Schema<"FileText"> }) => void;
+  let resolve!: (value: { data: Schema<"FileInfo"> }) => void;
   f.get.mockImplementationOnce(
     () =>
       new Promise((done) => {
