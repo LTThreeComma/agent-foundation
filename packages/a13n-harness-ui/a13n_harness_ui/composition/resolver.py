@@ -631,7 +631,7 @@ class AgentCompositionResolver:
                     model=model,
                 )
             )
-        for default in ("file_context", "working_state", "user_interaction", "codeact"):
+        for default in ("file_context", "working_state", "self_healing", "user_interaction", "codeact"):
             # An invalid explicit selection is skipped, never replaced with broader defaults.
             if default not in disabled and not any(item.capability == default for item in agent.capabilities):
                 recipes.append(

@@ -35,6 +35,7 @@ from a13n_harness.environment import (
     discover_environment_run_extension_factory_references,
 )
 from a13n_harness.errors import DefinitionError
+from a13n_harness.models import SelfHealingModelCapability
 from a13n_harness.plugin_factories import (
     HarnessPluginFactory,
     HarnessPluginFactoryCatalog,
@@ -73,6 +74,7 @@ _BUILTIN_CAPABILITIES: dict[str, type[AbstractCapability[Any]]] = {
     "web": WebCapability,
     "native_image_generation": NativeImageGenerationCapability,
     "working_state": WorkingStateCapability,
+    "self_healing": SelfHealingModelCapability,
     "user_interaction": UserInteractionCapability,
     **{
         name: item
@@ -467,6 +469,12 @@ def _construct_capability(
     *,
     path_layout: EnvironmentPathLayout | None,
 ) -> AbstractCapability[Any]:
+    if capability_type is SelfHealingModelCapability:
+        if not configuration:
+            return SelfHealingModelCapability()
+        if configuration == {"rules": []}:
+            return SelfHealingModelCapability(rules=())
+        raise ValueError("Self-healing configuration supports only default rules or an empty rule set")
     if capability_type is CodeActCapability:
         arguments: dict[str, Any] = dict(configuration)
         return CodeActCapability(CodeActConfig(**arguments))

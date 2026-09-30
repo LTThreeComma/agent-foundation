@@ -513,6 +513,7 @@ async def test_reconstruction_builds_fresh_graph_and_keeps_root_capability_root_
     assert tuple(reconstructed.executable.subagents) == ("explorer", "agent-reviewer")
     assert reconstructed.executable.definition.agent.model.startswith("a13n-harness-ui:model-")
     assert "a13n.dynamic-environment" in reconstructed.definition_capability_ids
+    assert "a13n.model.self-healing" in reconstructed.definition_capability_ids
     assert reconstructed.executable.definition.model_recovery.enabled
     assert reconstructed.executable.definition.model_recovery.max_attempts == 5
     from a13n_harness.recovery import DEFAULT_RECOVERY_PROMPT
@@ -526,6 +527,127 @@ async def test_reconstruction_builds_fresh_graph_and_keeps_root_capability_root_
     for child in reconstructed.executable.subagents.values():
         assert child.definition.definition_id != reconstructed.executable.definition.definition_id
         assert child.definition.model_recovery == reconstructed.executable.definition.model_recovery
+        assert sum(item.id == "a13n.model.self-healing" for item in child.definition.capabilities) == 1
+
+
+@pytest.mark.parametrize(
+    ("status_code", "has_image", "disabled", "expected_calls", "expected_status"),
+    [
+        (413, True, False, 2, "completed"),
+        (401, True, False, 1, "failed"),
+        (413, False, False, 1, "failed"),
+        (413, True, True, 1, "failed"),
+    ],
+)
+async def test_default_self_healing_recovers_an_oversized_image_continuation(
+    tmp_path: Path,
+    status_code: int,
+    has_image: bool,
+    disabled: bool,
+    expected_calls: int,
+    expected_status: str,
+) -> None:
+    from collections.abc import AsyncIterator
+
+    from a13n_harness import HarnessState, RunBindings
+    from a13n_harness_ui.configuration.models import CapabilitySelection
+    from pydantic_ai.exceptions import ModelHTTPError
+    from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, UserPromptPart
+    from pydantic_ai.models import ModelResolutionContext
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    source = await load_harness_ui_configuration(_write_source(tmp_path))
+    agent = source.agents["agent-assistant"]
+    explicit = (CapabilitySelection(capability="self_healing", configuration={"rules": []}),) if disabled else ()
+    agent = agent.model_copy(update={"capabilities": explicit, "subagents": ()})
+    source = source.model_copy(update={"agents": {**source.agents, agent.id: agent}})
+    selection = replace(_selection(), harness_plugin_ids=(), mcp_server_ids=())
+    composition = AgentCompositionResolver(_catalog()).resolve_run(source, selection)
+    assert sum(item.capability == "self_healing" for item in composition.root.capabilities) == 1
+    rebuilt = AgentReconstructor(_catalog()).reconstruct(composition, subagent_operator=None)
+    image = BinaryContent(data=b"original-image", media_type="image/png")
+    previous = HarnessState.new(
+        message_history=[
+            ModelRequest(parts=[UserPromptPart(content=["Inspect this image", image] if has_image else "Continue")])
+        ]
+    )
+    calls = 0
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        nonlocal calls
+        del info
+        calls += 1
+        if calls == 1:
+            body = "Request Entity Too Large" if status_code == 413 else "Authentication required"
+            raise ModelHTTPError(status_code=status_code, model_name="gateway", body=body)
+        content = [
+            item
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, UserPromptPart)
+            for item in (part.content if isinstance(part.content, list) else [part.content])
+        ]
+        assert not any(isinstance(item, BinaryContent) for item in content)
+        assert any(isinstance(item, str) and "smaller preview" in item for item in content)
+        yield "recovered"
+
+    model = FunctionModel(stream_function=stream)
+
+    async def resolve(context: ModelResolutionContext, model_id: str) -> FunctionModel:
+        del context, model_id
+        return model
+
+    result = await rebuilt.executable.run(
+        "Continue",
+        bindings=RunBindings.embedded(model_resolver=resolve),
+        previous_state=previous,
+    )
+    assert result.status == expected_status
+    assert calls == expected_calls
+    assert image.data == b"original-image"
+    if expected_status == "completed":
+        assert result.output_or_raise() == "recovered"
+
+
+async def test_legacy_composition_does_not_gain_self_healing_during_reconstruction(tmp_path: Path) -> None:
+    source = await load_harness_ui_configuration(_write_source(tmp_path))
+    composition = AgentCompositionResolver(_catalog()).resolve_run(source, _selection())
+    payload = composition.model_dump(mode="json")
+
+    def remove_default(node: dict[str, Any]) -> None:
+        node["capabilities"] = [item for item in node["capabilities"] if item["capability"] != "self_healing"]
+        for child in node["children"]:
+            remove_default(child["definition"])
+
+    remove_default(payload["root"])
+    restored = type(composition).model_validate(payload)
+    rebuilt = AgentReconstructor(_catalog()).reconstruct(restored, subagent_operator=_UnusedOperator())
+    assert "a13n.model.self-healing" not in rebuilt.definition_capability_ids
+    assert all(
+        not any(item.id == "a13n.model.self-healing" for item in child.definition.capabilities)
+        for child in rebuilt.executable.subagents.values()
+    )
+
+
+@pytest.mark.parametrize("configuration", [{"rules": [{}]}, {"rules": False}, {"unknown": True}])
+async def test_invalid_explicit_self_healing_is_warned_without_default_fallback(
+    tmp_path: Path,
+    configuration: dict[str, JsonValue],
+) -> None:
+    from a13n_harness_ui.configuration.models import CapabilitySelection
+
+    source = await load_harness_ui_configuration(_write_source(tmp_path))
+    agent = source.agents["agent-assistant"]
+    selections = (*agent.capabilities, CapabilitySelection(capability="self_healing", configuration=configuration))
+    agent = agent.model_copy(update={"capabilities": selections, "subagents": ()})
+    source = source.model_copy(update={"agents": {**source.agents, agent.id: agent}})
+    resolver = AgentCompositionResolver(_catalog())
+    warnings: list[str] = []
+    resolver.validate_generation(source, warnings=warnings)
+    assert any("self_healing" in warning and "capability_configuration_invalid" in warning for warning in warnings)
+    composition = resolver.resolve_run(source, _selection())
+    assert not any(item.capability == "self_healing" for item in composition.root.capabilities)
 
 
 @pytest.mark.parametrize("profile", ["native", "sandbox", "custom"])

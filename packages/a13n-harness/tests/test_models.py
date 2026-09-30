@@ -733,6 +733,8 @@ async def test_self_healing_replaces_inline_images_after_oversized_payload_rejec
     assert isinstance(tool_result, ToolReturnPart)
     assert isinstance(tool_result.content[0], str)
     assert "image was removed" in tool_result.content[0]
+    assert "original file is unchanged" in tool_result.content[0]
+    assert "smaller preview" in tool_result.content[0]
 
 
 async def test_self_healing_preserves_an_explicit_empty_rule_set() -> None:
