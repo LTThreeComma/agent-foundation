@@ -102,10 +102,15 @@ k8s-check: ## Test the chart and local Kubernetes launcher without building imag
 k8s-smoke: ## Check the running local kind deployment: Console, administrator sign-in and credential storage
 	@python3 scripts/deploy_smoke.py kind
 
+.PHONY: compose-up
+compose-up: ## Start the single-host Compose stack and print the Console URL
+	@docker compose -f deploy/docker/compose/a13n-service.yaml up -d --wait
+	@address=$$(docker compose -f deploy/docker/compose/a13n-service.yaml port service 8000) && printf 'Console: http://%s\n' "$$address"
+
 .PHONY: compose-smoke
 compose-smoke: ## Exercise single-host and quickstart Compose startup and persistence, then remove their disposable stacks
-	@python3 scripts/deploy_smoke.py compose
-	@python3 scripts/deploy_smoke.py quickstart
+	@A13N_SERVICE_IMAGE="$(A13N_SERVICE_IMAGE)" python3 scripts/deploy_smoke.py compose
+	@A13N_SERVICE_IMAGE="$(A13N_SERVICE_IMAGE)" python3 scripts/deploy_smoke.py quickstart
 
 .PHONY: dev
 dev: ## Prepare and start this checkout's scripted model, Service and Console in the background (TRACES=auto|langfuse|none)

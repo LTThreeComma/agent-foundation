@@ -1,5 +1,8 @@
 """The deployment smoke run always removes its disposable stack and never passes credentials as arguments."""
 
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -9,6 +12,35 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import deploy_smoke
+
+
+@pytest.mark.parametrize("image_source", ["default", "environment", "make"])
+def test_compose_smoke_uses_the_build_image_for_both_stacks(tmp_path, monkeypatch, image_source) -> None:
+    image = "a13n-service:local" if image_source == "default" else "a13n-service:smoke-test"
+    python = tmp_path / "python3"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "print(json.dumps([sys.argv[1:], os.environ.get('A13N_SERVICE_IMAGE')]))\n"
+    )
+    python.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    for name in ("MAKEFLAGS", "MFLAGS", "MAKEFILES", "A13N_SERVICE_IMAGE"):
+        monkeypatch.delenv(name, raising=False)
+    if image_source == "environment":
+        monkeypatch.setenv("A13N_SERVICE_IMAGE", image)
+    arguments = [f"A13N_SERVICE_IMAGE={image}"] if image_source == "make" else []
+    result = subprocess.run(
+        ["make", "--no-print-directory", "compose-smoke", *arguments],
+        cwd=deploy_smoke.ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    )
+    assert [json.loads(line) for line in result.stdout.splitlines()] == [
+        [["scripts/deploy_smoke.py", stack], image] for stack in ("compose", "quickstart")
+    ]
 
 
 @pytest.mark.parametrize("failing", [None, "restarted", "defaults_changed"])
@@ -29,7 +61,12 @@ def test_compose_smoke_checks_both_starts_and_always_removes_the_stack(monkeypat
             "id": "envt_recreated" if failing == "defaults_changed" and not first_run else "envt_linux",
             "provider_id": provider["id"],
             "created_by_id": None,
-            "config": {"recipe": {"image": "a13n-docker-environment:local", "pull_policy": "never"}},
+            "config": {
+                "recipe": {
+                    "image": "ghcr.io/converge-ai-labs/a13n-docker-environment:dev",
+                    "pull_policy": "if_missing",
+                }
+            },
         }
         browser = Mock(spec=deploy_smoke.Browser)
         browser.expect.side_effect = [{"items": [provider]}, {"items": [template]}]
