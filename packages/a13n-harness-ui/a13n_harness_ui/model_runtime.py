@@ -31,6 +31,7 @@ from a13n_harness_ui.configuration import (
     GrokSubscriptionAuthentication,
 )
 from a13n_harness_ui.model_accounts.api_keys import ApiKeyStore
+from a13n_harness_ui.model_images import ImagePreviewModel
 
 if TYPE_CHECKING:
     from pydantic_ai.providers.openai_codex import OpenAICodexCredentialSource
@@ -94,6 +95,9 @@ class HarnessUiModelResolver:
 
     async def resolve(self, model_id: str, *, thread_id: str) -> Model:
         """Construct a captured Model for either primary or auxiliary inference."""
+        return ImagePreviewModel(await self._authenticated_model(model_id, thread_id=thread_id))
+
+    async def _authenticated_model(self, model_id: str, *, thread_id: str) -> Model:
         recipe = self._recipes.get(model_id)
         if recipe is None:
             raise ModelResolutionError(

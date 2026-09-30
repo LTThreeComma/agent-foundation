@@ -11,12 +11,14 @@ from a13n_harness.model_affinity import derive_model_affinity_id
 from a13n_harness.providers.model.oauth import GrokCredentials
 from a13n_harness_ui.composition.models import ResolvedModelRecipe
 from a13n_harness_ui.configuration import CodexSubscriptionAuthentication, GrokSubscriptionAuthentication
+from a13n_harness_ui.model_images import ImagePreviewModel
 from a13n_harness_ui.model_runtime import (
     CodexSubscriptionSource,
     GrokSubscriptionSource,
     HarnessUiModelResolver,
 )
 from pydantic_ai.models import ModelResolutionContext
+from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai_codex import OpenAICodexCredentials
 
 pytestmark = pytest.mark.anyio
@@ -63,6 +65,8 @@ async def test_codex_subscription_resolution_uses_official_provider_and_affinity
         subscription_sources={"codex_subscription": CodexSubscriptionSource(source=_CodexSource())},
     )
     resolved = await resolver(_CONTEXT, recipe.model_id)
+    assert isinstance(resolved, ImagePreviewModel)
+    resolved = resolved.wrapped
     assert isinstance(resolved, CodexRequestModel)
     assert isinstance(resolved.wrapped, OpenAIResponsesModel)
     assert isinstance(resolved.provider, OpenAICodexProvider)
@@ -78,7 +82,7 @@ async def test_grok_subscription_resolution_delegates_to_harness_builder(
 ) -> None:
     recipe = _recipe(GrokSubscriptionAuthentication(kind="grok_subscription"))
     source = _GrokSource()
-    built = object()
+    built = TestModel()
     calls: list[dict[str, Any]] = []
 
     def build(model_name: str, **kwargs: Any) -> object:
@@ -93,7 +97,8 @@ async def test_grok_subscription_resolution_delegates_to_harness_builder(
 
     resolved = await resolver(_CONTEXT, recipe.model_id)
 
-    assert resolved is built
+    assert isinstance(resolved, ImagePreviewModel)
+    assert resolved.wrapped is built
     assert calls == [
         {
             "model_name": "model-name",
@@ -122,7 +127,7 @@ async def test_subscription_resolution_requires_compatible_host_wiring() -> None
 async def test_fresh_resolver_keeps_sources_without_touching_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     recipe = _recipe(CodexSubscriptionAuthentication(kind="codex_subscription"))
     source = _CodexSource()
-    expected = object()
+    expected = TestModel()
 
     monkeypatch.setattr("a13n_harness.models.codex.CodexRequestModel", lambda *args, **kwargs: expected)
     resolver = HarnessUiModelResolver(
@@ -132,7 +137,8 @@ async def test_fresh_resolver_keeps_sources_without_touching_credentials(monkeyp
 
     resolved = await resolver.fresh()(_CONTEXT, recipe.model_id)
 
-    assert resolved is expected
+    assert isinstance(resolved, ImagePreviewModel)
+    assert resolved.wrapped is expected
 
 
 @pytest.mark.parametrize("header", [None, "x-session-id", "x-custom-affinity"])
@@ -160,6 +166,8 @@ async def test_api_recipe_affinity_uses_current_resolution_thread_and_immutable_
     for thread_id in ("thread-root", "thread-child", "thread-fork", "thread-root"):
         context = ModelResolutionContext(agent=Mock(), deps=Mock(spec=AgentContext, thread_id=thread_id))
         model = await resolver.fresh()(context, "primary")
+        assert isinstance(model, ImagePreviewModel)
+        model = model.wrapped
         if header:
             assert isinstance(model, RequestHeadersModel)
             assert model.common_headers == {header: derive_model_affinity_id(thread_id)}
@@ -208,7 +216,8 @@ async def test_jev_is_resolved_as_a_normal_api_key_model(monkeypatch, base_url):
     )
     resolver = HarnessUiModelResolver({recipe.model_id: recipe})
     model = await resolver(_CONTEXT, recipe.model_id)
-    assert isinstance(model, TypeSafeModel)
+    assert isinstance(model, ImagePreviewModel)
+    assert isinstance(model.wrapped, TypeSafeModel)
     async with model:
         assert model.model_name == "jev-latest"
         assert model.profile["supports_text_output"] is False

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import pytest
 from a13n_harness import HarnessState
+from a13n_harness.models import SelfHealingModel
 from a13n_harness_ui.display_history import (
     DisplayHistory,
     DisplayHistoryCollector,
     saved_display_history,
     with_display_history,
 )
-from a13n_harness_ui.thread_projection import _transcript_turns
+from a13n_harness_ui.thread_projection import _message_entry, _transcript_turns
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
+    BinaryContent,
     ModelRequest,
     ModelResponse,
     TextContent,
@@ -19,10 +22,46 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.models import ModelRequestParameters
+from pydantic_ai.models.function import FunctionModel
 
 
 def input_message(text: str, source: str) -> ModelRequest:
     return ModelRequest(parts=[UserPromptPart([TextContent(text, metadata={"source_id": source})])])
+
+
+@pytest.mark.anyio
+async def test_image_recovery_instruction_is_not_a_user_submission():
+    attempts = 0
+
+    def provider(messages, info):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ModelHTTPError(status_code=413, model_name="test", body="payload too large")
+        return ModelResponse(parts=[TextPart("Recovered")])
+
+    history = [
+        input_message("Inspect the image", "input-one"),
+        ModelResponse(parts=[ToolCallPart("view", {}, tool_call_id="view-one")]),
+        ModelRequest(
+            parts=[
+                ToolReturnPart("view", "Image attached", tool_call_id="view-one"),
+                UserPromptPart([BinaryContent(data=b"image", media_type="image/png")]),
+            ]
+        ),
+    ]
+    response = await SelfHealingModel(FunctionModel(provider)).request(history, None, ModelRequestParameters())
+    history.append(response)
+    display = DisplayHistoryCollector([]).capture(history, completed=True)
+    assert len(_transcript_turns(display.messages, display.completed_responses)) == 1
+    projected = _message_entry(2, display.messages[2])
+    reminder = next(part for part in projected.parts if part.kind == "user")
+    assert reminder.metadata.display is False
+    assert reminder.metadata.source_id == "a13n.model.self-healing"
+    # An actual user quoting the same reminder must remain a visible submission.
+    history.append(input_message(reminder.text, "input-two"))
+    assert len(_transcript_turns(tuple(history))) == 2
 
 
 def test_app_presentations_are_turn_boundaries_independent_of_execution_pages():

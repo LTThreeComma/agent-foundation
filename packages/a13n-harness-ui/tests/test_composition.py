@@ -552,7 +552,7 @@ async def test_default_self_healing_recovers_an_oversized_image_continuation(
     from a13n_harness import HarnessState, RunBindings
     from a13n_harness_ui.configuration.models import CapabilitySelection
     from pydantic_ai.exceptions import ModelHTTPError
-    from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, UserPromptPart
+    from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, TextContent, UserPromptPart
     from pydantic_ai.models import ModelResolutionContext
     from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -589,7 +589,7 @@ async def test_default_self_healing_recovers_an_oversized_image_continuation(
             for item in (part.content if isinstance(part.content, list) else [part.content])
         ]
         assert not any(isinstance(item, BinaryContent) for item in content)
-        assert any(isinstance(item, str) and "smaller preview" in item for item in content)
+        assert any(isinstance(item, TextContent) and "smaller preview" in item.content for item in content)
         yield "recovered"
 
     model = FunctionModel(stream_function=stream)

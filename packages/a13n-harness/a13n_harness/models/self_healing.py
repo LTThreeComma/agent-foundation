@@ -19,6 +19,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     NativeToolReturnPart,
+    TextContent,
     TextPart,
     ThinkingPart,
     ToolReturnPart,
@@ -285,9 +286,20 @@ def _drop_inline_images(history: list[ModelMessage]) -> int:
             else:
                 continue
             content = media_part.content
+            reminder = (
+                TextContent(
+                    content=_OVERSIZED_IMAGE_REMINDER,
+                    metadata={"display": False, "source_id": "a13n.model.self-healing"},
+                )
+                if isinstance(media_part, UserPromptPart)
+                else _OVERSIZED_IMAGE_REMINDER
+            )
             if isinstance(content, BinaryContent):
                 if content.media_type.startswith("image/"):
-                    media_part.content = _OVERSIZED_IMAGE_REMINDER
+                    if isinstance(media_part, UserPromptPart):
+                        media_part.content = [reminder]
+                    else:
+                        media_part.content = _OVERSIZED_IMAGE_REMINDER
                     removed += 1
                 continue
             if isinstance(content, str) or not isinstance(content, Sequence):
@@ -296,7 +308,7 @@ def _drop_inline_images(history: list[ModelMessage]) -> int:
             changed = False
             for index, item in enumerate(items):
                 if isinstance(item, BinaryContent) and item.media_type.startswith("image/"):
-                    items[index] = _OVERSIZED_IMAGE_REMINDER
+                    items[index] = reminder
                     removed += 1
                     changed = True
             if changed:

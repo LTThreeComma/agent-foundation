@@ -362,6 +362,8 @@ Default rules are narrow tested provider repairs:
 
 The wrapper does not retry generic transport, rate-limit, tool, output-validation, or cancellation failures. Provider/client `RetryConfig` owns transport retry.
 
+Oversized-image reminders inserted into native user-prompt parts are `TextContent` with `display: false` and source ID `a13n.model.self-healing`. They remain model-visible recovery instructions, not human-authored submissions. Ordinary user text in the same prompt is retained. Tool-return reminders remain tool content. Original image files are not changed by this repair.
+
 Custom `ModelRecoveryRule` values contain one exact matcher and one history repair function. Their safety is the caller's responsibility; the wrapper still permits at most one replay per request. Selecting the Capability is recommended for production Agents that need these known provider-history repairs; direct `SelfHealingModel` construction remains available for callers that already own one concrete Model.
 
 ## ModelAttempt Recovery
